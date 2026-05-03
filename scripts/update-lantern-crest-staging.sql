@@ -1,0 +1,9 @@
+-- Update Lantern Crest staging config in D1 with the latest content from
+-- config/lantern-crest-staging.json. Run after editing the JSON file:
+--   npx wrangler d1 execute CONFIG_DB --env staging --remote \
+--     --file=scripts/update-lantern-crest-staging.sql
+
+UPDATE clients
+SET config_json = '{"client_id":"lantern-crest","proxy_domain":"edge-seo-platform-staging.localblitzio.workers.dev","source_domain":"lanterncrestseniorlivingsantee.com","authorization":{"attested_by_email":"simon@localblitz.io","attested_at":"2026-05-03T04:45:00Z","attested_ip":"0.0.0.0","scope":"full_site","expires_at":null},"status":"active","routing":[{"match":"^/.*","type":"proxy","origin":"https://lanterncrestseniorlivingsantee.com","origin_auth":{"type":"none"}}],"redirects":{"static":[],"patterns":[],"conditional":[]},"canonicals":[],"schema_injections":[],"link_rewrites":[],"element_removals":[],"content_injections":[{"match":"^/.*","selector":"body","position":"prepend","html":"<div style=\"background:linear-gradient(135deg,#2563eb,#7c3aed);color:#fff;padding:14px 24px;text-align:center;font-family:system-ui,-apple-system,BlinkMacSystemFont,sans-serif;font-weight:600;font-size:14px;letter-spacing:0.02em;box-shadow:0 2px 12px rgba(0,0,0,0.18);position:relative;z-index:99999\">✨ Served by <strong>Edge SEO Platform</strong> — this banner was injected at the edge by a content_injections rule. The page below is proxied unchanged from lanterncrestseniorlivingsantee.com.</div>"}],"meta_rewrites":[],"indexation":[],"caching":[],"forms":[],"schema_version":1}',
+    updated_at = CURRENT_TIMESTAMP
+WHERE client_id = 'lantern-crest';
