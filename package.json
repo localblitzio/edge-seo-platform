@@ -26,6 +26,7 @@
     "demo:reset": "rimraf .wrangler/state && node scripts/seed-demo.mjs",
     "admin": "node admin-ui/server.mjs",
     "config:validate": "tsx scripts/validate-config.ts",
+    "seed-client": "tsx scripts/seed-client.ts",
     "load-test": "node scripts/load-test.mjs",
     "smoke": "node scripts/post-deploy-smoke.mjs"
   },

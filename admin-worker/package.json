@@ -1,0 +1,10 @@
+{
+  "name": "edge-seo-admin-worker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Hosted admin dashboard for the Edge SEO Platform — reads the same D1 + KV bindings as the main worker, surfaces a web UI for browsing live state. Phase 2 admin UI per spec §7.12.",
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy --config wrangler.toml"
+  }
+}

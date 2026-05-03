@@ -45,7 +45,18 @@
       "Bash(npx tsx *)",
       "PowerShell(Resolve-DnsName -Type NS lanterncrestseniorlivingsantee.com -ErrorAction Continue)",
       "Bash(git init *)",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "Bash(git -c core.autocrlf=false commit -q -m 'Initial commit — Edge SEO Platform v0.1.0 \\(Phase 1 release candidate\\) *)",
+      "Bash(git remote *)",
+      "Bash(git branch *)",
+      "Bash(git push *)",
+      "Bash(git commit *)",
+      "Bash(curl -sI https://edge-seo-platform-staging.localblitzio.workers.dev/)",
+      "Bash(curl -s https://edge-seo-platform-staging.localblitzio.workers.dev/)",
+      "Bash(grep -oE 'Served by.{0,40}')",
+      "Bash(wrangler --version)",
+      "Bash(python -c \"import sys,json; d=json.loads\\(sys.stdin.read\\(\\)\\); print\\('content_injections count:', len\\(d.get\\('content_injections',[]\\)\\)\\)\")",
+      "Bash(python -c \"import sys,json; d=json.loads\\(sys.stdin.read\\(\\)\\); print\\(json.dumps\\(d.get\\('content_injections',[]\\), indent=2\\)\\)\")"
     ]
   }
 }

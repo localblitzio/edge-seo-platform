@@ -19,21 +19,35 @@
     }
   ],
   "redirects": { "static": [], "patterns": [], "conditional": [] },
-  "canonicals": [],
+  "canonicals": [
+    {
+      "match": "^/.*",
+      "strategy": { "type": "origin" },
+      "sync_og_url": true,
+      "sync_twitter_url": true,
+      "sync_jsonld_url": true
+    }
+  ],
   "schema_injections": [],
   "link_rewrites": [],
   "element_removals": [],
-  "content_injections": [
+  "content_injections": [],
+  "meta_rewrites": [],
+  "indexation": [
     {
       "match": "^/.*",
-      "selector": "body",
-      "position": "prepend",
-      "html": "<div style=\"background:linear-gradient(135deg,#2563eb,#7c3aed);color:#fff;padding:14px 24px;text-align:center;font-family:system-ui,-apple-system,BlinkMacSystemFont,sans-serif;font-weight:600;font-size:14px;letter-spacing:0.02em;box-shadow:0 2px 12px rgba(0,0,0,0.18);position:relative;z-index:99999\">✨ Served by <strong>Edge SEO Platform</strong> — this banner was injected at the edge by a content_injections rule. The page below is proxied unchanged from lanterncrestseniorlivingsantee.com.</div>"
+      "robots": "noindex,follow",
+      "additional_directives": []
     }
   ],
-  "meta_rewrites": [],
-  "indexation": [],
-  "caching": [],
+  "caching": [
+    {
+      "match": "^/.*",
+      "ttl_seconds": 600,
+      "cache_key_includes_cookies": [],
+      "bypass_on_cookie": []
+    }
+  ],
   "forms": [],
   "schema_version": 1
 }

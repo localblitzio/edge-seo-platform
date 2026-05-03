@@ -1,0 +1,21 @@
+name = "edge-seo-admin"
+main = "src/index.ts"
+compatibility_date = "2026-04-01"
+workers_dev = true
+
+# The admin worker reads (and Phase 2: writes) the SAME bindings as the
+# main edge worker. We re-declare them here pointing at the same Cloudflare
+# resource IDs.
+
+[[kv_namespaces]]
+binding = "CONFIG_KV"
+id = "dc95f90063cd4493bb3ea462759f4002"
+
+[[d1_databases]]
+binding = "CONFIG_DB"
+database_name = "edge-seo-platform-staging"
+database_id = "a6c1786a-4999-4ac5-ad60-7faafec61283"
+
+# HTTP basic auth credentials live as Worker secrets, set via:
+#   npx wrangler secret put ADMIN_USERNAME --config=admin-worker/wrangler.toml
+#   npx wrangler secret put ADMIN_PASSWORD --config=admin-worker/wrangler.toml
