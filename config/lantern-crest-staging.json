@@ -23,7 +23,14 @@
   "schema_injections": [],
   "link_rewrites": [],
   "element_removals": [],
-  "content_injections": [],
+  "content_injections": [
+    {
+      "match": "^/.*",
+      "selector": "body",
+      "position": "prepend",
+      "html": "<div style=\"background:linear-gradient(135deg,#2563eb,#7c3aed);color:#fff;padding:14px 24px;text-align:center;font-family:system-ui,-apple-system,BlinkMacSystemFont,sans-serif;font-weight:600;font-size:14px;letter-spacing:0.02em;box-shadow:0 2px 12px rgba(0,0,0,0.18);position:relative;z-index:99999\">✨ Served by <strong>Edge SEO Platform</strong> — this banner was injected at the edge by a content_injections rule. The page below is proxied unchanged from lanterncrestseniorlivingsantee.com.</div>"
+    }
+  ],
   "meta_rewrites": [],
   "indexation": [],
   "caching": [],
