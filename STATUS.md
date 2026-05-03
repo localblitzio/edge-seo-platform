@@ -1,8 +1,13 @@
 # Edge SEO Platform — status
 
 **Last update:** 2026-05-03
-**Phase:** 1 (foundation) shipped, with Phase-2 admin MVP overlap.
+**Phase:** 1 (foundation) shipped + Phase-2 read-only admin MVP shipped.
 **Pilot client:** Lantern Crest Senior Living — live in staging.
+
+> **🔄 In-progress work on resume:** Phase 2 admin **editor** (write surface
+> for the dashboard) was scoped and started but paused due to context-window
+> limits. Full plan + pseudocode in [HANDOFF.md](HANDOFF.md) — read that first
+> when resuming. Working tree is clean; nothing half-baked is on disk.
 
 This file is your at-a-glance "where are we" reminder. Everything in
 [CHANGELOG.md](CHANGELOG.md) is the long-form release notes; this is the
