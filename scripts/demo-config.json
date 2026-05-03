@@ -1,0 +1,139 @@
+{
+  "client_id": "demo",
+  "proxy_domain": "localhost:8787",
+  "source_domain": "example.com",
+  "authorization": {
+    "attested_by_email": "demo@example.com",
+    "attested_at": "2026-05-02T00:00:00Z",
+    "attested_ip": "127.0.0.1",
+    "scope": "full_site",
+    "expires_at": null
+  },
+  "status": "active",
+  "routing": [
+    { "match": "^/welcome$", "type": "custom_page", "custom_page_key": "" },
+    {
+      "match": "^/.*",
+      "type": "proxy",
+      "origin": "https://example.com",
+      "origin_auth": { "type": "none" }
+    }
+  ],
+  "redirects": {
+    "static": [
+      { "from": "/old", "to": "/new", "status": "301" },
+      { "from": "/gone", "to": "/", "status": "410" }
+    ],
+    "patterns": [{ "pattern": "^/posts/(\\d+)$", "replacement": "/posts/$1/", "status": "301" }],
+    "conditional": [
+      {
+        "match": "^/geo$",
+        "conditions": [{ "type": "geo_country", "in": ["US", "CA"] }],
+        "to": "/north-america",
+        "status": "302"
+      }
+    ]
+  },
+  "canonicals": [
+    {
+      "match": "^/welcome$",
+      "strategy": {
+        "type": "custom",
+        "url": "https://lanterncrest.example/canonical-target"
+      },
+      "sync_og_url": true,
+      "sync_twitter_url": true,
+      "sync_jsonld_url": true
+    }
+  ],
+  "schema_injections": [
+    {
+      "match": "^/welcome$",
+      "schema_type": "Article",
+      "position": "head_append",
+      "payload": {
+        "@context": "https://schema.org",
+        "@type": "Article",
+        "headline": "Edge SEO Platform — rich demo article",
+        "datePublished": "2026-05-02T00:00:00Z",
+        "author": { "@type": "Organization", "name": "Local Blitz Marketing" },
+        "publisher": {
+          "@type": "Organization",
+          "name": "Local Blitz",
+          "url": "https://localblitzmarketing.com"
+        }
+      }
+    },
+    {
+      "match": "^/welcome$",
+      "schema_type": "BreadcrumbList",
+      "position": "head_prepend",
+      "payload": {
+        "@context": "https://schema.org",
+        "@type": "BreadcrumbList",
+        "itemListElement": [
+          { "@type": "ListItem", "position": 1, "name": "Home", "item": "/" },
+          { "@type": "ListItem", "position": 2, "name": "Welcome" }
+        ]
+      }
+    },
+    {
+      "match": "^/welcome$",
+      "schema_type": "FAQPage",
+      "position": "head_append",
+      "payload": {
+        "@context": "https://schema.org",
+        "@type": "FAQPage",
+        "mainEntity": [
+          {
+            "@type": "Question",
+            "name": "Will an injected </script> tag escape the JSON-LD block?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "No — the injector escapes </script> to <\\/script> per spec §6.4 step 5."
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "link_rewrites": [
+    {
+      "match": "^/welcome$",
+      "match_pattern": "^https://example\\.com/(.+)$",
+      "replacement": "https://example.com/redirected/$1"
+    }
+  ],
+  "element_removals": [{ "match": "^/welcome$", "selector": ".demo-remove-me" }],
+  "content_injections": [
+    {
+      "match": "^/welcome$",
+      "selector": "h1",
+      "position": "before",
+      "html": "<div class=\"banner\" style=\"background:#dcfce7;color:#0a6e2c;padding:.65rem 1rem;border-radius:.5rem;font-size:.85em;font-weight:600;margin-bottom:1rem\">✨ Banner injected by content_injections (rule fires before &lt;h1&gt;)</div>"
+    }
+  ],
+  "meta_rewrites": [
+    {
+      "match": "^/welcome$",
+      "tag": "title",
+      "value": "Edge SEO Platform — rich demo (title rewritten by meta_rewrites)"
+    },
+    {
+      "match": "^/welcome$",
+      "tag": "description",
+      "value": "Description rewritten at the edge by meta_rewrites — origin had something else."
+    },
+    { "match": "^/welcome$", "tag": "og:title", "value": "OG title rewritten at the edge" }
+  ],
+  "indexation": [
+    {
+      "match": "^/welcome$",
+      "robots": "index,follow",
+      "additional_directives": ["max-image-preview:large", "max-snippet:-1"]
+    }
+  ],
+  "caching": [],
+  "forms": [],
+  "schema_version": 1
+}

@@ -1,0 +1,32 @@
+{
+  "client_id": "lantern-crest",
+  "proxy_domain": "edge-seo-platform-staging.localblitzio.workers.dev",
+  "source_domain": "lanterncrestseniorlivingsantee.com",
+  "authorization": {
+    "attested_by_email": "simon@localblitz.io",
+    "attested_at": "2026-05-03T04:45:00Z",
+    "attested_ip": "0.0.0.0",
+    "scope": "full_site",
+    "expires_at": null
+  },
+  "status": "active",
+  "routing": [
+    {
+      "match": "^/.*",
+      "type": "proxy",
+      "origin": "https://lanterncrestseniorlivingsantee.com",
+      "origin_auth": { "type": "none" }
+    }
+  ],
+  "redirects": { "static": [], "patterns": [], "conditional": [] },
+  "canonicals": [],
+  "schema_injections": [],
+  "link_rewrites": [],
+  "element_removals": [],
+  "content_injections": [],
+  "meta_rewrites": [],
+  "indexation": [],
+  "caching": [],
+  "forms": [],
+  "schema_version": 1
+}

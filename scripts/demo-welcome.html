@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>ORIGINAL — should be rewritten by meta_rewrites</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="description" content="ORIGINAL description — should be rewritten by meta_rewrites." />
+    <meta name="robots" content="ORIGINAL — should be replaced by indexation" />
+    <meta property="og:title" content="ORIGINAL og:title" />
+    <meta property="og:url" content="http://localhost:8787/welcome-ORIGINAL" />
+    <meta name="twitter:url" content="http://localhost:8787/welcome-ORIGINAL" />
+    <link rel="canonical" href="http://localhost:8787/welcome-ORIGINAL-canonical" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "WebPage",
+        "url": "http://localhost:8787/welcome-ORIGINAL-jsonld",
+        "@id": "http://localhost:8787/welcome-ORIGINAL-id",
+        "name": "Original WebPage entity",
+        "publisher": {
+          "@type": "Organization",
+          "url": "https://nested-publisher.example",
+          "name": "Nested Publisher (URL should NOT be rewritten — only top-level)"
+        }
+      }
+    </script>
+    <style>
+      body {
+        font: 16px/1.55 -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif;
+        max-width: 52rem;
+        margin: 3rem auto;
+        padding: 0 1.25rem;
+        color: #1a1a1a;
+      }
+      code {
+        background: #f4f4f5;
+        padding: 0.1rem 0.3rem;
+        border-radius: 0.25rem;
+        font-size: 0.9em;
+      }
+      .pill {
+        display: inline-block;
+        padding: 0.1rem 0.55rem;
+        border-radius: 9999px;
+        background: #eaf6ee;
+        color: #0a6e2c;
+        font-size: 0.78em;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+      }
+      ul {
+        padding-left: 1.25rem;
+      }
+      li {
+        margin: 0.35rem 0;
+      }
+      h1 {
+        margin-bottom: 0.25rem;
+      }
+      .sub {
+        color: #666;
+        font-size: 0.95em;
+      }
+      .demo-remove-me {
+        background: #fee2e2;
+        color: #b91c1c;
+        padding: 0.6rem 1rem;
+        border-radius: 0.5rem;
+        margin: 1rem 0;
+        font-weight: 600;
+      }
+      .key {
+        background: #fff7ed;
+        border-left: 3px solid #f59e0b;
+        padding: 0.5rem 0.85rem;
+        margin: 1rem 0;
+      }
+    </style>
+  </head>
+  <body>
+    <span class="pill">CUSTOM PAGE</span>
+    <h1>Edge SEO Platform — rich rewriter demo</h1>
+    <p class="sub">
+      This page is the M5 demo focal point: ten rewriter rules fire on this single response. Open
+      DevTools and view the page source to see what changed at the edge.
+    </p>
+
+    <div class="demo-remove-me">
+      ❌ I am a <code>.demo-remove-me</code> div. The element_removals rule should have stripped me
+      before you ever saw this. If you can read this, the rewriter didn't run.
+    </div>
+
+    <h2>What's happening on this page</h2>
+    <ol>
+      <li><strong>meta_rewrites</strong> — <code>&lt;title&gt;</code>, <code>&lt;meta name=description&gt;</code>, and <code>og:title</code> are all replaced server-side.</li>
+      <li><strong>canonical (custom strategy)</strong> — every existing <code>&lt;link rel=canonical&gt;</code> is stripped, and a new one pointing at <code>https://lanterncrest.example/canonical-target</code> is inserted.</li>
+      <li><strong>og:url / twitter:url sync</strong> — both are overwritten with the canonical URL.</li>
+      <li><strong>JSON-LD canonical sync</strong> — the existing <code>&lt;script type="application/ld+json"&gt;</code> has its top-level <code>url</code> and <code>@id</code> replaced with the canonical URL. The nested <code>publisher.url</code> is left alone (per §6.3 — only top-level).</li>
+      <li><strong>schema_injections × 3</strong> — <code>Article</code> + <code>FAQPage</code> appended, <code>BreadcrumbList</code> prepended into <code>&lt;head&gt;</code>, each tagged with a <code>data-edge-seo-rule</code> marker for idempotence.</li>
+      <li><strong>element_removals</strong> — that red <code>.demo-remove-me</code> div is gone.</li>
+      <li><strong>content_injections</strong> — a green banner is inserted <em>before</em> the H1 heading, also marked for idempotence.</li>
+      <li><strong>link_rewrites</strong> — every external <code>https://example.com/*</code> link in the list below is rewritten to <code>https://example.com/redirected/*</code>.</li>
+      <li><strong>indexation</strong> — the original <code>&lt;meta name=robots&gt;</code> is replaced with the spec'd directives.</li>
+    </ol>
+
+    <h2>Rewritten links</h2>
+    <p>These all point at <code>https://example.com/...</code>. Hover them — the link rewriter rewrites every match to <code>https://example.com/redirected/...</code>:</p>
+    <ul>
+      <li><a href="https://example.com/about">about page</a></li>
+      <li><a href="https://example.com/contact">contact page</a></li>
+      <li><a href="https://example.com/team">team page</a></li>
+      <li><a href="https://other.example/keep-me">other.example/keep-me (does NOT match — preserved)</a></li>
+    </ul>
+
+    <h2>Where to look</h2>
+    <p>View source on this page (right-click → View Page Source) to see:</p>
+    <ul>
+      <li>One <code>&lt;link rel="canonical" href="https://lanterncrest.example/canonical-target" data-edge-seo-rule="canonical"&gt;</code> in the head.</li>
+      <li>Three <code>&lt;script type="application/ld+json" data-edge-seo-rule="..."&gt;</code> blocks for the three injected schemas.</li>
+      <li>The original JSON-LD's top-level <code>url</code> updated, but <code>publisher.url</code> still pointing at <code>nested-publisher.example</code>.</li>
+      <li>The injected banner div above this content carrying <code>data-edge-seo-rule</code>.</li>
+    </ul>
+
+    <p class="sub">Other demo paths (proxied to <code>https://example.com</code>):
+      <a href="/">/</a> · <a href="/old">/old</a> · <a href="/gone">/gone</a> · <a href="/posts/42">/posts/42</a>
+    </p>
+  </body>
+</html>

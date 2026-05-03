@@ -1,0 +1,274 @@
+import { describe, expect, it } from "vitest";
+
+import { validLanternCrestConfig } from "../../tests/fixtures/configs/index.js";
+import { ConfigValidationError } from "../lib/errors.js";
+import { ClientConfig } from "./schema.js";
+import { assertConfigInvariants, checkRegexSafety } from "./validator.js";
+
+function parseFixture(mut: (cfg: Record<string, unknown>) => void = () => {}): ClientConfig {
+  const cfg = validLanternCrestConfig() as Record<string, unknown>;
+  mut(cfg);
+  return ClientConfig.parse(cfg);
+}
+
+describe("assertConfigInvariants — static redirects", () => {
+  it("passes the canonical valid fixture", () => {
+    const parsed = parseFixture();
+    expect(() => assertConfigInvariants(parsed)).not.toThrow();
+  });
+
+  it("rejects duplicate from on static redirects", () => {
+    const parsed = parseFixture((cfg) => {
+      (cfg.redirects as Record<string, unknown>).static = [
+        { from: "/old", to: "/new-1" },
+        { from: "/old", to: "/new-2" },
+      ];
+    });
+    expect(() => assertConfigInvariants(parsed)).toThrow(ConfigValidationError);
+  });
+
+  it("rejects more than 1000 inline static redirects", () => {
+    const parsed = parseFixture((cfg) => {
+      (cfg.redirects as Record<string, unknown>).static = Array.from({ length: 1001 }, (_, i) => ({
+        from: `/from-${i}`,
+        to: `/to-${i}`,
+      }));
+    });
+    expect(() => assertConfigInvariants(parsed)).toThrow(/inline cap/i);
+  });
+
+  it("accepts exactly 1000 inline static redirects", () => {
+    const parsed = parseFixture((cfg) => {
+      (cfg.redirects as Record<string, unknown>).static = Array.from({ length: 1000 }, (_, i) => ({
+        from: `/from-${i}`,
+        to: `/to-${i}`,
+      }));
+    });
+    expect(() => assertConfigInvariants(parsed)).not.toThrow();
+  });
+});
+
+describe("checkRegexSafety", () => {
+  it("returns null on a safe pattern", () => {
+    expect(checkRegexSafety("^/blog/.*$")).toBeNull();
+  });
+
+  it("rejects nested quantifiers like (a+)+", () => {
+    expect(checkRegexSafety("(a+)+$")).toMatch(/nested quantifier/i);
+  });
+
+  it("rejects (a*)*", () => {
+    expect(checkRegexSafety("(a*)*")).toMatch(/nested quantifier/i);
+  });
+
+  it("rejects (.+)+ wrapped against a path", () => {
+    expect(checkRegexSafety("^/(.+)+$")).toMatch(/nested quantifier/i);
+  });
+
+  it("rejects non-capturing nested quantifier (?:a+|b)+", () => {
+    expect(checkRegexSafety("(?:a+|b)+")).toMatch(/nested quantifier/i);
+  });
+
+  it("rejects patterns longer than 512 chars", () => {
+    expect(checkRegexSafety("a".repeat(513))).toMatch(/512-character limit/);
+  });
+
+  it("rejects an invalid regex", () => {
+    expect(checkRegexSafety("([)")).toMatch(/invalid regex/i);
+  });
+
+  it("accepts a 512-char pattern", () => {
+    expect(checkRegexSafety("a".repeat(512))).toBeNull();
+  });
+});
+
+describe("assertConfigInvariants — regex linter", () => {
+  it("rejects nested quantifier in routing[].match", () => {
+    const parsed = parseFixture((cfg) => {
+      (cfg.routing as Array<Record<string, unknown>>) = [
+        { match: "(a+)+$", type: "proxy", origin: "https://x.example" },
+      ];
+    });
+    expect(() => assertConfigInvariants(parsed)).toThrow(/routing\[0\]\.match/);
+  });
+
+  it("rejects nested quantifier in redirects.patterns[].pattern", () => {
+    const parsed = parseFixture((cfg) => {
+      (cfg.redirects as Record<string, unknown>).patterns = [
+        { pattern: "(.+)+$", replacement: "/x" },
+      ];
+    });
+    expect(() => assertConfigInvariants(parsed)).toThrow(/redirects\.patterns\[0\]\.pattern/);
+  });
+
+  it("rejects nested quantifier in link_rewrites[].match_pattern", () => {
+    const parsed = parseFixture((cfg) => {
+      (cfg.link_rewrites as Array<Record<string, unknown>>) = [
+        { match: "^/", match_pattern: "(a+)+", replacement: "/" },
+      ];
+    });
+    expect(() => assertConfigInvariants(parsed)).toThrow(/link_rewrites\[0\]\.match_pattern/);
+  });
+
+  it("rejects an over-long pattern with a clear path", () => {
+    const parsed = parseFixture((cfg) => {
+      (cfg.canonicals as Array<Record<string, unknown>>) = [
+        { match: `^${"a".repeat(513)}$`, strategy: { type: "self" } },
+      ];
+    });
+    expect(() => assertConfigInvariants(parsed)).toThrow(/canonicals\[0\]\.match/);
+  });
+
+  it("checks every regex-bearing field", () => {
+    // sanity: walk every field with a known-bad pattern and confirm rejection
+    const fields: Array<(cfg: Record<string, unknown>) => void> = [
+      (cfg) => {
+        (cfg.redirects as Record<string, unknown>).conditional = [
+          {
+            match: "(a+)+",
+            conditions: [{ type: "geo_country", in: ["US"] }],
+            to: "/x",
+          },
+        ];
+      },
+      (cfg) => {
+        (cfg.schema_injections as Array<Record<string, unknown>>) = [
+          { match: "(a+)+", schema_type: "Article", payload: { "@type": "Article" } },
+        ];
+      },
+      (cfg) => {
+        (cfg.element_removals as Array<Record<string, unknown>>) = [
+          { match: "(a+)+", selector: ".badge" },
+        ];
+      },
+      (cfg) => {
+        (cfg.content_injections as Array<Record<string, unknown>>) = [
+          { match: "(a+)+", selector: "body", position: "append", html: "<div></div>" },
+        ];
+      },
+      (cfg) => {
+        (cfg.meta_rewrites as Array<Record<string, unknown>>) = [
+          { match: "(a+)+", tag: "title", value: "X" },
+        ];
+      },
+      (cfg) => {
+        (cfg.indexation as Array<Record<string, unknown>>) = [
+          { match: "(a+)+", robots: "noindex,follow" },
+        ];
+      },
+      (cfg) => {
+        (cfg.caching as Array<Record<string, unknown>>) = [{ match: "(a+)+", ttl_seconds: 60 }];
+      },
+      (cfg) => {
+        (cfg.forms as Array<Record<string, unknown>>) = [
+          { match_action: "(a+)+", forward_to: "https://crm.example/lead" },
+        ];
+      },
+    ];
+    for (const mutate of fields) {
+      const parsed = parseFixture(mutate);
+      expect(() => assertConfigInvariants(parsed)).toThrow(ConfigValidationError);
+    }
+  });
+
+  it("truncates very long patterns in error messages", () => {
+    const parsed = parseFixture((cfg) => {
+      (cfg.routing as Array<Record<string, unknown>>) = [
+        { match: `(a+)+${"x".repeat(200)}`, type: "proxy", origin: "https://x.example" },
+      ];
+    });
+    try {
+      assertConfigInvariants(parsed);
+      throw new Error("expected throw");
+    } catch (e) {
+      const msg = (e as Error).message;
+      expect(msg).toContain("...");
+      expect(msg.length).toBeLessThan(300);
+    }
+  });
+});
+
+describe("assertConfigInvariants — JSON-LD serializability", () => {
+  it("accepts a normal JSON-LD payload", () => {
+    const parsed = parseFixture();
+    expect(() => assertConfigInvariants(parsed)).not.toThrow();
+  });
+
+  it("rejects a payload with a function value", () => {
+    const parsed = parseFixture();
+    const firstInjection = parsed.schema_injections[0];
+    if (!firstInjection) throw new Error("fixture missing schema_injection");
+    (firstInjection.payload as Record<string, unknown>).bad = (() => 1) as unknown;
+    expect(() => assertConfigInvariants(parsed)).toThrow(/functions are not JSON-serializable/);
+  });
+
+  it("rejects a payload with a bigint value", () => {
+    const parsed = parseFixture();
+    const firstInjection = parsed.schema_injections[0];
+    if (!firstInjection) throw new Error("fixture missing schema_injection");
+    (firstInjection.payload as Record<string, unknown>).bad = BigInt(10);
+    expect(() => assertConfigInvariants(parsed)).toThrow(/bigint values are not JSON-serializable/);
+  });
+
+  it("rejects a payload with a symbol value", () => {
+    const parsed = parseFixture();
+    const firstInjection = parsed.schema_injections[0];
+    if (!firstInjection) throw new Error("fixture missing schema_injection");
+    (firstInjection.payload as Record<string, unknown>).bad = Symbol("x") as unknown;
+    expect(() => assertConfigInvariants(parsed)).toThrow(/symbols are not JSON-serializable/);
+  });
+
+  it("rejects a payload with a non-finite number", () => {
+    const parsed = parseFixture();
+    const firstInjection = parsed.schema_injections[0];
+    if (!firstInjection) throw new Error("fixture missing schema_injection");
+    (firstInjection.payload as Record<string, unknown>).bad = Number.POSITIVE_INFINITY;
+    expect(() => assertConfigInvariants(parsed)).toThrow(/non-finite/);
+  });
+
+  it("rejects a payload with undefined inside an array", () => {
+    const parsed = parseFixture();
+    const firstInjection = parsed.schema_injections[0];
+    if (!firstInjection) throw new Error("fixture missing schema_injection");
+    (firstInjection.payload as Record<string, unknown>).list = [1, undefined as unknown, 3];
+    expect(() => assertConfigInvariants(parsed)).toThrow(/undefined is not JSON-serializable/);
+  });
+
+  it("rejects a payload containing a cycle", () => {
+    const parsed = parseFixture();
+    const firstInjection = parsed.schema_injections[0];
+    if (!firstInjection) throw new Error("fixture missing schema_injection");
+    const cyclic: Record<string, unknown> = { foo: "bar" };
+    cyclic.self = cyclic;
+    (firstInjection.payload as Record<string, unknown>).bad = cyclic;
+    expect(() => assertConfigInvariants(parsed)).toThrow(ConfigValidationError);
+  });
+
+  it("accepts a payload with explicit null leaves", () => {
+    const parsed = parseFixture();
+    const firstInjection = parsed.schema_injections[0];
+    if (!firstInjection) throw new Error("fixture missing schema_injection");
+    (firstInjection.payload as Record<string, unknown>).description = null;
+    expect(() => assertConfigInvariants(parsed)).not.toThrow();
+  });
+
+  it("accepts a payload with a clean array of primitives", () => {
+    const parsed = parseFixture();
+    const firstInjection = parsed.schema_injections[0];
+    if (!firstInjection) throw new Error("fixture missing schema_injection");
+    (firstInjection.payload as Record<string, unknown>).items = ["a", "b", { nested: ["c", "d"] }];
+    expect(() => assertConfigInvariants(parsed)).not.toThrow();
+  });
+
+  it("walks nested arrays and objects to find bad leaves", () => {
+    const parsed = parseFixture();
+    const firstInjection = parsed.schema_injections[0];
+    if (!firstInjection) throw new Error("fixture missing schema_injection");
+    (firstInjection.payload as Record<string, unknown>).deeply = {
+      nested: { array: [{ leaf: BigInt(7) }] },
+    };
+    expect(() => assertConfigInvariants(parsed)).toThrow(
+      /deeply\.nested\.array\[0\]\.leaf.*bigint/,
+    );
+  });
+});

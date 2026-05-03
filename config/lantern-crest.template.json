@@ -1,0 +1,82 @@
+{
+  "_template_notes": [
+    "Pilot client production config — Lantern Crest blog subfolder.",
+    "Fill in REPLACE_* values before INSERT into D1.",
+    "Pre-flight: `npx tsx scripts/validate-config.mjs config/lantern-crest.json` MUST exit 0.",
+    "Spec §6.1: admin pipeline validates against Zod BEFORE INSERT or UPDATE.",
+    "",
+    "Authorization fields are populated by the attestation form per PRD §6.1.",
+    "DO NOT publish a config whose `attested_at` predates the production DNS cut."
+  ],
+  "client_id": "lantern-crest",
+  "proxy_domain": "REPLACE_WITH_LANTERNCREST_PRODUCTION_DOMAIN",
+  "source_domain": "REPLACE_WITH_HOSTED_BLOG_DOMAIN",
+  "authorization": {
+    "attested_by_email": "REPLACE_WITH_OWNER_EMAIL",
+    "attested_at": "REPLACE_WITH_ISO_8601_TIMESTAMP",
+    "attested_ip": "REPLACE_WITH_ATTESTING_IP",
+    "scope": "specified_paths",
+    "scope_paths": ["/blog"],
+    "expires_at": null
+  },
+  "status": "active",
+  "routing": [
+    {
+      "match": "^/blog",
+      "type": "proxy",
+      "origin": "https://REPLACE_WITH_HOSTED_BLOG_DOMAIN",
+      "origin_auth": { "type": "none" },
+      "strip_prefix": "/blog"
+    }
+  ],
+  "redirects": {
+    "static": [],
+    "patterns": [{ "pattern": "^/posts/(\\d+)$", "replacement": "/blog/$1", "status": "301" }],
+    "conditional": []
+  },
+  "canonicals": [
+    {
+      "match": "^/blog/.*",
+      "strategy": { "type": "self" },
+      "sync_og_url": true,
+      "sync_twitter_url": true,
+      "sync_jsonld_url": true
+    }
+  ],
+  "schema_injections": [
+    {
+      "match": "^/blog/[^/]+$",
+      "schema_type": "Article",
+      "position": "head_append",
+      "payload": {
+        "@context": "https://schema.org",
+        "@type": "Article",
+        "publisher": {
+          "@type": "Organization",
+          "name": "Lantern Crest",
+          "url": "https://REPLACE_WITH_LANTERNCREST_PRODUCTION_DOMAIN"
+        }
+      }
+    }
+  ],
+  "link_rewrites": [
+    {
+      "match": "^/blog/.*",
+      "match_pattern": "^https://REPLACE_WITH_HOSTED_BLOG_DOMAIN/(.+)$",
+      "replacement": "https://REPLACE_WITH_LANTERNCREST_PRODUCTION_DOMAIN/blog/$1"
+    }
+  ],
+  "element_removals": [],
+  "content_injections": [],
+  "meta_rewrites": [],
+  "indexation": [
+    {
+      "match": "^/blog/.*",
+      "robots": "index,follow",
+      "additional_directives": ["max-image-preview:large", "max-snippet:-1"]
+    }
+  ],
+  "caching": [{ "match": "^/blog/.*", "ttl_seconds": 3600 }],
+  "forms": [],
+  "schema_version": 1
+}

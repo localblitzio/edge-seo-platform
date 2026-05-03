@@ -1,0 +1,64 @@
+{
+  "client_id": "lantern-crest",
+  "proxy_domain": "lanterncrest.com",
+  "source_domain": "blog.lanterncrest.com",
+  "authorization": {
+    "attested_by_email": "owner@lanterncrest.com",
+    "attested_at": "2026-01-15T10:00:00Z",
+    "attested_ip": "203.0.113.42",
+    "scope": "specified_paths",
+    "scope_paths": ["/blog"],
+    "expires_at": null
+  },
+  "status": "active",
+  "routing": [
+    {
+      "match": "^/blog",
+      "type": "proxy",
+      "origin": "https://blog.lanterncrest.com",
+      "origin_auth": { "type": "none" }
+    }
+  ],
+  "redirects": {
+    "static": [{ "from": "/old-blog", "to": "/blog" }],
+    "patterns": [{ "pattern": "^/posts/(\\d+)$", "replacement": "/blog/$1", "status": "301" }],
+    "conditional": []
+  },
+  "canonicals": [
+    {
+      "match": "^/blog/.*",
+      "strategy": { "type": "self" }
+    }
+  ],
+  "schema_injections": [
+    {
+      "match": "^/blog/.*",
+      "schema_type": "Article",
+      "payload": {
+        "@context": "https://schema.org",
+        "@type": "Article",
+        "publisher": { "@type": "Organization", "name": "Lantern Crest" }
+      }
+    }
+  ],
+  "link_rewrites": [
+    {
+      "match": "^/blog/.*",
+      "match_pattern": "https://blog\\.lanterncrest\\.com/(.+)",
+      "replacement": "https://lanterncrest.com/blog/$1"
+    }
+  ],
+  "element_removals": [],
+  "content_injections": [],
+  "meta_rewrites": [],
+  "indexation": [
+    {
+      "match": "^/blog/.*",
+      "robots": "index,follow",
+      "additional_directives": ["max-image-preview:large"]
+    }
+  ],
+  "caching": [{ "match": "^/blog/.*", "ttl_seconds": 3600 }],
+  "forms": [],
+  "schema_version": 1
+}

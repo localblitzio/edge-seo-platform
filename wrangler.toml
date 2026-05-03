@@ -1,0 +1,104 @@
+name = "edge-seo-platform"
+main = "src/worker.ts"
+compatibility_date = "2026-04-01"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = false
+
+# ---------------------------------------------------------------------------
+# Default (local dev) bindings.
+#
+# Wrangler 3 runs `wrangler dev` with --local by default. In local mode
+# the IDs below are NOT validated against Cloudflare; they only need to
+# look syntactically valid. Real production IDs are populated under the
+# [env.staging] and [env.production] blocks below.
+#
+# Run `npm run wrangler:types` whenever you change bindings to regenerate
+# the typed Env interface in `worker-configuration.d.ts`.
+# ---------------------------------------------------------------------------
+
+[[kv_namespaces]]
+binding = "CONFIG_KV"
+id = "00000000000000000000000000000001"
+
+[[d1_databases]]
+binding = "CONFIG_DB"
+database_name = "edge-seo-platform-local"
+database_id = "00000000-0000-0000-0000-000000000001"
+migrations_dir = "migrations"
+
+[[r2_buckets]]
+binding = "CONTENT_R2"
+bucket_name = "edge-seo-content-local"
+
+[[r2_buckets]]
+binding = "LOGS_R2"
+bucket_name = "edge-seo-logs-local"
+
+[[analytics_engine_datasets]]
+binding = "METRICS"
+dataset = "edge_seo_metrics_local"
+
+# ---------------------------------------------------------------------------
+# Staging
+# ---------------------------------------------------------------------------
+[env.staging]
+name = "edge-seo-platform-staging"
+workers_dev = true
+
+[[env.staging.kv_namespaces]]
+binding = "CONFIG_KV"
+id = "dc95f90063cd4493bb3ea462759f4002"
+
+[[env.staging.d1_databases]]
+binding = "CONFIG_DB"
+database_name = "edge-seo-platform-staging"
+database_id = "a6c1786a-4999-4ac5-ad60-7faafec61283"
+migrations_dir = "migrations"
+
+[[env.staging.r2_buckets]]
+binding = "CONTENT_R2"
+bucket_name = "edge-seo-content-staging"
+
+[[env.staging.r2_buckets]]
+binding = "LOGS_R2"
+bucket_name = "edge-seo-logs-staging"
+
+[[env.staging.analytics_engine_datasets]]
+binding = "METRICS"
+dataset = "edge_seo_metrics_staging"
+
+# ---------------------------------------------------------------------------
+# Production
+# ---------------------------------------------------------------------------
+[env.production]
+name = "edge-seo-platform-production"
+workers_dev = false
+# Routes per client domain are added on onboarding (see docs/runbooks).
+
+[[env.production.kv_namespaces]]
+binding = "CONFIG_KV"
+id = "REPLACE_WITH_PRODUCTION_KV_ID"
+
+[[env.production.d1_databases]]
+binding = "CONFIG_DB"
+database_name = "edge-seo-platform-production"
+database_id = "REPLACE_WITH_PRODUCTION_D1_ID"
+migrations_dir = "migrations"
+
+[[env.production.r2_buckets]]
+binding = "CONTENT_R2"
+bucket_name = "edge-seo-content-production"
+
+[[env.production.r2_buckets]]
+binding = "LOGS_R2"
+bucket_name = "edge-seo-logs-production"
+
+[[env.production.analytics_engine_datasets]]
+binding = "METRICS"
+dataset = "edge_seo_metrics_production"
+
+# mTLS certificate bindings are added per-client on onboarding when a route
+# uses `origin_auth: { type: "mtls" }`. Example:
+#   [[env.production.mtls_certificates]]
+#   binding = "CLIENT_X_MTLS"
+#   certificate_id = "<uploaded-cert-id>"

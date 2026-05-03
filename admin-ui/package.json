@@ -1,0 +1,13 @@
+{
+  "name": "edge-seo-admin-ui",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Read-only local inspector for the Edge SEO Platform — Phase 1 dev tool. The Phase 2 admin UI (PRD §7.12, tech spec §15) replaces this entirely.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.mjs"
+  }
+}
