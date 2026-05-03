@@ -12,7 +12,13 @@
     "verbatimModuleSyntax": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "noEmit": true
+    "noEmit": true,
+    "rootDir": ".."
   },
-  "include": ["src/**/*"]
+  "include": [
+    "src/**/*",
+    "../src/config/schema.ts",
+    "../src/config/validator.ts",
+    "../src/lib/errors.ts"
+  ]
 }
