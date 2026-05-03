@@ -1,13 +1,8 @@
 # Edge SEO Platform — status
 
 **Last update:** 2026-05-03
-**Phase:** 1 (foundation) shipped + Phase-2 read-only admin MVP shipped.
+**Phase:** 1 (foundation) shipped + Phase-2 admin editor (full write surface) shipped.
 **Pilot client:** Lantern Crest Senior Living — live in staging.
-
-> **🔄 In-progress work on resume:** Phase 2 admin **editor** (write surface
-> for the dashboard) was scoped and started but paused due to context-window
-> limits. Full plan + pseudocode in [HANDOFF.md](HANDOFF.md) — read that first
-> when resuming. Working tree is clean; nothing half-baked is on disk.
 
 This file is your at-a-glance "where are we" reminder. Everything in
 [CHANGELOG.md](CHANGELOG.md) is the long-form release notes; this is the
@@ -20,7 +15,7 @@ operator's pinboard.
 | Worker | URL | Purpose | Bindings |
 | ------ | --- | ------- | -------- |
 | **edge-seo-platform-staging** | https://edge-seo-platform-staging.localblitzio.workers.dev | Main edge SEO pipeline. Serves Lantern Crest by reverse-proxying `https://lanterncrestseniorlivingsantee.com` with the full §5 transform stack on top. | `CONFIG_KV`, `CONFIG_DB`, `CONTENT_R2`, `LOGS_R2`, `METRICS` |
-| **edge-seo-admin** | https://edge-seo-admin.localblitzio.workers.dev | Read-only admin dashboard. Browser the same D1 + KV bindings the main worker reads from. Behind HTTP basic auth (`ADMIN_USERNAME` / `ADMIN_PASSWORD` Worker secrets). | `CONFIG_KV`, `CONFIG_DB`, `ADMIN_USERNAME`, `ADMIN_PASSWORD` |
+| **edge-seo-admin** | https://edge-seo-admin.localblitzio.workers.dev | Admin dashboard + editor. Reads + writes the same D1 + KV bindings the main worker uses. All writes validate against the same Zod schema the Worker uses at load time. Behind HTTP basic auth (`ADMIN_USERNAME` / `ADMIN_PASSWORD` Worker secrets). | `CONFIG_KV`, `CONFIG_DB`, `ADMIN_USERNAME`, `ADMIN_PASSWORD` |
 
 **Cloudflare account:** `Simon@localblitz.io's Account` (`cf2aaefcc5131a72802197c727a911b9`)
 
@@ -70,10 +65,13 @@ rewrites, forms.
 
 | Task | Command |
 | ---- | ------- |
-| Edit a client config | Edit `config/<client>-staging.json` locally |
+| Edit a client config (web) | https://edge-seo-admin.localblitzio.workers.dev/clients/&lt;id&gt;/edit |
+| Add a new client (web) | https://edge-seo-admin.localblitzio.workers.dev/clients/new |
+| Flip status / purge cache / capture attestation | Buttons on the client detail page |
+| Edit a client config (CLI) | Edit `config/<client>-staging.json` locally |
 | Validate before push | `npm run config:validate -- config/<client>-staging.json` |
-| Push to staging | `npm run seed-client -- --env=staging --config=config/<client>-staging.json` |
-| Deploy worker code | `git push` (CI auto-deploys to staging on `main`) |
+| Push to staging (CLI) | `npm run seed-client -- --env=staging --config=config/<client>-staging.json` |
+| Deploy worker code | `git push` (CI auto-deploys main + admin worker to staging on `main`) |
 | View live state | https://edge-seo-admin.localblitzio.workers.dev (browse) |
 | Local end-to-end demo | `npm run demo:seed && npm run dev && npm run admin` |
 | Synthetic perf check | `npm run load-test` |
@@ -162,11 +160,10 @@ All M0–M12 milestones from `docs/tech-spec.md` §15:
 ## ⚠️ Known issues / limitations
 
 1. **Integration test runner unstable on Windows.** `tests/integration/pipeline.test.ts` has 15 §12.2 scenarios written, but `@cloudflare/vitest-pool-workers` running on wrangler 3.114 hangs mid-suite due to a Cross-Request-Promise-Resolve / Node IPC race. Unit tests cover the same logic. Re-attempt after wrangler 4 + vitest-pool-workers upgrade.
-2. **Admin UI is read-only.** Editing configs / capturing attestations / flipping client status still requires `npm run seed-client` or direct SQL. Edit capability is the obvious next iteration.
-3. **No production environment yet.** Staging-only. Production resources, real proxy domain, and DNS cut are unscheduled.
-4. **No Logpush job configured.** Worker emits structured logs and Analytics Engine counters, but they're not yet shipped to a queryable backend. PRD §7.11 alerts not configured.
-5. **No second client.** Multi-tenancy is designed in but not yet exercised. Onboarding a second client tests that "add a client = config row" assumption holds.
-6. **R2 unused at runtime.** `CONTENT_R2` bound but not yet writing custom-page content; `LOGS_R2` waiting on Logpush.
+2. **No production environment yet.** Staging-only. Production resources, real proxy domain, and DNS cut are unscheduled.
+3. **No Logpush job configured.** Worker emits structured logs and Analytics Engine counters, but they're not yet shipped to a queryable backend. PRD §7.11 alerts not configured.
+4. **No second client.** Multi-tenancy is designed in but not yet exercised. Onboarding a second client tests that "add a client = config row" assumption holds — now also exercises the new `/clients/new` editor path.
+5. **R2 unused at runtime.** `CONTENT_R2` bound but not yet writing custom-page content; `LOGS_R2` waiting on Logpush.
 
 ---
 
@@ -176,8 +173,7 @@ Pick any. Or none — Phase 1 is shippable as-is.
 
 | Option | Why | Effort |
 | ------ | --- | ------ |
-| **Edit capability in admin UI** | Removes operator from JSON+SQL loop. Web forms for rules / status / attestations. Phase 2 admin UI per spec §7.12. | ~3 hrs |
-| **Onboard a second client** | Validates multi-tenancy. Pick a permissioned source, write a config, `npm run seed-client`, done. | ~30 min |
+| **Onboard a second client** | Validates multi-tenancy AND live-fires the new `/clients/new` editor. Pick a permissioned source, paste config in the web form, hit the proxy. | ~15 min |
 | **Production env** | Separate KV/D1/R2, real production proxy domain, click-to-deploy through GitHub Actions production gate. | ~1 hr |
 | **Logpush + Grafana** | Production observability — see traffic, latency, error rates per client. Wire the §11 SLO budgets to real dashboards. | ~1 hr |
 | **Real SEO content rules for Lantern Crest** | Schema injection (LocalBusiness), targeted meta rewrites, internal link rewrites. Make the proxy do useful SEO work beyond canonical-and-noindex. | ~30 min |

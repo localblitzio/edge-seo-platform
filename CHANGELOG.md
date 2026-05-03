@@ -4,6 +4,65 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [SemVer](https://semver.org/).
 
+## [Unreleased] — Phase 2 admin editor
+
+**Added — write surface on the admin worker.**
+
+Turns `admin-worker/` from a read-only dashboard into a full editor
+backed by the same Zod schema + invariant checks the Worker uses at
+load time (spec §7 invariant: admin-time and Worker-time validation
+must be identical, hence the cross-import).
+
+- `GET/POST /clients/new` — paste a complete `ClientConfig` JSON,
+  validate, INSERT into D1, prime KV (`config:<id>` + `domain:<host>`),
+  audit `config_create`.
+- `GET/POST /clients/:id/edit` — full-config textarea editor with
+  before/after FNV-1a hashes recorded to `audit_log.before_hash` /
+  `after_hash`, KV invalidated on save.
+- `POST /clients/:id/status` — flip active/paused/terminated. Mirrors
+  status into `config_json.status` so the row column and cached config
+  never drift. Terminated is a one-way door per PRD §6.3 — the form
+  refuses to reverse it.
+- `POST /clients/:id/cache-purge` — manual KV invalidate per client,
+  audited with notes.
+- `GET/POST /clients/:id/attest` — attestation capture form per spec
+  §6.8 (email, ip, scope, scope_paths CSV, user_agent), append to the
+  `attestations` table, audit `authorization_update`.
+- CSRF defense: every POST handler checks `Origin` (or `Referer`
+  fallback) matches the request URL host. Combined with HTTP basic
+  auth, that's the right level for an internal agency tool.
+- Flash banner pattern: POST handlers 303-redirect with
+  `?flash=...&flash_kind=ok|warn|err` so success/error renders on the
+  destination page after refresh.
+- New file [admin-worker/src/helpers.ts](admin-worker/src/helpers.ts) extracts
+  pure helpers (`fnvHash`, `checkCsrf`, `flashRedirect`, `readFlash`)
+  for unit testability.
+- `admin-worker/tsconfig.json` extended with `rootDir: ".."` and
+  explicit cross-imports of [src/config/schema.ts](src/config/schema.ts) +
+  [src/config/validator.ts](src/config/validator.ts) so admin-time validation
+  reuses (not duplicates) the Worker's load-time logic.
+
+**Added — CI auto-deploys the admin worker.**
+
+The staging deploy job in [.github/workflows/ci.yml](.github/workflows/ci.yml) now
+runs `npx wrangler deploy --config admin-worker/wrangler.toml` after
+the main worker deploys. Production stays main-worker-only until the
+production environment exists.
+
+**Tests.**
+
+- 18 new unit tests in [tests/unit/admin-worker/helpers.test.ts](tests/unit/admin-worker/helpers.test.ts)
+  covering FNV-1a determinism, CSRF accept/reject (Origin and Referer
+  paths), and flash round-trip through 303 redirects.
+- Suite total: **280 passed** (was 262).
+
+**Notes.**
+
+- Fixed a pre-existing latent type error in `admin-worker/src/index.ts`
+  `listKv` (was incompatible with `exactOptionalPropertyTypes: true`),
+  surfaced once the admin-worker tsconfig started actually being
+  exercised by a typecheck path.
+
 ## [0.1.0] — 2026-05-02 (Phase 1 — Foundation, release candidate)
 
 First release-candidate cut. All Phase 1 milestones (M0–M12)

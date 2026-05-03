@@ -1,9 +1,11 @@
 /**
- * Edge SEO Admin — hosted dashboard for browsing the platform's
+ * Edge SEO Admin — hosted dashboard + write surface for the platform's
  * live state (clients, configs, KV entries, attestations, audit log).
  *
- * Read-only MVP. Edit capability is the next iteration; for now the
- * source of truth remains git + the seed-client CLI script.
+ * Phase 2 admin editor: edit JSON configs, flip status, purge cache,
+ * capture attestations, add new clients. All writes go through the SAME
+ * Zod schema + invariant checks the Worker uses at load time, so admin-time
+ * validation is identical to runtime validation (spec §7 invariant).
  *
  * Auth: HTTP Basic against `ADMIN_USERNAME` / `ADMIN_PASSWORD` Worker
  * secrets. Set via:
@@ -12,6 +14,17 @@
  *
  * For production, wrap this Worker behind Cloudflare Access for SSO.
  */
+
+import { ClientConfig } from "../../src/config/schema.js";
+import { assertConfigInvariants } from "../../src/config/validator.js";
+import { ConfigValidationError } from "../../src/lib/errors.js";
+import {
+  checkCsrf,
+  flashRedirect,
+  fnvHash,
+  readFlash,
+  type FlashMessage,
+} from "./helpers.js";
 
 interface Env {
   CONFIG_KV: KVNamespace;
@@ -54,6 +67,30 @@ interface AuditRow {
   new_status: string | null;
   notes: string | null;
   occurred_at: string;
+}
+
+type AuditEventType =
+  | "config_create"
+  | "config_update"
+  | "status_change"
+  | "revocation"
+  | "authorization_update";
+
+interface AuditEntry {
+  client_id: string;
+  actor_email: string;
+  actor_ip: string;
+  event_type: AuditEventType;
+  before_hash: string | null;
+  after_hash: string | null;
+  previous_status: string | null;
+  new_status: string | null;
+  notes: string | null;
+}
+
+interface Actor {
+  email: string;
+  ip: string;
 }
 
 const HTML_ENTITIES: Record<string, string> = {
@@ -111,7 +148,11 @@ code,.mono{font-family:var(--mono);font-size:.92em}
 .topbar .brand{display:flex;align-items:center;gap:.6rem;font-size:.95rem}
 .topbar .logo{display:inline-block;width:.85rem;height:.85rem;border-radius:9999px;background:linear-gradient(135deg,#2563eb,#7c3aed)}
 .topbar .env{font-size:.72rem;text-transform:uppercase;letter-spacing:.05em;color:var(--fg-muted);font-weight:600;padding:.15rem .5rem;border:1px solid var(--border-strong);border-radius:9999px}
-.btn{font:inherit;border:1px solid var(--border-strong);background:var(--bg-elevated);color:var(--fg);padding:.35rem .85rem;border-radius:var(--radius);cursor:pointer}.btn:hover{border-color:var(--accent);color:var(--accent)}
+.btn{font:inherit;border:1px solid var(--border-strong);background:var(--bg-elevated);color:var(--fg);padding:.35rem .85rem;border-radius:var(--radius);cursor:pointer;display:inline-block;text-decoration:none}.btn:hover{border-color:var(--accent);color:var(--accent);text-decoration:none}
+.btn-primary{background:var(--accent);color:var(--accent-fg);border-color:var(--accent)}.btn-primary:hover{filter:brightness(1.1);color:var(--accent-fg)}
+.btn-danger{border-color:var(--red);color:var(--red)}.btn-danger:hover{background:var(--red-bg);color:var(--red)}
+.btn-warn{border-color:var(--amber);color:var(--amber)}.btn-warn:hover{background:var(--amber-bg);color:var(--amber)}
+.btn-success{border-color:var(--green);color:var(--green)}.btn-success:hover{background:var(--green-bg);color:var(--green)}
 .layout{display:grid;grid-template-columns:220px 1fr;min-height:calc(100vh - 56px)}
 .sidebar{background:var(--bg-sidebar);border-right:1px solid var(--border);padding:1.25rem .75rem;display:flex;flex-direction:column}
 .sidebar a{display:block;padding:.45rem .75rem;border-radius:var(--radius);color:var(--fg)}
@@ -155,17 +196,37 @@ dl.kv dt{color:var(--fg-muted);font-weight:500}
 dl.kv dd{margin:0;font-family:var(--mono);font-size:.85rem;word-break:break-word}
 .kv-key{font-family:var(--mono);font-size:.85rem;word-break:break-all}
 .kv-preview{color:var(--fg-muted);font-size:.85rem;max-width:32rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.actions-row{display:flex;flex-wrap:wrap;gap:.5rem;margin:0 0 1.25rem;padding:.85rem 1rem;background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius)}
+.actions-row form{display:inline}
+.flash{padding:.65rem 1rem;border-radius:var(--radius);margin:0 0 1rem;border:1px solid transparent}
+.flash-ok{background:var(--green-bg);color:var(--green);border-color:var(--green)}
+.flash-warn{background:var(--amber-bg);color:var(--amber);border-color:var(--amber)}
+.flash-err{background:var(--red-bg);color:var(--red);border-color:var(--red)}
+form.editor{display:flex;flex-direction:column;gap:.85rem}
+form.editor label{font-weight:600;font-size:.85rem}
+form.editor input[type=text],form.editor input[type=email],form.editor select,form.editor textarea{font:inherit;font-family:var(--mono);font-size:.85rem;padding:.5rem .65rem;border:1px solid var(--border-strong);border-radius:var(--radius);background:var(--bg-elevated);color:var(--fg);width:100%}
+form.editor textarea{min-height:520px;line-height:1.45;resize:vertical}
+form.editor .hint{font-size:.78rem;color:var(--fg-muted);margin-top:-.35rem}
+form.editor .form-actions{display:flex;gap:.5rem;align-items:center;margin-top:.5rem}
+.error-box{background:var(--red-bg);color:var(--red);border:1px solid var(--red);border-radius:var(--radius);padding:.65rem 1rem;font-family:var(--mono);font-size:.85rem;white-space:pre-wrap;margin:0 0 1rem}
 `;
+
+function flashBanner(flash: FlashMessage | null): string {
+  if (!flash) return "";
+  return `<div class="flash flash-${esc(flash.kind)}">${esc(flash.text)}</div>`;
+}
 
 function layout(opts: {
   title: string;
   content: string;
   activeNav: string;
   clients: ClientRow[];
+  flash: FlashMessage | null;
 }): string {
   const navLinks = [
     { href: "/", id: "home", label: "Overview" },
     { href: "/clients", id: "clients", label: "Clients" },
+    { href: "/clients/new", id: "clients:new", label: "+ New client" },
     { href: "/redirects", id: "redirects", label: "Redirect rules" },
     { href: "/audit", id: "audit", label: "Audit log" },
     { href: "/kv", id: "kv", label: "KV browser" },
@@ -192,7 +253,7 @@ function layout(opts: {
     opts.clients.length > 0
       ? `<div class="sidebar-section">Configured clients</div>${clientList}`
       : ""
-  }<div class="sidebar-foot">Phase-2 admin UI (read-only).<br>Edit configs via <code>npm run seed-client</code> for now.</div></nav><main class="main">${opts.content}</main></div></body></html>`;
+  }<div class="sidebar-foot">Phase-2 admin UI.<br>Edits validate against the same Zod schema the Worker uses at load time.</div></nav><main class="main">${flashBanner(opts.flash)}${opts.content}</main></div></body></html>`;
 }
 
 async function loadAllClients(env: Env): Promise<ClientRow[]> {
@@ -230,9 +291,42 @@ async function loadAttestations(env: Env): Promise<AttestationRow[]> {
   }
 }
 
-async function listKv(env: Env): Promise<{ name: string; expiration?: number }[]> {
+interface KvKeyInfo {
+  name: string;
+  expiration: number | null;
+}
+
+async function listKv(env: Env): Promise<KvKeyInfo[]> {
   const list = await env.CONFIG_KV.list();
-  return list.keys.map((k) => ({ name: k.name, expiration: k.expiration ?? undefined }));
+  return list.keys.map((k) => ({ name: k.name, expiration: k.expiration ?? null }));
+}
+
+async function invalidateKv(env: Env, clientId: string, proxyDomain: string): Promise<void> {
+  await Promise.all([
+    env.CONFIG_KV.delete(`config:${clientId}`),
+    env.CONFIG_KV.delete(`domain:${proxyDomain}`),
+  ]);
+}
+
+async function writeAudit(env: Env, entry: AuditEntry): Promise<void> {
+  await env.CONFIG_DB.prepare(
+    `INSERT INTO audit_log
+       (client_id, actor_email, actor_ip, event_type,
+        before_hash, after_hash, previous_status, new_status, notes)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      entry.client_id,
+      entry.actor_email,
+      entry.actor_ip,
+      entry.event_type,
+      entry.before_hash,
+      entry.after_hash,
+      entry.previous_status,
+      entry.new_status,
+      entry.notes,
+    )
+    .run();
 }
 
 /** Constant-time string comparison guard against timing attacks on the password. */
@@ -245,12 +339,14 @@ function timingSafeEqual(a: string, b: string): boolean {
   return mismatch === 0;
 }
 
-function checkAuth(request: Request, env: Env): Response | null {
+/**
+ * Returns either a 401/503 Response (block the request) or the basic-auth
+ * username on success. The username is later used as `audit_log.actor_email`.
+ */
+function checkAuth(request: Request, env: Env): Response | string {
   const username = env.ADMIN_USERNAME;
   const password = env.ADMIN_PASSWORD;
   if (!username || !password) {
-    // Auth not configured — refuse all access. Setting both secrets is a
-    // deployment requirement.
     return new Response(
       "Admin auth not configured. Set ADMIN_USERNAME and ADMIN_PASSWORD secrets.",
       {
@@ -268,7 +364,7 @@ function checkAuth(request: Request, env: Env): Response | null {
         const u = decoded.slice(0, colon);
         const p = decoded.slice(colon + 1);
         if (timingSafeEqual(u, username) && timingSafeEqual(p, password)) {
-          return null;
+          return username;
         }
       }
     } catch {
@@ -284,7 +380,39 @@ function checkAuth(request: Request, env: Env): Response | null {
   });
 }
 
-/* ─── Pages ─── */
+/**
+ * Validate a JSON string against ClientConfig schema + load-time invariants.
+ * Mirrors the Worker's load-time validation exactly (spec §7).
+ */
+function validateConfigJson(
+  raw: string,
+): { ok: true; config: ClientConfig } | { ok: false; error: string } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    return { ok: false, error: `JSON parse error: ${(e as Error).message}` };
+  }
+  const result = ClientConfig.safeParse(parsed);
+  if (!result.success) {
+    const issues = result.error.issues
+      .slice(0, 25)
+      .map((i) => `  ${i.path.join(".") || "<root>"}: ${i.message}`)
+      .join("\n");
+    return { ok: false, error: `Schema validation failed:\n${issues}` };
+  }
+  try {
+    assertConfigInvariants(result.data);
+  } catch (e) {
+    if (e instanceof ConfigValidationError) {
+      return { ok: false, error: `Invariant failed: ${e.message}` };
+    }
+    return { ok: false, error: `Validation failed: ${(e as Error).message}` };
+  }
+  return { ok: true, config: result.data };
+}
+
+/* ─── Pages: read-only ─── */
 
 async function renderOverview(env: Env): Promise<string> {
   const clients = await loadAllClients(env);
@@ -324,7 +452,7 @@ async function renderOverview(env: Env): Promise<string> {
     <div class="stats">${stat("Clients", clients.length)}${stat("Routes", totalRoutes)}${stat("Redirects", totalRedirects)}${stat("Canonicals", totalCanonicals)}${stat("Schemas", totalSchema)}${stat("KV entries", kvKeys.length)}</div>
     ${
       clients.length === 0
-        ? `<div class="empty">No clients configured yet.</div>`
+        ? `<div class="empty">No clients configured yet. <a href="/clients/new">Add the first one →</a></div>`
         : `<h2>Clients</h2><table class="data"><thead><tr><th>client_id</th><th>proxy</th><th>source</th><th>status</th><th>updated</th></tr></thead><tbody>${rows}</tbody></table>`
     }`;
 }
@@ -332,7 +460,7 @@ async function renderOverview(env: Env): Promise<string> {
 async function renderClientsList(env: Env): Promise<string> {
   const clients = await loadAllClients(env);
   if (clients.length === 0)
-    return `<h1>Clients</h1><div class="empty">No clients configured.</div>`;
+    return `<h1>Clients</h1><div class="empty">No clients configured. <a href="/clients/new">Add the first one →</a></div>`;
   const rows = clients
     .map(
       (c) => `<tr>
@@ -345,7 +473,7 @@ async function renderClientsList(env: Env): Promise<string> {
       </tr>`,
     )
     .join("");
-  return `<h1>Clients</h1><p class="subtitle">All rows from the <code>clients</code> table in <code>CONFIG_DB</code>.</p>
+  return `<h1>Clients</h1><p class="subtitle">All rows from the <code>clients</code> table in <code>CONFIG_DB</code>. <a href="/clients/new" class="btn btn-primary" style="float:right">+ New client</a></p>
     <table class="data"><thead><tr><th>client_id</th><th>proxy</th><th>source</th><th>status</th><th>schema</th><th>created</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 
@@ -356,6 +484,26 @@ function rulesTable(headers: string[], rows: string[]): string {
 
 function section(label: string, count: number, body: string): string {
   return `<details class="section"${count > 0 ? " open" : ""}><summary>${esc(label)} <span class="count">${count}</span></summary><div class="body">${body}</div></details>`;
+}
+
+function renderActionsRow(client: ClientRow): string {
+  const statusBtn = (target: string, label: string, cls: string, confirm: string | null) => {
+    if (client.status === target)
+      return `<button class="btn" disabled style="opacity:.5;cursor:not-allowed">${esc(label)} (current)</button>`;
+    const onclick = confirm ? ` onclick="return confirm(${JSON.stringify(confirm)})"` : "";
+    return `<form method="POST" action="/clients/${esc(client.client_id)}/status">
+      <input type="hidden" name="status" value="${esc(target)}">
+      <button class="btn ${cls}" type="submit"${onclick}>${esc(label)}</button>
+    </form>`;
+  };
+  return `<div class="actions-row">
+    <a class="btn btn-primary" href="/clients/${esc(client.client_id)}/edit">Edit config</a>
+    <a class="btn" href="/clients/${esc(client.client_id)}/attest">Capture attestation</a>
+    <form method="POST" action="/clients/${esc(client.client_id)}/cache-purge"><button class="btn" type="submit">Purge cache</button></form>
+    ${statusBtn("active", "Activate", "btn-success", null)}
+    ${statusBtn("paused", "Pause", "btn-warn", "Pause this client? The Worker will return 410 for all requests.")}
+    ${statusBtn("terminated", "Terminate", "btn-danger", "Terminate is a one-way door per PRD §6.3. Requests will return 410 permanently. Are you sure?")}
+  </div>`;
 }
 
 async function renderClientDetail(env: Env, id: string): Promise<string> {
@@ -412,7 +560,8 @@ async function renderClientDetail(env: Env, id: string): Promise<string> {
   return `<div class="crumbs"><a href="/clients">← Clients</a></div>
     <h1>${esc(client.client_id)} ${statusPill(client.status)}</h1>
     <p class="subtitle"><span class="mono">${esc(client.proxy_domain)}</span> &nbsp;→&nbsp; <span class="mono">${esc(client.source_domain)}</span></p>
-    ${parseError ? `<div class="empty">⚠ Config JSON parse error: ${esc(parseError)}</div>` : ""}
+    ${renderActionsRow(client)}
+    ${parseError ? `<div class="error-box">⚠ Config JSON parse error: ${esc(parseError)}</div>` : ""}
     <div class="card"><h2 style="margin-top:0">Authorization</h2><dl class="kv">
       <dt>Attested by</dt><dd>${esc(auth.attested_by_email)}</dd>
       <dt>At</dt><dd>${esc(auth.attested_at)}</dd>
@@ -490,7 +639,7 @@ async function renderAudit(env: Env): Promise<string> {
   const auditRows = audit
     .map(
       (a) =>
-        `<tr><td>${esc(a.id)}</td><td class="mono" style="color:var(--fg-muted)">${esc(a.occurred_at)}</td><td><a href="/clients/${esc(a.client_id)}" class="mono">${esc(a.client_id)}</a></td><td><span class="pill pill-neutral">${esc(a.event_type)}</span></td><td class="mono">${esc(a.actor_email)}</td></tr>`,
+        `<tr><td>${esc(a.id)}</td><td class="mono" style="color:var(--fg-muted)">${esc(a.occurred_at)}</td><td><a href="/clients/${esc(a.client_id)}" class="mono">${esc(a.client_id)}</a></td><td><span class="pill pill-neutral">${esc(a.event_type)}</span></td><td class="mono">${esc(a.actor_email)}</td><td class="mono" style="color:var(--fg-muted)">${esc(a.notes ?? "")}</td></tr>`,
     )
     .join("");
   const attestRows = attest
@@ -500,7 +649,7 @@ async function renderAudit(env: Env): Promise<string> {
     )
     .join("");
   return `<h1>Audit log</h1><p class="subtitle">Append-only records of config changes and attestations.</p>
-    <h2>Audit events</h2>${auditRows ? `<table class="data"><thead><tr><th>id</th><th>at</th><th>client</th><th>event</th><th>actor</th></tr></thead><tbody>${auditRows}</tbody></table>` : `<div class="empty">No audit events recorded.</div>`}
+    <h2>Audit events</h2>${auditRows ? `<table class="data"><thead><tr><th>id</th><th>at</th><th>client</th><th>event</th><th>actor</th><th>notes</th></tr></thead><tbody>${auditRows}</tbody></table>` : `<div class="empty">No audit events recorded.</div>`}
     <h2>Attestations</h2>${attestRows ? `<table class="data"><thead><tr><th>id</th><th>at</th><th>client</th><th>proxy</th><th>source</th><th>by</th><th>scope</th></tr></thead><tbody>${attestRows}</tbody></table>` : `<div class="empty">No attestations recorded.</div>`}`;
 }
 
@@ -532,38 +681,536 @@ async function renderKvDetail(env: Env, key: string): Promise<string> {
     ${json !== null ? `<div class="json-block">${jsonHtml(json)}</div>` : `<pre class="json-block" style="white-space:pre-wrap">${esc(value)}</pre>`}`;
 }
 
+/* ─── Pages: write surface ─── */
+
+const NEW_CLIENT_TEMPLATE = `{
+  "client_id": "your-client-id",
+  "proxy_domain": "REPLACE_WITH_PROXY_HOST",
+  "source_domain": "REPLACE_WITH_SOURCE_HOST",
+  "authorization": {
+    "attested_by_email": "you@example.com",
+    "attested_at": "${new Date().toISOString().replace(/\.\d+/, "")}",
+    "attested_ip": "0.0.0.0",
+    "scope": "full_site",
+    "expires_at": null
+  },
+  "status": "active",
+  "routing": [
+    {
+      "match": "^/.*",
+      "type": "proxy",
+      "origin": "https://REPLACE_WITH_SOURCE_HOST",
+      "origin_auth": { "type": "none" }
+    }
+  ],
+  "redirects": { "static": [], "patterns": [], "conditional": [] },
+  "canonicals": [
+    {
+      "match": "^/.*",
+      "strategy": { "type": "origin" },
+      "sync_og_url": true,
+      "sync_twitter_url": true,
+      "sync_jsonld_url": true
+    }
+  ],
+  "schema_injections": [],
+  "link_rewrites": [],
+  "element_removals": [],
+  "content_injections": [],
+  "meta_rewrites": [],
+  "indexation": [{ "match": "^/.*", "robots": "noindex,follow", "additional_directives": [] }],
+  "caching": [{ "match": "^/.*", "ttl_seconds": 600, "cache_key_includes_cookies": [], "bypass_on_cookie": [] }],
+  "forms": [],
+  "schema_version": 1
+}`;
+
+function renderNewClientForm(prefilledJson: string, error: string | null): string {
+  return `<div class="crumbs"><a href="/clients">← Clients</a></div>
+    <h1>New client</h1>
+    <p class="subtitle">Paste a complete <code>ClientConfig</code> JSON. Validates against the same Zod schema the Worker uses at load time.</p>
+    ${error ? `<div class="error-box">${esc(error)}</div>` : ""}
+    <form class="editor" method="POST" action="/clients/new">
+      <label for="config_json">ClientConfig JSON</label>
+      <textarea id="config_json" name="config_json" spellcheck="false" autocomplete="off">${esc(prefilledJson)}</textarea>
+      <div class="hint">After save: D1 INSERT, KV primed with the new config under <code>config:&lt;id&gt;</code> and <code>domain:&lt;proxy_domain&gt;</code>, audit_log entry written.</div>
+      <div class="form-actions">
+        <button class="btn btn-primary" type="submit">Create client</button>
+        <a class="btn" href="/clients">Cancel</a>
+      </div>
+    </form>`;
+}
+
+function renderEditClientForm(
+  client: ClientRow,
+  prefilledJson: string,
+  error: string | null,
+): string {
+  return `<div class="crumbs"><a href="/clients/${esc(client.client_id)}">← ${esc(client.client_id)}</a></div>
+    <h1>Edit ${esc(client.client_id)}</h1>
+    <p class="subtitle">Editing the full <code>ClientConfig</code>. <code>client_id</code> cannot change via this form.</p>
+    ${error ? `<div class="error-box">${esc(error)}</div>` : ""}
+    <form class="editor" method="POST" action="/clients/${esc(client.client_id)}/edit">
+      <label for="config_json">ClientConfig JSON</label>
+      <textarea id="config_json" name="config_json" spellcheck="false" autocomplete="off">${esc(prefilledJson)}</textarea>
+      <div class="hint">On save: D1 UPDATE, KV invalidated for <code>config:${esc(client.client_id)}</code> and <code>domain:${esc(client.proxy_domain)}</code>, audit_log entry written.</div>
+      <div class="form-actions">
+        <button class="btn btn-primary" type="submit">Save</button>
+        <a class="btn" href="/clients/${esc(client.client_id)}">Cancel</a>
+      </div>
+    </form>`;
+}
+
+function renderAttestForm(client: ClientRow, error: string | null): string {
+  return `<div class="crumbs"><a href="/clients/${esc(client.client_id)}">← ${esc(client.client_id)}</a></div>
+    <h1>Capture attestation — ${esc(client.client_id)}</h1>
+    <p class="subtitle">Append a permission record to the <code>attestations</code> table per spec §6.8. Append-only.</p>
+    ${error ? `<div class="error-box">${esc(error)}</div>` : ""}
+    <form class="editor" method="POST" action="/clients/${esc(client.client_id)}/attest">
+      <label for="attested_by_email">Attested by (email)</label>
+      <input id="attested_by_email" name="attested_by_email" type="email" required>
+      <label for="attested_ip">Attested IP</label>
+      <input id="attested_ip" name="attested_ip" type="text" placeholder="0.0.0.0">
+      <div class="hint">Leave blank to use the requesting <code>cf-connecting-ip</code>.</div>
+      <label for="scope">Scope</label>
+      <select id="scope" name="scope">
+        <option value="full_site">full_site</option>
+        <option value="specified_paths">specified_paths</option>
+      </select>
+      <label for="scope_paths">Scope paths (CSV, only used if scope = specified_paths)</label>
+      <input id="scope_paths" name="scope_paths" type="text" placeholder="/blog,/landing">
+      <label for="user_agent">User agent (optional)</label>
+      <input id="user_agent" name="user_agent" type="text" placeholder="auto from request if blank">
+      <div class="form-actions">
+        <button class="btn btn-primary" type="submit">Record attestation</button>
+        <a class="btn" href="/clients/${esc(client.client_id)}">Cancel</a>
+      </div>
+    </form>`;
+}
+
+/* ─── Handlers ─── */
+
+async function handleNewClientPost(
+  request: Request,
+  env: Env,
+  url: URL,
+  actor: Actor,
+  clients: ClientRow[],
+  flash: FlashMessage | null,
+): Promise<Response> {
+  const csrf = checkCsrf(request, url);
+  if (csrf) return csrf;
+  const form = await request.formData();
+  const raw = String(form.get("config_json") ?? "");
+  const validation = validateConfigJson(raw);
+  const respondForm = (errorMsg: string) =>
+    new Response(
+      layout({
+        title: "New client",
+        content: renderNewClientForm(raw, errorMsg),
+        activeNav: "clients:new",
+        clients,
+        flash,
+      }),
+      { status: 400, headers: htmlHeaders() },
+    );
+  if (!validation.ok) return respondForm(validation.error);
+
+  const cfg = validation.config;
+  const existing = await loadClient(env, cfg.client_id);
+  if (existing) return respondForm(`A client with id "${cfg.client_id}" already exists.`);
+
+  const json = JSON.stringify(cfg);
+  await env.CONFIG_DB.prepare(
+    `INSERT INTO clients
+       (client_id, proxy_domain, source_domain, status, config_json, schema_version)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(cfg.client_id, cfg.proxy_domain, cfg.source_domain, cfg.status, json, cfg.schema_version)
+    .run();
+  await Promise.all([
+    env.CONFIG_KV.put(`config:${cfg.client_id}`, json),
+    env.CONFIG_KV.put(`domain:${cfg.proxy_domain}`, cfg.client_id),
+  ]);
+  await writeAudit(env, {
+    client_id: cfg.client_id,
+    actor_email: actor.email,
+    actor_ip: actor.ip,
+    event_type: "config_create",
+    before_hash: null,
+    after_hash: fnvHash(json),
+    previous_status: null,
+    new_status: cfg.status,
+    notes: null,
+  });
+  return flashRedirect(`/clients/${cfg.client_id}`, {
+    text: `Created ${cfg.client_id}.`,
+    kind: "ok",
+  });
+}
+
+async function handleEditClientPost(
+  request: Request,
+  env: Env,
+  url: URL,
+  clientId: string,
+  actor: Actor,
+  clients: ClientRow[],
+  flash: FlashMessage | null,
+): Promise<Response> {
+  const csrf = checkCsrf(request, url);
+  if (csrf) return csrf;
+  const client = await loadClient(env, clientId);
+  if (!client) return new Response("Not found", { status: 404 });
+
+  const form = await request.formData();
+  const raw = String(form.get("config_json") ?? "");
+  const validation = validateConfigJson(raw);
+  const respondForm = (errorMsg: string) =>
+    new Response(
+      layout({
+        title: `Edit ${clientId}`,
+        content: renderEditClientForm(client, raw, errorMsg),
+        activeNav: `client:${clientId}`,
+        clients,
+        flash,
+      }),
+      { status: 400, headers: htmlHeaders() },
+    );
+  if (!validation.ok) return respondForm(validation.error);
+
+  const cfg = validation.config;
+  if (cfg.client_id !== clientId)
+    return respondForm(
+      `client_id in JSON ("${cfg.client_id}") doesn't match the URL ("${clientId}"). Renaming via edit is not supported.`,
+    );
+
+  const beforeHash = fnvHash(client.config_json);
+  const newJson = JSON.stringify(cfg);
+  const afterHash = fnvHash(newJson);
+
+  await env.CONFIG_DB.prepare(
+    `UPDATE clients
+       SET proxy_domain = ?, source_domain = ?, status = ?, config_json = ?,
+           schema_version = ?, updated_at = CURRENT_TIMESTAMP
+     WHERE client_id = ?`,
+  )
+    .bind(cfg.proxy_domain, cfg.source_domain, cfg.status, newJson, cfg.schema_version, clientId)
+    .run();
+  await invalidateKv(env, clientId, client.proxy_domain);
+  // If proxy_domain changed, also invalidate the new domain key (will be
+  // repopulated on next request).
+  if (cfg.proxy_domain !== client.proxy_domain) {
+    await env.CONFIG_KV.delete(`domain:${cfg.proxy_domain}`);
+  }
+  await writeAudit(env, {
+    client_id: clientId,
+    actor_email: actor.email,
+    actor_ip: actor.ip,
+    event_type: "config_update",
+    before_hash: beforeHash,
+    after_hash: afterHash,
+    previous_status: client.status,
+    new_status: cfg.status,
+    notes: null,
+  });
+  return flashRedirect(`/clients/${clientId}`, {
+    text: `Saved. before=${beforeHash} → after=${afterHash}`,
+    kind: "ok",
+  });
+}
+
+async function handleStatusPost(
+  request: Request,
+  env: Env,
+  url: URL,
+  clientId: string,
+  actor: Actor,
+): Promise<Response> {
+  const csrf = checkCsrf(request, url);
+  if (csrf) return csrf;
+  const client = await loadClient(env, clientId);
+  if (!client) return new Response("Not found", { status: 404 });
+
+  const form = await request.formData();
+  const target = String(form.get("status") ?? "");
+  if (target !== "active" && target !== "paused" && target !== "terminated") {
+    return flashRedirect(`/clients/${clientId}`, {
+      text: `Invalid status target: ${target}`,
+      kind: "err",
+    });
+  }
+  if (client.status === target) {
+    return flashRedirect(`/clients/${clientId}`, {
+      text: `Already ${target}.`,
+      kind: "warn",
+    });
+  }
+  if (client.status === "terminated") {
+    return flashRedirect(`/clients/${clientId}`, {
+      text: "Terminated is a one-way door per PRD §6.3 — cannot be reversed.",
+      kind: "err",
+    });
+  }
+
+  // Mirror the new status into config_json.status so the cached config and
+  // the row column never drift.
+  let parsedCfg: Record<string, unknown>;
+  try {
+    parsedCfg = JSON.parse(client.config_json);
+  } catch (e) {
+    return flashRedirect(`/clients/${clientId}`, {
+      text: `Cannot flip status: existing config_json is invalid: ${(e as Error).message}`,
+      kind: "err",
+    });
+  }
+  parsedCfg.status = target;
+  const newJson = JSON.stringify(parsedCfg);
+
+  await env.CONFIG_DB.prepare(
+    `UPDATE clients
+       SET status = ?, config_json = ?, updated_at = CURRENT_TIMESTAMP
+     WHERE client_id = ?`,
+  )
+    .bind(target, newJson, clientId)
+    .run();
+  await invalidateKv(env, clientId, client.proxy_domain);
+  await writeAudit(env, {
+    client_id: clientId,
+    actor_email: actor.email,
+    actor_ip: actor.ip,
+    event_type: target === "terminated" ? "revocation" : "status_change",
+    before_hash: fnvHash(client.config_json),
+    after_hash: fnvHash(newJson),
+    previous_status: client.status,
+    new_status: target,
+    notes: null,
+  });
+  return flashRedirect(`/clients/${clientId}`, {
+    text: `Status: ${client.status} → ${target}.`,
+    kind: target === "terminated" ? "warn" : "ok",
+  });
+}
+
+async function handleCachePurgePost(
+  request: Request,
+  env: Env,
+  url: URL,
+  clientId: string,
+  actor: Actor,
+): Promise<Response> {
+  const csrf = checkCsrf(request, url);
+  if (csrf) return csrf;
+  const client = await loadClient(env, clientId);
+  if (!client) return new Response("Not found", { status: 404 });
+
+  await invalidateKv(env, clientId, client.proxy_domain);
+  await writeAudit(env, {
+    client_id: clientId,
+    actor_email: actor.email,
+    actor_ip: actor.ip,
+    event_type: "config_update",
+    before_hash: null,
+    after_hash: null,
+    previous_status: client.status,
+    new_status: client.status,
+    notes: "manual cache purge (KV invalidate)",
+  });
+  return flashRedirect(`/clients/${clientId}`, {
+    text: `Purged config:${clientId} and domain:${client.proxy_domain} from KV.`,
+    kind: "ok",
+  });
+}
+
+async function handleAttestPost(
+  request: Request,
+  env: Env,
+  url: URL,
+  clientId: string,
+  actor: Actor,
+  clients: ClientRow[],
+  flash: FlashMessage | null,
+): Promise<Response> {
+  const csrf = checkCsrf(request, url);
+  if (csrf) return csrf;
+  const client = await loadClient(env, clientId);
+  if (!client) return new Response("Not found", { status: 404 });
+
+  const form = await request.formData();
+  const email = String(form.get("attested_by_email") ?? "").trim();
+  const ipRaw = String(form.get("attested_ip") ?? "").trim();
+  const scope = String(form.get("scope") ?? "");
+  const scopePathsRaw = String(form.get("scope_paths") ?? "").trim();
+  const uaRaw = String(form.get("user_agent") ?? "").trim();
+
+  const respondForm = (errorMsg: string) =>
+    new Response(
+      layout({
+        title: `Attest ${clientId}`,
+        content: renderAttestForm(client, errorMsg),
+        activeNav: `client:${clientId}`,
+        clients,
+        flash,
+      }),
+      { status: 400, headers: htmlHeaders() },
+    );
+
+  if (!email || !email.includes("@")) return respondForm("attested_by_email is required.");
+  if (scope !== "full_site" && scope !== "specified_paths")
+    return respondForm("scope must be full_site or specified_paths.");
+  let scopePathsJson: string | null = null;
+  if (scope === "specified_paths") {
+    const paths = scopePathsRaw
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (paths.length === 0)
+      return respondForm("scope_paths is required when scope = specified_paths.");
+    scopePathsJson = JSON.stringify(paths);
+  }
+  const ip = ipRaw || actor.ip;
+  const userAgent = uaRaw || request.headers.get("user-agent") || null;
+  const attestedAt = new Date().toISOString();
+
+  await env.CONFIG_DB.prepare(
+    `INSERT INTO attestations
+       (client_id, proxy_domain, source_domain, attested_by_email,
+        attested_at, attested_ip, user_agent, scope, scope_paths_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      clientId,
+      client.proxy_domain,
+      client.source_domain,
+      email,
+      attestedAt,
+      ip,
+      userAgent,
+      scope,
+      scopePathsJson,
+    )
+    .run();
+  await writeAudit(env, {
+    client_id: clientId,
+    actor_email: actor.email,
+    actor_ip: actor.ip,
+    event_type: "authorization_update",
+    before_hash: null,
+    after_hash: null,
+    previous_status: null,
+    new_status: null,
+    notes: `attestation by ${email} (scope=${scope})`,
+  });
+  return flashRedirect(`/clients/${clientId}`, {
+    text: `Attestation recorded for ${email}.`,
+    kind: "ok",
+  });
+}
+
+function htmlHeaders(): Record<string, string> {
+  return { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" };
+}
+
 /* ─── Router ─── */
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const authResp = checkAuth(request, env);
-    if (authResp) return authResp;
+    const auth = checkAuth(request, env);
+    if (auth instanceof Response) return auth;
+    const actor: Actor = {
+      email: auth,
+      ip: request.headers.get("cf-connecting-ip") ?? "0.0.0.0",
+    };
 
     const url = new URL(request.url);
     const path = url.pathname;
+    const method = request.method.toUpperCase();
     try {
       const clients = await loadAllClients(env);
+      const flash = readFlash(url);
       const respond = (title: string, content: string, activeNav: string) =>
-        new Response(layout({ title, content, activeNav, clients }), {
-          headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
-        });
+        new Response(
+          layout({ title, content, activeNav, clients, flash }),
+          { headers: htmlHeaders() },
+        );
 
-      if (path === "/" || path === "")
-        return respond("Overview", await renderOverview(env), "home");
-      if (path === "/clients") return respond("Clients", await renderClientsList(env), "clients");
-      if (path.startsWith("/clients/")) {
-        const id = decodeURIComponent(path.slice("/clients/".length));
-        return respond(id, await renderClientDetail(env, id), `client:${id}`);
+      // GET routes
+      if (method === "GET") {
+        if (path === "/" || path === "")
+          return respond("Overview", await renderOverview(env), "home");
+        if (path === "/clients")
+          return respond("Clients", await renderClientsList(env), "clients");
+        if (path === "/clients/new")
+          return respond(
+            "New client",
+            renderNewClientForm(NEW_CLIENT_TEMPLATE, null),
+            "clients:new",
+          );
+        if (path === "/redirects")
+          return respond("Redirects", await renderRedirects(env), "redirects");
+        if (path === "/audit") return respond("Audit log", await renderAudit(env), "audit");
+        if (path === "/kv") return respond("KV browser", await renderKv(env), "kv");
+        if (path.startsWith("/kv/")) {
+          const k = decodeURIComponent(path.slice("/kv/".length));
+          return respond(k, await renderKvDetail(env, k), "kv");
+        }
+        if (path.startsWith("/clients/")) {
+          const rest = path.slice("/clients/".length);
+          const slash = rest.indexOf("/");
+          const id = decodeURIComponent(slash === -1 ? rest : rest.slice(0, slash));
+          const sub = slash === -1 ? "" : rest.slice(slash + 1);
+          if (sub === "edit") {
+            const client = await loadClient(env, id);
+            if (!client) return respond(id, "<h1>Not found</h1>", `client:${id}`);
+            const pretty = JSON.stringify(JSON.parse(client.config_json), null, 2);
+            return respond(
+              `Edit ${id}`,
+              renderEditClientForm(client, pretty, null),
+              `client:${id}`,
+            );
+          }
+          if (sub === "attest") {
+            const client = await loadClient(env, id);
+            if (!client) return respond(id, "<h1>Not found</h1>", `client:${id}`);
+            return respond(
+              `Attest ${id}`,
+              renderAttestForm(client, null),
+              `client:${id}`,
+            );
+          }
+          if (sub === "") {
+            return respond(id, await renderClientDetail(env, id), `client:${id}`);
+          }
+        }
+        return respond("Not found", "<h1>Not found</h1>", "");
       }
-      if (path === "/redirects")
-        return respond("Redirects", await renderRedirects(env), "redirects");
-      if (path === "/audit") return respond("Audit log", await renderAudit(env), "audit");
-      if (path === "/kv") return respond("KV browser", await renderKv(env), "kv");
-      if (path.startsWith("/kv/")) {
-        const k = decodeURIComponent(path.slice("/kv/".length));
-        return respond(k, await renderKvDetail(env, k), "kv");
+
+      // POST routes — all CSRF-checked inside the handler.
+      if (method === "POST") {
+        if (path === "/clients/new")
+          return await handleNewClientPost(request, env, url, actor, clients, flash);
+        if (path.startsWith("/clients/")) {
+          const rest = path.slice("/clients/".length);
+          const slash = rest.indexOf("/");
+          if (slash !== -1) {
+            const id = decodeURIComponent(rest.slice(0, slash));
+            const sub = rest.slice(slash + 1);
+            if (sub === "edit")
+              return await handleEditClientPost(request, env, url, id, actor, clients, flash);
+            if (sub === "status")
+              return await handleStatusPost(request, env, url, id, actor);
+            if (sub === "cache-purge")
+              return await handleCachePurgePost(request, env, url, id, actor);
+            if (sub === "attest")
+              return await handleAttestPost(request, env, url, id, actor, clients, flash);
+          }
+        }
+        return new Response("Not found", { status: 404 });
       }
-      return respond("Not found", "<h1>Not found</h1>", "");
+
+      return new Response("Method not allowed", {
+        status: 405,
+        headers: { allow: "GET, POST" },
+      });
     } catch (e) {
       return new Response(
         `<h1>Admin error</h1><pre>${esc((e as Error).stack ?? String(e))}</pre>`,
