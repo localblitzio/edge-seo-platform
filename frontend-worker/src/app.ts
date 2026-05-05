@@ -26,6 +26,7 @@ import { ClientConfig } from "../../src/config/schema.js";
 import { assertConfigInvariants } from "../../src/config/validator.js";
 import { ConfigValidationError } from "../../src/lib/errors.js";
 import type { User } from "./auth.js";
+import { BUILD_VERSION } from "./build-version.js";
 import { LIST_EDITOR_JS } from "./list-editor-js.js";
 
 /* ─── Types ─── */
@@ -190,6 +191,7 @@ export const APP_STYLE = `
 .app-sidebar a:hover{background:var(--bg-elevated)}
 .app-sidebar a.active{background:var(--accent);color:var(--accent-fg)}
 .app-sidebar-section{font-size:.7rem;text-transform:uppercase;letter-spacing:.08em;color:var(--fg-muted);font-weight:600;padding:.5rem .75rem;margin-top:.75rem}
+.app-sidebar-version{margin-top:auto;padding:.55rem .75rem;font-size:.7rem;color:var(--fg-muted);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.04em;border-top:1px solid var(--border)}
 .app-main{padding:1.75rem 2rem;max-width:1100px}
 .app-main h1{font-size:1.45rem;margin:0 0 .4rem;font-weight:700;letter-spacing:-.01em}
 .app-main h2{font-size:1.05rem;margin:1.75rem 0 .6rem;font-weight:600}
@@ -312,7 +314,11 @@ export function appSidebar(opts: { activeNav: string; clients: ClientRow[]; user
           )
           .join("")}`
       : "";
-  return `<nav class="app-sidebar">${items}${adminLink}${clientList}</nav>`;
+  // Build version pinned at deploy time — operators use this to
+  // verify a change actually shipped. Click to reveal full SHA via
+  // title attribute.
+  const versionFooter = `<div class="app-sidebar-version" title="Build ${esc(BUILD_VERSION)}">build ${esc(BUILD_VERSION)}</div>`;
+  return `<nav class="app-sidebar">${items}${adminLink}${clientList}${versionFooter}</nav>`;
 }
 
 export function appLayout(opts: AppLayoutOpts): string {
@@ -1093,7 +1099,8 @@ export function renderPerPageEditor(opts: {
         <button class="btn btn-primary" type="submit">Save</button>
         <a class="btn" href="/app/clients/${esc(opts.client.client_id)}">Cancel</a>
       </div>
-    </form>`;
+    </form>
+    <script>${LIST_EDITOR_JS}</script>`;
 }
 
 export function renderAttestForm(client: ClientRow, error: string | null): string {
