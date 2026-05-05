@@ -35,6 +35,7 @@ import {
   handleEditClientPost,
   handleNewClientPost,
   handleStatusPost,
+  literalPathFromMatch,
   loadVisibleClient,
   loadVisibleClients,
   renderAttestForm,
@@ -999,10 +1000,14 @@ export default {
             headers: { location: `/app/clients/${encodeURIComponent(id)}` },
           });
         }
-        // Try to derive a literal path for display only.
+        // Try to derive a literal path for display + Inspect pre-fill.
+        // Prefer an existing rule's derived path (handles edge cases the
+        // standalone derivation might miss), but fall back to deriving
+        // from the match itself so a brand-new page has its Inspect
+        // input pre-filled with the path instead of `/`.
         const summary = summarizeEditedPages(JSON.parse(client.config_json));
         const existing = summary.find((g) => g.match === effectiveMatch);
-        const literalPath = existing?.literalPath ?? null;
+        const literalPath = existing?.literalPath ?? literalPathFromMatch(effectiveMatch);
         const pretty = JSON.stringify(JSON.parse(client.config_json), null, 2);
         return htmlResponse(
           htmlPage({

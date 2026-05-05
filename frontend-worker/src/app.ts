@@ -525,6 +525,16 @@ export function summarizeEditedPages(cfg: Record<string, unknown>): PageGroup[] 
   });
 }
 
+/**
+ * Public accessor for `derivLiteralPath` so the route handler can derive
+ * a path from the match regex when no existing rule is around to do it
+ * (e.g. opening the per-page editor for a path that has no rules yet —
+ * the Inspect field should still pre-fill with the path, not `/`).
+ */
+export function literalPathFromMatch(match: string): string | null {
+  return derivLiteralPath(match);
+}
+
 function isWildcardMatch(m: string): boolean {
   // Heuristic: any pattern with regex repetition or character-class
   // ranges is treated as wildcard. Literal matches like `^/about$` use
