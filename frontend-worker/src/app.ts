@@ -627,7 +627,17 @@ function renderPagesWithEditsPanel(clientId: string, cfg: Record<string, unknown
         var clean = p.trim();
         if (!clean) return;
         if (!clean.startsWith('/')) clean = '/' + clean;
-        var match = '^' + clean.replace(/[.*+?^\$()|[\\]{}\\\\]/g, '\\\\$&') + '$';
+        // Strip a trailing slash and emit "/?$" so the regex matches
+        // both /about-us and /about-us/. Origins like WordPress canon-
+        // calize to the trailing-slash form; the operator should not
+        // need to know which form the proxy is currently serving.
+        var stripped = clean.replace(/\\/+$/, '');
+        var match;
+        if (stripped === '') {
+          match = '^/$';
+        } else {
+          match = '^' + stripped.replace(/[.*+?^\$()|[\\]{}\\\\]/g, '\\\\$&') + '/?$';
+        }
         location.href = '/app/clients/' + encodeURIComponent(t.dataset.editPagePrompt) + '/page?match=' + encodeURIComponent(match);
       }
     });
