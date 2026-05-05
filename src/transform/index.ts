@@ -5,7 +5,7 @@
  * the §5 step 9 fixed order:
  *
  *   meta_rewrites → canonical → schema_injections → link_rewrites
- *   → element_removals → content_injections → indexation
+ *   → text_rewrites → element_removals → content_injections → indexation
  *
  * Required properties (§6.4):
  *   - **Idempotence via marker.** Every injected element carries a
@@ -32,6 +32,7 @@ import { attachIndexation } from "./indexation-applier.js";
 import { attachLinkRewrites } from "./link-rewriter.js";
 import { attachMetaRewrites } from "./meta-rewriter.js";
 import { attachSchemaInjections } from "./schema-injector.js";
+import { attachTextRewrites } from "./text-rewriter.js";
 
 /**
  * Build the HTMLRewriter for a single request. Each handler module
@@ -58,6 +59,7 @@ export function buildRewriter(
   attachCanonical(rewriter, canonicalDecision);
   attachSchemaInjections(rewriter, path, config.schema_injections);
   attachLinkRewrites(rewriter, path, config.link_rewrites);
+  attachTextRewrites(rewriter, path, config.text_rewrites);
   attachElementRemovals(rewriter, path, config.element_removals);
   attachContentInjections(rewriter, path, config.content_injections);
   attachIndexation(rewriter, path, config.indexation);

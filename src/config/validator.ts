@@ -110,6 +110,9 @@ function collectRegexFields(config: ClientConfig): RegexField[] {
   config.content_injections.forEach((r, i) =>
     out.push({ path: `content_injections[${i}].match`, pattern: r.match }),
   );
+  config.text_rewrites.forEach((r, i) =>
+    out.push({ path: `text_rewrites[${i}].match`, pattern: r.match }),
+  );
   config.meta_rewrites.forEach((r, i) =>
     out.push({ path: `meta_rewrites[${i}].match`, pattern: r.match }),
   );

@@ -76,6 +76,36 @@ describe("ClientConfig schema", () => {
     expect(ClientConfig.safeParse(cfg).success).toBe(true);
   });
 
+  it("text_rewrites: defaults mode to 'text' when omitted", () => {
+    const cfg = validLanternCrestConfig() as Record<string, unknown>;
+    cfg.text_rewrites = [{ match: "^/$", selector: "h1", content: "New Title" }];
+    const result = ClientConfig.parse(cfg);
+    expect(result.text_rewrites[0]?.mode).toBe("text");
+  });
+
+  it("text_rewrites: accepts mode='html'", () => {
+    const cfg = validLanternCrestConfig() as Record<string, unknown>;
+    cfg.text_rewrites = [
+      { match: "^/$", selector: "h1", mode: "html", content: "<em>New</em>" },
+    ];
+    expect(ClientConfig.safeParse(cfg).success).toBe(true);
+  });
+
+  it("text_rewrites: rejects an unknown mode", () => {
+    const cfg = validLanternCrestConfig() as Record<string, unknown>;
+    cfg.text_rewrites = [
+      { match: "^/$", selector: "h1", mode: "raw", content: "x" },
+    ];
+    expect(ClientConfig.safeParse(cfg).success).toBe(false);
+  });
+
+  it("text_rewrites: defaults to [] when omitted from config", () => {
+    const cfg = validLanternCrestConfig() as Record<string, unknown>;
+    delete cfg.text_rewrites;
+    const result = ClientConfig.parse(cfg);
+    expect(result.text_rewrites).toEqual([]);
+  });
+
   it("rejects an unknown schema_version", () => {
     const cfg = validLanternCrestConfig() as Record<string, unknown>;
     cfg.schema_version = 2;

@@ -29,13 +29,14 @@ describe("LIST_EDITOR_JS", () => {
     expect(LIST_EDITOR_JS).toContain("dataset.path");
   });
 
-  it("contains the five list-key entries the form expects", () => {
+  it("contains all six list-key entries the form expects", () => {
     for (const key of [
       "indexation",
       "canonicals",
       "schema_injections",
       "redirects.static",
       "meta_rewrites",
+      "text_rewrites",
     ]) {
       expect(LIST_EDITOR_JS).toContain(key);
     }
