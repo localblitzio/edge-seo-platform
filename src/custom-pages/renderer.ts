@@ -31,6 +31,34 @@ export function buildHtmlResponse(
 }
 
 /**
+ * Build a 200 response from arbitrary R2 content. Used for static-site
+ * uploads where each file (HTML, CSS, JS, image, font) carries its own
+ * content-type stored as R2 httpMetadata at upload time.
+ *
+ * Falls back to `application/octet-stream` if the upload didn't supply
+ * a content-type (defensive — admin form always sets one, but R2
+ * objects created out-of-band might not).
+ *
+ * @param body the file bytes (ArrayBuffer for binary, string for text-y formats)
+ * @param contentType the R2-stored content-type, or undefined to use octet-stream
+ * @param etag R2 httpEtag
+ * @param lastModified R2 uploaded date
+ */
+export function buildAssetResponse(
+  body: ArrayBuffer | string,
+  contentType: string | undefined,
+  etag?: string | undefined,
+  lastModified?: Date | undefined,
+): Response {
+  const headers = new Headers({
+    "content-type": contentType || "application/octet-stream",
+  });
+  if (etag) headers.set("etag", etag);
+  if (lastModified) headers.set("last-modified", lastModified.toUTCString());
+  return new Response(body, { status: 200, headers });
+}
+
+/**
  * The standard 404 used when neither R2 nor KV has a matching page.
  *
  * @returns a 404 plain-text Response

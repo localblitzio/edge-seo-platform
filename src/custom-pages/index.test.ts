@@ -9,17 +9,22 @@ interface R2Entry {
   body: string;
   httpEtag?: string;
   uploaded?: Date;
+  /** Optional content-type stored as R2 httpMetadata. */
+  contentType?: string;
 }
 
 function makeR2(entries: Record<string, R2Entry>): R2Bucket {
+  const encoder = new TextEncoder();
   return {
     get: async (key: string) => {
       const e = entries[key];
       if (!e) return null;
       return {
         text: async () => e.body,
+        arrayBuffer: async () => encoder.encode(e.body).buffer,
         httpEtag: e.httpEtag,
         uploaded: e.uploaded,
+        httpMetadata: e.contentType ? { contentType: e.contentType } : undefined,
       };
     },
   } as unknown as R2Bucket;
@@ -139,6 +144,56 @@ describe("renderCustomPage", () => {
     const response = await renderCustomPage(new URL("https://x/test-lp"), route, env);
     expect(response.status).toBe(200);
     expect(await response.text()).toBe("<html>found</html>");
+  });
+
+  it("serves a CSS asset with the stored content-type (static-site bundle)", async () => {
+    const env = makeEnv({
+      "site/landing/css/main.css": {
+        body: "body{color:red}",
+        contentType: "text/css; charset=utf-8",
+      },
+    });
+    const route: RouteRule = {
+      match: "^/landing/.*",
+      type: "custom_page",
+      custom_page_key: "site",
+      origin_auth: { type: "none" },
+    };
+    const response = await renderCustomPage(new URL("https://x/landing/css/main.css"), route, env);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("text/css; charset=utf-8");
+    expect(await response.text()).toBe("body{color:red}");
+  });
+
+  it("falls back to <key>index.html for directory-style URLs", async () => {
+    const env = makeEnv({
+      "site/landing/index.html": { body: "<html>landing</html>" },
+    });
+    const route: RouteRule = {
+      match: "^/landing/.*",
+      type: "custom_page",
+      custom_page_key: "site",
+      origin_auth: { type: "none" },
+    };
+    // Trailing-slash directory request resolves to index.html under it.
+    const r1 = await renderCustomPage(new URL("https://x/landing/"), route, env);
+    expect(r1.status).toBe(200);
+    expect(await r1.text()).toBe("<html>landing</html>");
+  });
+
+  it("falls back to <key>/index.html for non-slash directory URLs", async () => {
+    const env = makeEnv({
+      "site/about/index.html": { body: "<html>about</html>" },
+    });
+    const route: RouteRule = {
+      match: "^/about/.*",
+      type: "custom_page",
+      custom_page_key: "site",
+      origin_auth: { type: "none" },
+    };
+    const r = await renderCustomPage(new URL("https://x/about"), route, env);
+    expect(r.status).toBe(200);
+    expect(await r.text()).toBe("<html>about</html>");
   });
 
   it("primary key wins when both forms exist (explicit storage trumps alt)", async () => {
