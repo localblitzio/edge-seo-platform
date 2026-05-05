@@ -18,13 +18,7 @@
 import { ClientConfig } from "../../src/config/schema.js";
 import { assertConfigInvariants } from "../../src/config/validator.js";
 import { ConfigValidationError } from "../../src/lib/errors.js";
-import {
-  checkCsrf,
-  flashRedirect,
-  fnvHash,
-  readFlash,
-  type FlashMessage,
-} from "./helpers.js";
+import { type FlashMessage, checkCsrf, flashRedirect, fnvHash, readFlash } from "./helpers.js";
 
 interface Env {
   CONFIG_KV: KVNamespace;
@@ -1128,17 +1122,15 @@ export default {
       const clients = await loadAllClients(env);
       const flash = readFlash(url);
       const respond = (title: string, content: string, activeNav: string) =>
-        new Response(
-          layout({ title, content, activeNav, clients, flash }),
-          { headers: htmlHeaders() },
-        );
+        new Response(layout({ title, content, activeNav, clients, flash }), {
+          headers: htmlHeaders(),
+        });
 
       // GET routes
       if (method === "GET") {
         if (path === "/" || path === "")
           return respond("Overview", await renderOverview(env), "home");
-        if (path === "/clients")
-          return respond("Clients", await renderClientsList(env), "clients");
+        if (path === "/clients") return respond("Clients", await renderClientsList(env), "clients");
         if (path === "/clients/new")
           return respond(
             "New client",
@@ -1171,11 +1163,7 @@ export default {
           if (sub === "attest") {
             const client = await loadClient(env, id);
             if (!client) return respond(id, "<h1>Not found</h1>", `client:${id}`);
-            return respond(
-              `Attest ${id}`,
-              renderAttestForm(client, null),
-              `client:${id}`,
-            );
+            return respond(`Attest ${id}`, renderAttestForm(client, null), `client:${id}`);
           }
           if (sub === "") {
             return respond(id, await renderClientDetail(env, id), `client:${id}`);
@@ -1196,8 +1184,7 @@ export default {
             const sub = rest.slice(slash + 1);
             if (sub === "edit")
               return await handleEditClientPost(request, env, url, id, actor, clients, flash);
-            if (sub === "status")
-              return await handleStatusPost(request, env, url, id, actor);
+            if (sub === "status") return await handleStatusPost(request, env, url, id, actor);
             if (sub === "cache-purge")
               return await handleCachePurgePost(request, env, url, id, actor);
             if (sub === "attest")
