@@ -14,7 +14,9 @@
  *   Stored as `pbkdf2$iter$saltHex$hashHex` so verify reads the iteration
  *   count from the value itself.
  * - Email sends via Cloudflare Email Service (`env.EMAIL.send`) — From
- *   noreply@localpage.us.com, Reply-To simon@localblitzmarketing.com.
+ *   noreply@edgeseo.app, Reply-To simon@localblitzmarketing.com. The
+ *   edgeseo.app zone is the application domain; localpage.us.com is the
+ *   proxy zone for customer traffic and not used for app email or auth.
  * - CSRF defense: every POST checks `Origin` (or `Referer` fallback)
  *   matches the request URL host. Combined with HttpOnly Secure
  *   SameSite=Lax session cookie, this is the right level for an
@@ -267,7 +269,7 @@ function renderForgotForm(opts: { email: string; submitted: boolean }): string {
     return `<div class="auth-card">
       <h1>Check your inbox</h1>
       <p class="subtitle">If an account exists for <code>${esc(opts.email)}</code>, we've sent a password reset link. The link expires in 1 hour.</p>
-      <p style="font-size:.85rem;color:var(--fg-muted);margin-top:1rem;">If you don't see it, check spam — emails come from <code>noreply@localpage.us.com</code>. Replies route to <a href="mailto:simon@localblitzmarketing.com">simon@localblitzmarketing.com</a>.</p>
+      <p style="font-size:.85rem;color:var(--fg-muted);margin-top:1rem;">If you don't see it, check spam — emails come from <code>noreply@edgeseo.app</code>. Replies route to <a href="mailto:simon@localblitzmarketing.com">simon@localblitzmarketing.com</a>.</p>
       <div class="alt"><a href="/login">← Back to sign in</a></div>
     </div>`;
   }
