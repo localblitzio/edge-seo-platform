@@ -1099,7 +1099,8 @@ export function renderPerPageEditor(opts: {
         <button class="btn btn-primary" type="submit">Save</button>
         <a class="btn" href="/app/clients/${esc(opts.client.client_id)}">Cancel</a>
       </div>
-    </form>`;
+    </form>
+    <script>${LIST_EDITOR_JS}</script>`;
 }
 
 export function renderAttestForm(client: ClientRow, error: string | null): string {
