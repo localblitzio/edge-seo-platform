@@ -964,6 +964,39 @@ function renderStructuredFormBody(opts: {
       if (subEl0) {
         subEl0.addEventListener('input', function () { subEl0.dataset.userEdited = '1'; });
       }
+      // Auto-fill routing[0].origin from source_domain. Mirrors the
+      // client_id -> subdomain auto-fill heuristic: only fills when the
+      // origin field is empty or still holds the template placeholder
+      // (REPLACE_WITH_SOURCE_HOST), AND the user hasn't manually edited
+      // origin yet. Once the user types in the origin field, auto-fill
+      // stops. Catches the bug class where source_domain was filled but
+      // routing[0].origin was left as the placeholder string, which made
+      // the worker try to fetch a literal "https://REPLACE_WITH_SOURCE_HOST".
+      var sourceEl = document.getElementById('f_source_domain');
+      var originEl = document.getElementById('f_origin');
+      function shouldAutoFillOrigin() {
+        if (!originEl) return false;
+        if (originEl.dataset.userEdited === '1') return false;
+        var v = originEl.value || '';
+        return v === '' || v.indexOf('REPLACE_') !== -1;
+      }
+      if (sourceEl && originEl) {
+        sourceEl.addEventListener('input', function () {
+          if (!shouldAutoFillOrigin()) return;
+          var s = sourceEl.value.trim();
+          originEl.value = s === '' ? '' : 'https://' + s.replace(/^https?:\/\//i, '');
+          syncToJson();
+        });
+        originEl.addEventListener('input', function () {
+          originEl.dataset.userEdited = '1';
+        });
+        // Also auto-fill on initial render if the template loaded with the
+        // placeholder string (covers the new-client form's first paint).
+        if (shouldAutoFillOrigin() && sourceEl.value && sourceEl.value.indexOf('REPLACE_') === -1) {
+          originEl.value = 'https://' + sourceEl.value.replace(/^https?:\/\//i, '');
+          syncToJson();
+        }
+      }
       // Mode-toggle wiring: enable/disable the matching input based on radio.
       function onModeChange() {
         var defOn = document.getElementById('f_proxy_mode_default').checked;
