@@ -110,4 +110,53 @@ describe("renderCustomPage", () => {
     const response = await renderCustomPage(new URL("https://x/welcome"), customRoute, env);
     expect(await response.text()).toBe("<html>r2-wins</html>");
   });
+
+  it("trailing slash on URL finds the no-slash storage key (alt fallback)", async () => {
+    // Operator typed `/test-lp` in the upload form → stored at
+    // `lantern-crest/test-lp`. User visits `/test-lp/` with trailing slash;
+    // the route's `^/test-lp/?$` matches both, but the lookup must too.
+    const env = makeEnv({ "lantern-crest/test-lp": { body: "<html>found</html>" } });
+    const route: RouteRule = {
+      match: "^/test-lp/?$",
+      type: "custom_page",
+      custom_page_key: "lantern-crest",
+      origin_auth: { type: "none" },
+    };
+    const response = await renderCustomPage(new URL("https://x/test-lp/"), route, env);
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("<html>found</html>");
+  });
+
+  it("no trailing slash on URL finds the slash-stored key (alt fallback)", async () => {
+    // Inverse: operator typed `/test-lp/` and visitor hit `/test-lp`.
+    const env = makeEnv({ "lantern-crest/test-lp/": { body: "<html>found</html>" } });
+    const route: RouteRule = {
+      match: "^/test-lp/?$",
+      type: "custom_page",
+      custom_page_key: "lantern-crest",
+      origin_auth: { type: "none" },
+    };
+    const response = await renderCustomPage(new URL("https://x/test-lp"), route, env);
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("<html>found</html>");
+  });
+
+  it("primary key wins when both forms exist (explicit storage trumps alt)", async () => {
+    const env = makeEnv({
+      "lantern-crest/test-lp": { body: "<html>no-slash</html>" },
+      "lantern-crest/test-lp/": { body: "<html>with-slash</html>" },
+    });
+    const route: RouteRule = {
+      match: "^/test-lp/?$",
+      type: "custom_page",
+      custom_page_key: "lantern-crest",
+      origin_auth: { type: "none" },
+    };
+    // Visitor on /test-lp/ — primaryKey is "lantern-crest/test-lp/", which exists.
+    const r1 = await renderCustomPage(new URL("https://x/test-lp/"), route, env);
+    expect(await r1.text()).toBe("<html>with-slash</html>");
+    // Visitor on /test-lp — primaryKey is "lantern-crest/test-lp", which exists.
+    const r2 = await renderCustomPage(new URL("https://x/test-lp"), route, env);
+    expect(await r2.text()).toBe("<html>no-slash</html>");
+  });
 });
