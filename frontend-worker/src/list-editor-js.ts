@@ -109,6 +109,9 @@ export const LIST_EDITOR_JS = String.raw`
     'meta_rewrites': function () {
       return { match: '^/.*', tag: 'title', value: 'Example Page Title' };
     },
+    'text_rewrites': function () {
+      return { match: '^/.*', selector: 'h1', mode: 'text', content: 'New heading' };
+    },
   };
 
   // Renderers per list key. Each takes (entry, idx) and returns one
@@ -238,6 +241,38 @@ export const LIST_EDITOR_JS = String.raw`
     );
   }
 
+  function renderTextRewriteEntry(e, idx) {
+    var modes = ['text', 'html'];
+    var modeHtml = modes
+      .map(function (v) {
+        var cur = e.mode || 'text';
+        return '<option value="' + v + '"' + (cur === v ? ' selected' : '') + '>' + v + '</option>';
+      })
+      .join('');
+    // Quick-pick selector presets shown as a comma-separated hint —
+    // operator can paste any CSS selector but these are the common ones.
+    return (
+      '<div class="list-entry">' +
+        '<div class="form-grid">' +
+          '<div><label>match (regex)</label><input type="text" data-path="text_rewrites.' + idx + '.match" value="' + escAttr(e.match) + '" placeholder="^/$"></div>' +
+          '<div><label>selector (CSS)</label><input type="text" data-path="text_rewrites.' + idx + '.selector" value="' + escAttr(e.selector) + '" placeholder="h1">' +
+            '<div class="field-hint">Examples: <code>h1</code>, <code>h2.hero-title</code>, <code>main p:first-of-type</code>, <code>[data-cta]</code></div>' +
+          '</div>' +
+          '<div><label>mode</label><select data-path="text_rewrites.' + idx + '.mode">' + modeHtml + '</select>' +
+            '<div class="field-hint"><strong>text</strong> (safe) escapes HTML chars. <strong>html</strong> renders raw HTML — for spans, links, etc.</div>' +
+          '</div>' +
+          '<div class="full-width"><label>content</label>' +
+            '<textarea data-path="text_rewrites.' + idx + '.content" style="min-height:80px">' + escAttr(e.content) + '</textarea>' +
+            '<div class="field-hint">The replacement. Element\'s attributes / classes / surrounding markup are preserved.</div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="list-entry-foot">' +
+          '<button type="button" class="btn btn-danger" data-remove-from="text_rewrites" data-remove-idx="' + idx + '">Remove</button>' +
+        '</div>' +
+      '</div>'
+    );
+  }
+
   function renderMetaRewriteEntry(e, idx) {
     var tags = ['title', 'description', 'robots', 'og:title', 'og:description', 'og:image', 'og:type', 'og:site_name', 'twitter:card', 'twitter:title', 'twitter:description', 'twitter:image'];
     var tagHtml = tags
@@ -265,6 +300,7 @@ export const LIST_EDITOR_JS = String.raw`
     'schema_injections': renderSchemaInjectionEntry,
     'redirects.static': renderStaticRedirectEntry,
     'meta_rewrites': renderMetaRewriteEntry,
+    'text_rewrites': renderTextRewriteEntry,
   };
 
   function renderListSection(key) {
@@ -398,6 +434,7 @@ export const LIST_EDITOR_JS = String.raw`
       s: j.schema_injections,
       r: j.redirects && j.redirects.static,
       m: j.meta_rewrites,
+      t: j.text_rewrites,
     });
     if (sig !== lastSig) {
       lastSig = sig;

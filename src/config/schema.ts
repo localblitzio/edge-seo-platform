@@ -136,6 +136,27 @@ export const MetaRewriteRule = z.object({
   value: z.string(),
 });
 
+export const TextRewriteRule = z.object({
+  /**
+   * Path regex. Rule applies on pages whose path matches.
+   * Validated by `assertConfigInvariants` for ReDoS shape and ≤512 chars.
+   */
+  match: z.string(),
+  /**
+   * CSS selector — anything HTMLRewriter accepts. Examples: `h1`,
+   * `h2.hero-title`, `main p:first-of-type`, `[data-cta]`.
+   */
+  selector: z.string(),
+  /**
+   * `text` (default) replaces the element's inner content with text-
+   * escaped content (no HTML allowed; `<`, `>`, `&` are entity-encoded).
+   * `html` replaces with raw HTML — caller is responsible for safety.
+   */
+  mode: z.enum(["text", "html"]).default("text"),
+  /** The replacement content. */
+  content: z.string(),
+});
+
 export const IndexationRule = z.object({
   match: z.string(),
   robots: z.enum(["index,follow", "noindex,follow", "noindex,nofollow", "index,nofollow"]),
@@ -218,6 +239,7 @@ export const ClientConfig = z.object({
   link_rewrites: z.array(LinkRewriteRule).default([]),
   element_removals: z.array(ElementRemoveRule).default([]),
   content_injections: z.array(ContentInjectRule).default([]),
+  text_rewrites: z.array(TextRewriteRule).default([]),
   meta_rewrites: z.array(MetaRewriteRule).default([]),
   indexation: z.array(IndexationRule).default([]),
   caching: z.array(CacheRule).default([]),
@@ -240,6 +262,7 @@ export type SchemaInjection = z.infer<typeof SchemaInjection>;
 export type LinkRewriteRule = z.infer<typeof LinkRewriteRule>;
 export type ElementRemoveRule = z.infer<typeof ElementRemoveRule>;
 export type ContentInjectRule = z.infer<typeof ContentInjectRule>;
+export type TextRewriteRule = z.infer<typeof TextRewriteRule>;
 export type MetaRewriteRule = z.infer<typeof MetaRewriteRule>;
 export type IndexationRule = z.infer<typeof IndexationRule>;
 export type OriginAuth = z.infer<typeof OriginAuth>;
