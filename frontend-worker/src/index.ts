@@ -1,37 +1,53 @@
 /**
  * Edge SEO Platform — frontend worker.
  *
- * User-facing landing page, auth flows (login, password reset, email
- * verification, invite-set-password), authenticated app dashboard (client
- * CRUD, audit log, KV browser), and super-admin user CRUD.
- *
- * Phase B (this commit): scaffolding only. Landing page at `/` is fully
- * rendered; other routes return placeholders that Phases C–F fill in.
+ * Phase D: full auth flows — login, forgot, reset, verify, logout — plus
+ * authenticated route gating for /app/* (any user) and /admin/* (super-
+ * admin only). Authenticated app contents and super-admin user CRUD are
+ * still placeholders; Phases E and F replace those with real handlers.
  *
  * Architectural anchors:
- * - Reads/writes the same D1 + KV bindings the main edge worker uses.
- *   Multi-user via `users` table (migration 0002); multi-tenant via
- *   `clients.owner_id` with super-admin override.
- * - Sessions are server-side rows in the `sessions` table, looked up via
- *   a random token in an HttpOnly Secure SameSite=Lax cookie. Phase D
- *   wires the auth middleware.
- * - Email sends use Cloudflare Email Service (public beta) via `env.EMAIL`
- *   binding. Phase C wires this. From: noreply@localpage.us.com,
- *   Reply-To: simon@localblitzmarketing.com.
+ * - Sessions are random tokens stored server-side in `sessions` (D1).
+ *   Cookie carries the token; we look it up on every request. Lets us
+ *   revoke instantly (logout, password change, force expire all sessions).
+ * - Passwords hashed with PBKDF2-SHA-256, 200k iterations, 16-byte salt.
+ *   Stored as `pbkdf2$iter$saltHex$hashHex` so verify reads the iteration
+ *   count from the value itself.
+ * - Email sends via Cloudflare Email Service (`env.EMAIL.send`) — From
+ *   noreply@localpage.us.com, Reply-To simon@localblitzmarketing.com.
+ * - CSRF defense: every POST checks `Origin` (or `Referer` fallback)
+ *   matches the request URL host. Combined with HttpOnly Secure
+ *   SameSite=Lax session cookie, this is the right level for an
+ *   internal agency tool.
  *
- * Until Phase G cut-over, this worker is reachable only via its
- * workers.dev URL: https://edge-seo-frontend.localblitzio.workers.dev
- * Phase G adds the apex `localpage.us.com/*` route and deprecates the
- * basic-auth `edge-seo-admin` worker.
+ * Flash messages survive the 303 redirect via ?flash=...&kind=ok|warn|err
+ * — same pattern as the admin-worker.
  */
 
-import type { EmailBinding } from "./email.js";
+import {
+  type EmailTokenKind,
+  RESET_PASSWORD_TOKEN_TTL_MS,
+  type Role,
+  type SessionWithUser,
+  type User,
+  consumeEmailToken,
+  createEmailToken,
+  createSession,
+  destroyAllSessionsForUser,
+  destroySession,
+  getSessionWithUser,
+  getUserByEmail,
+  parseSessionCookie,
+  sessionCookieHeader,
+  setPassword as setUserPassword,
+  verifyPassword,
+} from "./auth.js";
+import { type EmailBinding, resetPasswordMessage, sendEmail } from "./email.js";
 
 interface Env {
   CONFIG_KV: KVNamespace;
   CONFIG_DB: D1Database;
   SESSION_SECRET?: string;
-  /** Cloudflare Email Service (public beta) — wired in Phase C, used in Phase D+. */
   EMAIL: EmailBinding;
 }
 
@@ -55,7 +71,10 @@ code,.mono{font-family:var(--mono);font-size:.92em}
 .topbar{display:flex;align-items:center;justify-content:space-between;padding:1rem 2rem;background:var(--bg-elevated);border-bottom:1px solid var(--border)}
 .topbar .brand{display:flex;align-items:center;gap:.6rem;font-size:1rem;font-weight:600}
 .topbar .logo{display:inline-block;width:1rem;height:1rem;border-radius:9999px;background:linear-gradient(135deg,#2563eb,#7c3aed)}
-.topbar nav{display:flex;gap:1.25rem;font-size:.9rem}
+.topbar nav{display:flex;gap:1.25rem;font-size:.9rem;align-items:center}
+.topbar nav .who{color:var(--fg-muted);font-size:.82rem}
+.topbar nav form{display:inline}
+.topbar nav button.linklike{font:inherit;background:none;border:none;color:var(--accent);cursor:pointer;padding:0}
 .btn{font:inherit;border:1px solid var(--border-strong);background:var(--bg-elevated);color:var(--fg);padding:.45rem 1rem;border-radius:var(--radius);cursor:pointer;display:inline-block;text-decoration:none}
 .btn:hover{border-color:var(--accent);color:var(--accent);text-decoration:none}
 .btn-primary{background:var(--accent);color:var(--accent-fg);border-color:var(--accent)}.btn-primary:hover{filter:brightness(1.1);color:var(--accent-fg)}
@@ -72,31 +91,138 @@ code,.mono{font-family:var(--mono);font-size:.92em}
 .placeholder h1{font-size:1.35rem;margin:0 0 .5rem}
 .placeholder p{color:var(--fg-muted);margin:.4rem 0}
 .placeholder code{background:var(--bg-code);padding:.15rem .35rem;border-radius:.25rem;font-size:.85em}
+.auth-card{max-width:420px;margin:4rem auto;padding:2rem;background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow)}
+.auth-card h1{font-size:1.35rem;margin:0 0 .35rem;letter-spacing:-.01em}
+.auth-card .subtitle{color:var(--fg-muted);font-size:.9rem;margin:0 0 1.5rem}
+.auth-card form{display:flex;flex-direction:column;gap:.85rem}
+.auth-card label{font-weight:600;font-size:.85rem;display:block;margin-bottom:.3rem}
+.auth-card input[type=email],.auth-card input[type=password],.auth-card input[type=text]{font:inherit;font-size:.95rem;padding:.55rem .75rem;border:1px solid var(--border-strong);border-radius:var(--radius);background:var(--bg);color:var(--fg);width:100%}
+.auth-card .form-actions{margin-top:.5rem}
+.auth-card .form-actions .btn-primary{width:100%}
+.auth-card .alt{margin-top:1.25rem;text-align:center;font-size:.85rem;color:var(--fg-muted)}
+.flash{padding:.65rem 1rem;border-radius:var(--radius);margin:0 0 1rem;border:1px solid transparent;font-size:.9rem}
+.flash-ok{background:var(--green-bg);color:var(--green);border-color:var(--green)}
+.flash-warn{background:var(--amber-bg);color:var(--amber);border-color:var(--amber)}
+.flash-err{background:var(--red-bg);color:var(--red);border-color:var(--red)}
 `;
 
-function topbar(): string {
+/* ─── Layout ─── */
+
+interface FlashMessage {
+  text: string;
+  kind: "ok" | "warn" | "err";
+}
+
+function topbar(user: User | null): string {
+  const right = user
+    ? `<span class="who">${esc(user.email)}${user.role === "super_admin" ? " · super_admin" : ""}</span>
+        <a href="/app">Dashboard</a>
+        ${user.role === "super_admin" ? '<a href="/admin/users">Admin</a>' : ""}
+        <form method="POST" action="/logout"><button type="submit" class="linklike">Sign out</button></form>`
+    : `<a href="/login">Sign in</a>`;
   return `<header class="topbar">
     <a class="brand" href="/"><span class="logo"></span>Edge SEO Platform</a>
-    <nav>
-      <a href="/login">Sign in</a>
-    </nav>
+    <nav>${right}</nav>
   </header>`;
 }
 
-function htmlPage(title: string, body: string): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title><style>${STYLE}</style></head><body>${topbar()}${body}<footer class="footer">© ${new Date().getFullYear()} Edge SEO Platform</footer></body></html>`;
+function flashBanner(flash: FlashMessage | null): string {
+  if (!flash) return "";
+  return `<div class="flash flash-${esc(flash.kind)}" role="alert">${esc(flash.text)}</div>`;
+}
+
+function htmlPage(opts: {
+  title: string;
+  body: string;
+  user: User | null;
+  flash?: FlashMessage | null;
+}): string {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(opts.title)}</title><style>${STYLE}</style></head><body>${topbar(opts.user)}<main>${flashBanner(opts.flash ?? null)}${opts.body}</main><footer class="footer">© ${new Date().getFullYear()} Edge SEO Platform</footer></body></html>`;
+}
+
+const htmlHeadersBase: Record<string, string> = {
+  "content-type": "text/html; charset=utf-8",
+  "cache-control": "no-store",
+  "referrer-policy": "strict-origin-when-cross-origin",
+  "x-content-type-options": "nosniff",
+  "x-frame-options": "DENY",
+};
+
+function htmlResponse(body: string, init: ResponseInit = {}): Response {
+  return new Response(body, {
+    ...init,
+    headers: { ...htmlHeadersBase, ...(init.headers as Record<string, string> | undefined) },
+  });
+}
+
+/* ─── CSRF + flash helpers ─── */
+
+function checkCsrf(request: Request, url: URL): Response | null {
+  const expected = `${url.protocol}//${url.host}`;
+  const origin = request.headers.get("origin");
+  if (origin) {
+    return origin === expected ? null : new Response("CSRF: Origin mismatch", { status: 403 });
+  }
+  const referer = request.headers.get("referer");
+  if (referer) {
+    try {
+      const ref = new URL(referer);
+      return ref.host === url.host && ref.protocol === url.protocol
+        ? null
+        : new Response("CSRF: Referer mismatch", { status: 403 });
+    } catch {
+      return new Response("CSRF: invalid Referer", { status: 403 });
+    }
+  }
+  return new Response("CSRF: missing Origin and Referer", { status: 403 });
+}
+
+function readFlash(url: URL): FlashMessage | null {
+  const text = url.searchParams.get("flash");
+  if (!text) return null;
+  const kindRaw = url.searchParams.get("flash_kind");
+  const kind: FlashMessage["kind"] =
+    kindRaw === "ok" || kindRaw === "warn" || kindRaw === "err" ? kindRaw : "ok";
+  return { text, kind };
+}
+
+function flashRedirect(
+  location: string,
+  flash: FlashMessage,
+  extraHeaders: Record<string, string> = {},
+): Response {
+  const sep = location.includes("?") ? "&" : "?";
+  const target = `${location}${sep}flash=${encodeURIComponent(flash.text)}&flash_kind=${flash.kind}`;
+  return new Response(null, {
+    status: 303,
+    headers: { location: target, ...extraHeaders },
+  });
+}
+
+/** Same-origin "next" URL for post-login redirect — only allow paths,
+ * never absolute URLs that could send users off-site. */
+function safeNext(raw: string | null): string {
+  if (!raw) return "/app";
+  if (!raw.startsWith("/")) return "/app";
+  if (raw.startsWith("//")) return "/app"; // protocol-relative
+  return raw;
 }
 
 /* ─── Pages ─── */
 
-function renderLanding(): string {
+function renderLanding(user: User | null): string {
+  const cta = user
+    ? `<div class="cta">
+        <a class="btn btn-primary" href="/app">Go to dashboard</a>
+      </div>`
+    : `<div class="cta">
+        <a class="btn btn-primary" href="/login">Sign in</a>
+        <a class="btn" href="mailto:simon@localblitzmarketing.com?subject=Request%20access%20to%20Edge%20SEO%20Platform">Request access</a>
+      </div>`;
   return `<section class="hero">
     <h1>Host any site under your domain — at the edge.</h1>
     <p class="lead">Edge SEO Platform proxies, transforms, and serves websites under controlled domains using Cloudflare Workers. Add a client with one config row; serve traffic immediately on a wildcard subdomain or your custom domain.</p>
-    <div class="cta">
-      <a class="btn btn-primary" href="/login">Sign in</a>
-      <a class="btn" href="mailto:simon@localblitzmarketing.com?subject=Request%20access%20to%20Edge%20SEO%20Platform">Request access</a>
-    </div>
+    ${cta}
   </section>
   <section class="features">
     <div class="feature">
@@ -114,6 +240,82 @@ function renderLanding(): string {
   </section>`;
 }
 
+function renderLoginForm(opts: { email: string; error: string | null; next: string }): string {
+  return `<div class="auth-card">
+    <h1>Sign in</h1>
+    <p class="subtitle">Welcome back to Edge SEO Platform.</p>
+    ${opts.error ? `<div class="flash flash-err">${esc(opts.error)}</div>` : ""}
+    <form method="POST" action="/login${opts.next !== "/app" ? `?next=${encodeURIComponent(opts.next)}` : ""}">
+      <div>
+        <label for="email">Email</label>
+        <input id="email" name="email" type="email" required autocomplete="username" value="${esc(opts.email)}">
+      </div>
+      <div>
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" required autocomplete="current-password">
+      </div>
+      <div class="form-actions">
+        <button class="btn btn-primary" type="submit">Sign in</button>
+      </div>
+    </form>
+    <div class="alt"><a href="/forgot">Forgot password?</a></div>
+  </div>`;
+}
+
+function renderForgotForm(opts: { email: string; submitted: boolean }): string {
+  if (opts.submitted) {
+    return `<div class="auth-card">
+      <h1>Check your inbox</h1>
+      <p class="subtitle">If an account exists for <code>${esc(opts.email)}</code>, we've sent a password reset link. The link expires in 1 hour.</p>
+      <p style="font-size:.85rem;color:var(--fg-muted);margin-top:1rem;">If you don't see it, check spam — emails come from <code>noreply@localpage.us.com</code>. Replies route to <a href="mailto:simon@localblitzmarketing.com">simon@localblitzmarketing.com</a>.</p>
+      <div class="alt"><a href="/login">← Back to sign in</a></div>
+    </div>`;
+  }
+  return `<div class="auth-card">
+    <h1>Reset password</h1>
+    <p class="subtitle">Enter your email and we'll send a reset link.</p>
+    <form method="POST" action="/forgot">
+      <div>
+        <label for="email">Email</label>
+        <input id="email" name="email" type="email" required autocomplete="email" value="${esc(opts.email)}">
+      </div>
+      <div class="form-actions">
+        <button class="btn btn-primary" type="submit">Send reset link</button>
+      </div>
+    </form>
+    <div class="alt"><a href="/login">← Back to sign in</a></div>
+  </div>`;
+}
+
+function renderResetForm(opts: { token: string; error: string | null }): string {
+  return `<div class="auth-card">
+    <h1>Set new password</h1>
+    <p class="subtitle">Choose a strong password. Once set, you'll be signed in.</p>
+    ${opts.error ? `<div class="flash flash-err">${esc(opts.error)}</div>` : ""}
+    <form method="POST" action="/reset?token=${encodeURIComponent(opts.token)}">
+      <div>
+        <label for="password">New password</label>
+        <input id="password" name="password" type="password" required autocomplete="new-password" minlength="12">
+      </div>
+      <div>
+        <label for="confirm">Confirm password</label>
+        <input id="confirm" name="confirm" type="password" required autocomplete="new-password" minlength="12">
+      </div>
+      <div class="form-actions">
+        <button class="btn btn-primary" type="submit">Set password and sign in</button>
+      </div>
+    </form>
+  </div>`;
+}
+
+function renderTokenError(opts: { title: string; message: string }): string {
+  return `<div class="auth-card">
+    <h1>${esc(opts.title)}</h1>
+    <p class="subtitle">${esc(opts.message)}</p>
+    <div class="alt"><a href="/forgot">Request a new link</a> · <a href="/login">Back to sign in</a></div>
+  </div>`;
+}
+
 function renderPlaceholder(title: string, message: string): string {
   return `<div class="placeholder">
     <h1>${esc(title)}</h1>
@@ -122,112 +324,415 @@ function renderPlaceholder(title: string, message: string): string {
   </div>`;
 }
 
-const htmlHeaders: Record<string, string> = {
-  "content-type": "text/html; charset=utf-8",
-  "cache-control": "no-store",
-  // Conservative security defaults; tighten in Phase C–F as we know what we serve.
-  "referrer-policy": "strict-origin-when-cross-origin",
-  "x-content-type-options": "nosniff",
-  "x-frame-options": "DENY",
-};
+/* ─── Auth flow handlers ─── */
+
+async function handleLoginPost(
+  request: Request,
+  env: Env,
+  url: URL,
+  user: User | null,
+): Promise<Response> {
+  if (user) return new Response(null, { status: 303, headers: { location: "/app" } });
+  const csrf = checkCsrf(request, url);
+  if (csrf) return csrf;
+  const form = await request.formData();
+  const email = String(form.get("email") ?? "").trim();
+  const password = String(form.get("password") ?? "");
+  const next = safeNext(url.searchParams.get("next"));
+
+  const renderError = (errMsg: string, status = 400) =>
+    htmlResponse(
+      htmlPage({
+        title: "Sign in — Edge SEO Platform",
+        body: renderLoginForm({ email, error: errMsg, next }),
+        user: null,
+      }),
+      { status },
+    );
+
+  if (!email || !password) {
+    return renderError("Email and password are required.");
+  }
+  const targetUser = await getUserByEmail(env, email);
+  // Always run verifyPassword even when user is missing, to keep timing
+  // similar between known and unknown emails. Use a dummy hash with the
+  // same iteration count so PBKDF2 cost is comparable.
+  const dummyHash =
+    "pbkdf2$200000$00000000000000000000000000000000$00000000000000000000000000000000000000000000000000000000000000ff";
+  const ok = await verifyPassword(password, targetUser?.password_hash ?? dummyHash);
+  if (!targetUser || !targetUser.password_hash || !ok) {
+    return renderError("Invalid email or password.", 401);
+  }
+  if (targetUser.email_verified_at === null) {
+    return renderError(
+      "Please verify your email first. Check your inbox for the verification link.",
+      403,
+    );
+  }
+  const { token, expiresAt } = await createSession(env, targetUser.id, request);
+  return new Response(null, {
+    status: 303,
+    headers: {
+      location: next,
+      "set-cookie": sessionCookieHeader({ token, expiresAt }),
+    },
+  });
+}
+
+async function handleForgotPost(request: Request, env: Env, url: URL): Promise<Response> {
+  const csrf = checkCsrf(request, url);
+  if (csrf) return csrf;
+  const form = await request.formData();
+  const email = String(form.get("email") ?? "").trim();
+  if (!email) {
+    return htmlResponse(
+      htmlPage({
+        title: "Reset password — Edge SEO Platform",
+        body: renderForgotForm({ email, submitted: false }),
+        user: null,
+      }),
+      { status: 400 },
+    );
+  }
+  // Always show the same "check your inbox" page, whether or not the
+  // email exists. Don't leak account existence.
+  const target = await getUserByEmail(env, email);
+  if (target) {
+    const { token } = await createEmailToken(env, {
+      userId: target.id,
+      kind: "reset_password",
+      ttlMs: RESET_PASSWORD_TOKEN_TTL_MS,
+    });
+    const resetUrl = `${url.protocol}//${url.host}/reset?token=${encodeURIComponent(token)}`;
+    try {
+      await sendEmail(env, resetPasswordMessage({ to: target.email, resetUrl, initiator: "you" }));
+    } catch (e) {
+      // Log error but still pretend success to user; they retry if mail
+      // doesn't arrive. Operator sees the failure in worker logs.
+      console.error("forgot: email send failed", e);
+    }
+  }
+  return htmlResponse(
+    htmlPage({
+      title: "Check your inbox — Edge SEO Platform",
+      body: renderForgotForm({ email, submitted: true }),
+      user: null,
+    }),
+  );
+}
+
+async function handleResetGet(env: Env, url: URL): Promise<Response> {
+  const token = url.searchParams.get("token") ?? "";
+  if (!token) {
+    return htmlResponse(
+      htmlPage({
+        title: "Invalid link — Edge SEO Platform",
+        body: renderTokenError({ title: "Invalid link", message: "Reset token is missing." }),
+        user: null,
+      }),
+      { status: 400 },
+    );
+  }
+  // Pre-flight check: SELECT to see if token looks valid (don't consume).
+  // We probe by re-using consumeEmailToken's lookup logic but inline so we
+  // don't mark it used. A clean approach: fetch the row, leave used_at NULL.
+  const row = await env.CONFIG_DB.prepare(
+    "SELECT kind, expires_at, used_at FROM email_tokens WHERE token = ? LIMIT 1",
+  )
+    .bind(token)
+    .first<{ kind: EmailTokenKind; expires_at: string; used_at: string | null }>();
+  if (
+    !row ||
+    row.used_at !== null ||
+    row.kind !== "reset_password" ||
+    new Date(row.expires_at).getTime() < Date.now()
+  ) {
+    return htmlResponse(
+      htmlPage({
+        title: "Invalid link — Edge SEO Platform",
+        body: renderTokenError({
+          title: "Link expired or invalid",
+          message: "This reset link is no longer valid. Request a new one.",
+        }),
+        user: null,
+      }),
+      { status: 400 },
+    );
+  }
+  return htmlResponse(
+    htmlPage({
+      title: "Set new password — Edge SEO Platform",
+      body: renderResetForm({ token, error: null }),
+      user: null,
+    }),
+  );
+}
+
+async function handleResetPost(request: Request, env: Env, url: URL): Promise<Response> {
+  const csrf = checkCsrf(request, url);
+  if (csrf) return csrf;
+  const token = url.searchParams.get("token") ?? "";
+  const form = await request.formData();
+  const password = String(form.get("password") ?? "");
+  const confirm = String(form.get("confirm") ?? "");
+
+  const renderErr = (errMsg: string, status = 400) =>
+    htmlResponse(
+      htmlPage({
+        title: "Set new password — Edge SEO Platform",
+        body: renderResetForm({ token, error: errMsg }),
+        user: null,
+      }),
+      { status },
+    );
+
+  if (password.length < 12) return renderErr("Password must be at least 12 characters.");
+  if (password !== confirm) return renderErr("Passwords don't match.");
+
+  const targetUser = await consumeEmailToken(env, token, "reset_password");
+  if (!targetUser) {
+    return htmlResponse(
+      htmlPage({
+        title: "Invalid link — Edge SEO Platform",
+        body: renderTokenError({
+          title: "Link expired or invalid",
+          message: "This reset link is no longer valid. Request a new one.",
+        }),
+        user: null,
+      }),
+      { status: 400 },
+    );
+  }
+  await setUserPassword(env, targetUser.id, password);
+  // Setting password also implicitly verifies email (the recipient could
+  // read the reset link, so the address is theirs).
+  await env.CONFIG_DB.prepare(
+    "UPDATE users SET email_verified_at = COALESCE(email_verified_at, CURRENT_TIMESTAMP) WHERE id = ?",
+  )
+    .bind(targetUser.id)
+    .run();
+  // Log out everywhere as a security precaution: the prior owner of this
+  // account (if any) doesn't get to keep their old session.
+  await destroyAllSessionsForUser(env, targetUser.id);
+  // Then issue a fresh session for the new password owner.
+  const { token: newToken, expiresAt } = await createSession(env, targetUser.id, request);
+  return new Response(null, {
+    status: 303,
+    headers: {
+      location: `/app?flash=${encodeURIComponent("Password set. You're signed in.")}&flash_kind=ok`,
+      "set-cookie": sessionCookieHeader({ token: newToken, expiresAt }),
+    },
+  });
+}
+
+async function handleVerifyGet(env: Env, url: URL): Promise<Response> {
+  const token = url.searchParams.get("token") ?? "";
+  if (!token) {
+    return htmlResponse(
+      htmlPage({
+        title: "Invalid link — Edge SEO Platform",
+        body: renderTokenError({
+          title: "Invalid link",
+          message: "Verification token is missing.",
+        }),
+        user: null,
+      }),
+      { status: 400 },
+    );
+  }
+  const targetUser = await consumeEmailToken(env, token, "verify_email");
+  if (!targetUser) {
+    return htmlResponse(
+      htmlPage({
+        title: "Invalid link — Edge SEO Platform",
+        body: renderTokenError({
+          title: "Link expired or already used",
+          message: "Verification links are single-use and expire after 24 hours.",
+        }),
+        user: null,
+      }),
+      { status: 400 },
+    );
+  }
+  await env.CONFIG_DB.prepare(
+    "UPDATE users SET email_verified_at = COALESCE(email_verified_at, CURRENT_TIMESTAMP) WHERE id = ?",
+  )
+    .bind(targetUser.id)
+    .run();
+  return flashRedirect("/login", { text: "Email verified. Please sign in.", kind: "ok" });
+}
+
+async function handleLogoutPost(
+  request: Request,
+  env: Env,
+  url: URL,
+  sessionToken: string | null,
+): Promise<Response> {
+  // CSRF: logout is state-changing.
+  const csrf = checkCsrf(request, url);
+  if (csrf) return csrf;
+  if (sessionToken) await destroySession(env, sessionToken);
+  return new Response(null, {
+    status: 303,
+    headers: {
+      location: `/?flash=${encodeURIComponent("Signed out.")}&flash_kind=ok`,
+      "set-cookie": sessionCookieHeader({ token: null }),
+    },
+  });
+}
+
+/* ─── Helpers ─── */
+
+function redirectToLogin(url: URL): Response {
+  const next = url.pathname + url.search;
+  return new Response(null, {
+    status: 303,
+    headers: { location: `/login?next=${encodeURIComponent(next)}` },
+  });
+}
 
 /* ─── Router ─── */
 
 export default {
-  async fetch(request: Request, _env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
     const method = request.method.toUpperCase();
+    const flash = readFlash(url);
 
     if (method !== "GET" && method !== "POST") {
       return new Response("Method not allowed", { status: 405, headers: { allow: "GET, POST" } });
     }
 
-    // Public routes (no auth required, all phases)
-    if (path === "/" || path === "") {
-      return new Response(htmlPage("Edge SEO Platform", renderLanding()), { headers: htmlHeaders });
+    // Try to attach a session — best-effort. Protected routes redirect on null.
+    const sessionToken = parseSessionCookie(request);
+    let sessionData: SessionWithUser | null = null;
+    if (sessionToken) {
+      try {
+        sessionData = await getSessionWithUser(env, sessionToken);
+      } catch (e) {
+        console.error("getSessionWithUser failed", e);
+      }
     }
+    const user = sessionData?.user ?? null;
 
-    // Auth flow placeholders — Phase C wires emails, Phase D wires the actual flow.
-    if (path === "/login") {
-      return new Response(
-        htmlPage(
-          "Sign in — Edge SEO Platform",
-          renderPlaceholder(
-            "Sign in",
-            "Coming in Phase D. Until then this worker is scaffolding only. The legacy basic-auth admin lives at <code>edge-seo-admin.localblitzio.workers.dev</code> until the cut-over in Phase G.",
-          ),
-        ),
-        { headers: htmlHeaders },
-      );
-    }
-    if (path === "/forgot") {
-      return new Response(
-        htmlPage(
-          "Reset password — Edge SEO Platform",
-          renderPlaceholder("Reset password", "Coming in Phase D."),
-        ),
-        { headers: htmlHeaders },
-      );
-    }
-    if (path === "/reset") {
-      return new Response(
-        htmlPage(
-          "Set new password — Edge SEO Platform",
-          renderPlaceholder("Set new password", "Coming in Phase D."),
-        ),
-        { headers: htmlHeaders },
-      );
-    }
-    if (path === "/verify") {
-      return new Response(
-        htmlPage(
-          "Verify email — Edge SEO Platform",
-          renderPlaceholder("Verify email", "Coming in Phase D."),
-        ),
-        { headers: htmlHeaders },
-      );
-    }
-    if (path === "/logout") {
-      return new Response(
-        htmlPage(
-          "Sign out — Edge SEO Platform",
-          renderPlaceholder("Sign out", "Coming in Phase D."),
-        ),
-        { headers: htmlHeaders },
+    /* ─── Public ─── */
+    if ((path === "/" || path === "") && method === "GET") {
+      return htmlResponse(
+        htmlPage({ title: "Edge SEO Platform", body: renderLanding(user), user, flash }),
       );
     }
 
-    // Authenticated app — Phase E moves the admin-worker functionality here
-    // (clients CRUD, attestations, audit log, KV browser) behind the
-    // session-cookie auth middleware.
+    /* ─── Auth flows ─── */
+
+    if (path === "/login" && method === "GET") {
+      if (user) return new Response(null, { status: 303, headers: { location: "/app" } });
+      const next = safeNext(url.searchParams.get("next"));
+      return htmlResponse(
+        htmlPage({
+          title: "Sign in — Edge SEO Platform",
+          body: renderLoginForm({ email: "", error: null, next }),
+          user: null,
+          flash,
+        }),
+      );
+    }
+    if (path === "/login" && method === "POST") {
+      return handleLoginPost(request, env, url, user);
+    }
+
+    if (path === "/forgot" && method === "GET") {
+      return htmlResponse(
+        htmlPage({
+          title: "Reset password — Edge SEO Platform",
+          body: renderForgotForm({ email: "", submitted: false }),
+          user: null,
+          flash,
+        }),
+      );
+    }
+    if (path === "/forgot" && method === "POST") {
+      return handleForgotPost(request, env, url);
+    }
+
+    if (path === "/reset" && method === "GET") {
+      return handleResetGet(env, url);
+    }
+    if (path === "/reset" && method === "POST") {
+      return handleResetPost(request, env, url);
+    }
+
+    if (path === "/verify" && method === "GET") {
+      return handleVerifyGet(env, url);
+    }
+
+    if (path === "/logout" && method === "POST") {
+      return handleLogoutPost(request, env, url, sessionToken);
+    }
+    if (path === "/logout" && method === "GET") {
+      // GET /logout is a courtesy redirect — the real logout is POST.
+      // Renders a one-button page so a user clicking a "logout" link
+      // (without JS) still ends up signing out.
+      return htmlResponse(
+        htmlPage({
+          title: "Sign out — Edge SEO Platform",
+          body: `<div class="auth-card"><h1>Sign out?</h1><form method="POST" action="/logout"><button class="btn btn-primary" type="submit">Yes, sign out</button></form></div>`,
+          user,
+        }),
+      );
+    }
+
+    /* ─── Authenticated app (Phase E fills these in) ─── */
+
     if (path === "/app" || path.startsWith("/app/")) {
-      return new Response(
-        htmlPage(
-          "Dashboard — Edge SEO Platform",
-          renderPlaceholder(
-            "Dashboard",
-            "The authenticated app moves here in Phase E. Until then, use the legacy <code>edge-seo-admin</code> worker.",
+      if (!user) return redirectToLogin(url);
+      return htmlResponse(
+        htmlPage({
+          title: "Dashboard — Edge SEO Platform",
+          body: renderPlaceholder(
+            `Hello, ${esc(user.email)}`,
+            "Phase E moves the admin-worker functionality (clients, attestations, audit, KV) here behind your session. Until then, the legacy <code>edge-seo-admin</code> worker still has it.",
           ),
-        ),
-        { headers: htmlHeaders },
+          user,
+          flash,
+        }),
       );
     }
 
-    // Super-admin user CRUD — Phase F.
+    /* ─── Super-admin (Phase F fills these in) ─── */
+
     if (path === "/admin" || path.startsWith("/admin/")) {
-      return new Response(
-        htmlPage(
-          "Admin — Edge SEO Platform",
-          renderPlaceholder("Admin", "User management lands in Phase F."),
-        ),
-        { headers: htmlHeaders },
+      if (!user) return redirectToLogin(url);
+      if (user.role !== "super_admin") {
+        return htmlResponse(
+          htmlPage({
+            title: "Forbidden — Edge SEO Platform",
+            body: renderPlaceholder("Forbidden", "Only super-admins can access this page."),
+            user,
+          }),
+          { status: 403 },
+        );
+      }
+      return htmlResponse(
+        htmlPage({
+          title: "Admin — Edge SEO Platform",
+          body: renderPlaceholder("Admin", "User CRUD lands in Phase F."),
+          user,
+          flash,
+        }),
       );
     }
 
-    return new Response(
-      htmlPage("Not found — Edge SEO Platform", renderPlaceholder("Not found", "")),
-      { status: 404, headers: htmlHeaders },
+    return htmlResponse(
+      htmlPage({
+        title: "Not found — Edge SEO Platform",
+        body: renderPlaceholder("Not found", ""),
+        user,
+      }),
+      { status: 404 },
     );
   },
 } satisfies ExportedHandler<Env>;
+
+// Re-export Role so the type is bundled (in case future code imports from here).
+export type { Role };
