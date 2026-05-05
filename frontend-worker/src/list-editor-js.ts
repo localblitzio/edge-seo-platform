@@ -611,8 +611,16 @@ export const LIST_EDITOR_JS = String.raw`
         return;
       }
       if (!Array.isArray(json.text_rewrites)) json.text_rewrites = [];
+      // In per-page editor, force the new rule's match to the active
+      // filter so the inserted entry appears in the filtered list. The
+      // path the inspect panel fetched (e.g. "/about-us/" with trailing
+      // slash from a redirect) often differs from the filter regex
+      // ("^/about-us$") and would otherwise be invisible after insert.
+      var useContainer = document.querySelector('[data-list-container="text_rewrites"]');
+      var useFilter = useContainer && useContainer.getAttribute('data-filter-match');
+      var useMatch = useFilter || pathToRegex(lastFetchedPath);
       json.text_rewrites.push({
-        match: pathToRegex(lastFetchedPath),
+        match: useMatch,
         selector: el.selector,
         mode: 'text',
         content: el.text,
