@@ -1209,6 +1209,11 @@ function renderCustomPagesPanel(client: ClientRow, cfg: Record<string, unknown>)
       const liveCell = e.literalPath
         ? `<a href="https://${esc(client.proxy_domain)}${esc(e.literalPath)}" target="_blank" rel="noopener" title="Open on proxy">↗</a>`
         : "";
+      // Edit link only meaningful for literal paths — wildcard custom_page
+      // routes can't be unambiguously round-tripped through a path field.
+      const editLink = e.literalPath
+        ? `<a href="/app/clients/${esc(client.client_id)}/custom-page/edit?match=${encodeURIComponent(e.match)}" class="btn-link">Edit →</a>`
+        : "";
       const deleteForm = `<form method="POST" action="/app/clients/${esc(client.client_id)}/custom-page/delete" style="display:inline" onsubmit="return confirm('Delete this custom page? The R2 object and routing rule are both removed.');">
           <input type="hidden" name="match" value="${esc(e.match)}">
           <button type="submit" class="btn-link" style="color:var(--red);background:none;border:none;cursor:pointer;font:inherit;padding:0">Delete</button>
@@ -1216,12 +1221,13 @@ function renderCustomPagesPanel(client: ClientRow, cfg: Record<string, unknown>)
       return `<tr>
         <td class="mono">${esc(display)}</td>
         <td style="text-align:center;width:1.5rem">${liveCell}</td>
+        <td>${editLink}</td>
         <td>${deleteForm}</td>
       </tr>`;
     })
     .join("");
   const body = entries.length
-    ? `<table class="data" style="margin-bottom:.6rem"><thead><tr><th>path</th><th></th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+    ? `<table class="data" style="margin-bottom:.6rem"><thead><tr><th>path</th><th></th><th></th><th></th></tr></thead><tbody>${rows}</tbody></table>`
     : '<div class="empty" style="margin:0 0 .6rem">no custom pages yet</div>';
   return `<div class="card" style="margin-bottom:1rem">
     <div style="display:flex;justify-content:space-between;align-items:center;margin:0 0 .85rem">
@@ -1259,6 +1265,38 @@ export function renderNewCustomPageForm(
       <div class="form-actions">
         <button class="btn btn-primary" type="submit">Create page</button>
         <a class="btn" href="/app/clients/${esc(client.client_id)}">Cancel</a>
+      </div>
+    </form>`;
+}
+
+/**
+ * Render the form for editing an existing custom page. The path is
+ * read-only (changing it = different R2 key, handled as delete + create
+ * by the operator). HTML body is pre-filled from R2.
+ */
+export function renderEditCustomPageForm(opts: {
+  client: ClientRow;
+  match: string;
+  literalPath: string;
+  html: string;
+  error: string | null;
+}): string {
+  const liveUrl = `https://${opts.client.proxy_domain}${opts.literalPath}`;
+  return `<div class="crumbs"><a href="/app/clients/${esc(opts.client.client_id)}">← ${esc(opts.client.client_id)}</a></div>
+    <h1>Edit custom page <code style="font-size:.7em">${esc(opts.literalPath)}</code> <a href="${esc(liveUrl)}" target="_blank" rel="noopener" style="font-size:.55em;font-weight:400;margin-left:.5rem;text-decoration:none">↗ open live</a></h1>
+    <p class="subtitle">HTML body for <span class="mono">${esc(opts.client.proxy_domain)}${esc(opts.literalPath)}</span> on <strong>${esc(opts.client.client_id)}</strong>. The path itself is fixed — to move the page, delete and recreate.</p>
+    ${opts.error ? `<div class="error-box">${esc(opts.error)}</div>` : ""}
+    <form class="editor" method="POST" action="/app/clients/${esc(opts.client.client_id)}/custom-page/edit">
+      <input type="hidden" name="match" value="${esc(opts.match)}">
+      <label for="path">Path (read-only)</label>
+      <input id="path" type="text" value="${esc(opts.literalPath)}" disabled>
+      <div class="hint">To rename, delete this page and create a new one.</div>
+      <label for="html">HTML body</label>
+      <textarea id="html" name="html" rows="24" required style="font-family:var(--mono);font-size:.85rem">${esc(opts.html)}</textarea>
+      <div class="hint">On save: R2 object overwritten, KV invalidated, audit_log entry written. The route entry in <code>routing[]</code> is unchanged.</div>
+      <div class="form-actions">
+        <button class="btn btn-primary" type="submit">Save</button>
+        <a class="btn" href="/app/clients/${esc(opts.client.client_id)}">Cancel</a>
       </div>
     </form>`;
 }
@@ -1732,6 +1770,136 @@ export async function handleNewCustomPagePost(
   return {
     response: flashRedirect(`/app/clients/${clientId}`, {
       text: `Custom page created at ${path}. View it at https://${client.proxy_domain}${path}`,
+      kind: "ok",
+    }),
+  };
+}
+
+/**
+ * Look up an existing custom_page route by its match regex and load
+ * the current R2 body. Used by the edit-form GET handler.
+ *
+ * Returns either a Response (404 / 500) or the data needed to render
+ * the form.
+ */
+export async function handleEditCustomPageGet(
+  env: AppEnv,
+  user: User,
+  clientId: string,
+  matchParam: string,
+): Promise<Response | { client: ClientRow; match: string; literalPath: string; html: string }> {
+  const client = await loadVisibleClient(env, user, clientId);
+  if (!client) return new Response("Not found", { status: 404 });
+  if (!env.CONTENT_R2) {
+    return new Response("CONTENT_R2 binding not configured", { status: 500 });
+  }
+  const cfg = JSON.parse(client.config_json) as Record<string, unknown>;
+  const entry = listCustomPages(cfg).find((e) => e.match === matchParam);
+  if (!entry || !entry.literalPath) {
+    return new Response("Custom page not found", { status: 404 });
+  }
+  // Read the existing R2 body. Try the literal path verbatim, fall
+  // back to the toggled-trailing-slash form (mirrors the renderer's
+  // lookup tolerance from src/custom-pages/index.ts).
+  const prefix = entry.customPageKey;
+  const primaryKey = `${prefix}${entry.literalPath}`;
+  const altKey = entry.literalPath.endsWith("/")
+    ? `${prefix}${entry.literalPath.slice(0, -1)}`
+    : `${prefix}${entry.literalPath}/`;
+  let r2 = await env.CONTENT_R2.get(primaryKey);
+  if (r2 === null) r2 = await env.CONTENT_R2.get(altKey);
+  const html = r2 !== null ? await r2.text() : "";
+  return { client, match: entry.match, literalPath: entry.literalPath, html };
+}
+
+export async function handleEditCustomPagePost(
+  request: Request,
+  env: AppEnv,
+  url: URL,
+  user: User,
+  clientId: string,
+): Promise<{
+  response?: Response;
+  rerenderError?: {
+    client: ClientRow;
+    match: string;
+    literalPath: string;
+    html: string;
+    error: string;
+  };
+}> {
+  const csrf = checkCsrf(request, url);
+  if (csrf) return { response: csrf };
+  const client = await loadVisibleClient(env, user, clientId);
+  if (!client) return { response: new Response("Not found", { status: 404 }) };
+  if (!env.CONTENT_R2) {
+    return { response: new Response("CONTENT_R2 binding not configured", { status: 500 }) };
+  }
+  const form = await request.formData();
+  const matchValue = String(form.get("match") ?? "");
+  const html = String(form.get("html") ?? "");
+
+  const cfg = JSON.parse(client.config_json) as Record<string, unknown>;
+  const entry = listCustomPages(cfg).find((e) => e.match === matchValue);
+  if (!entry || !entry.literalPath) {
+    return {
+      response: flashRedirect(`/app/clients/${clientId}`, {
+        text: `No custom page found for match=${matchValue}`,
+        kind: "err",
+      }),
+    };
+  }
+  if (!html.trim()) {
+    return {
+      rerenderError: {
+        client,
+        match: entry.match,
+        literalPath: entry.literalPath,
+        html,
+        error: "HTML body is required.",
+      },
+    };
+  }
+  if (new TextEncoder().encode(html).byteLength > CUSTOM_PAGE_MAX_HTML_BYTES) {
+    return {
+      rerenderError: {
+        client,
+        match: entry.match,
+        literalPath: entry.literalPath,
+        html,
+        error: `HTML body exceeds ${CUSTOM_PAGE_MAX_HTML_BYTES} bytes.`,
+      },
+    };
+  }
+
+  // Overwrite at the same key the renderer's primary lookup will use
+  // (literalPath verbatim). The fallback tolerance in renderCustomPage
+  // covers the trailing-slash toggle on read; we don't need to write
+  // both forms.
+  const storageKey = customPageStorageKey(clientId, entry.literalPath);
+  await env.CONTENT_R2.put(storageKey, html, {
+    httpMetadata: { contentType: "text/html; charset=utf-8" },
+    customMetadata: {
+      uploaded_by: user.email,
+      uploaded_at: new Date().toISOString(),
+    },
+  });
+  await invalidateKv(env, clientId, client.proxy_domain);
+  const actor = actorOf(user, request);
+  await writeAudit(env, {
+    client_id: clientId,
+    actor_email: actor.user.email,
+    actor_ip: actor.ip,
+    event_type: "config_update",
+    before_hash: null,
+    after_hash: null,
+    previous_status: client.status,
+    new_status: client.status,
+    notes: `updated custom page ${entry.literalPath} (R2 key ${storageKey})`,
+  });
+  return {
+    response: flashRedirect(`/app/clients/${clientId}`, {
+      text: `Saved custom page ${entry.literalPath}.`,
       kind: "ok",
     }),
   };

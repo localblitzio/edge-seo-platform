@@ -34,6 +34,8 @@ import {
   handleCachePurgePost,
   handleDeleteCustomPagePost,
   handleEditClientPost,
+  handleEditCustomPageGet,
+  handleEditCustomPagePost,
   handleNewClientPost,
   handleNewCustomPageGet,
   handleNewCustomPagePost,
@@ -46,6 +48,7 @@ import {
   renderClientDetail,
   renderClientsList,
   renderEditClientForm,
+  renderEditCustomPageForm,
   renderNewClientForm,
   renderNewCustomPageForm,
   renderOverview,
@@ -1096,6 +1099,70 @@ export default {
       // /app/clients/:id/custom-page/delete — remove R2 object + route
       if (sub === "custom-page/delete" && method === "POST") {
         return handleDeleteCustomPagePost(request, env, url, user, id);
+      }
+
+      // /app/clients/:id/custom-page/edit?match=... — render edit form
+      if (sub === "custom-page/edit" && method === "GET") {
+        const matchParam = url.searchParams.get("match") ?? "";
+        if (!matchParam) {
+          return new Response(null, {
+            status: 303,
+            headers: { location: `/app/clients/${encodeURIComponent(id)}` },
+          });
+        }
+        const r = await handleEditCustomPageGet(env, user, id, matchParam);
+        if (r instanceof Response) return r;
+        return htmlResponse(
+          htmlPage({
+            title: `Edit custom page — ${id}`,
+            body: appLayout({
+              title: `Edit custom page — ${id}`,
+              content: renderEditCustomPageForm({
+                client: r.client,
+                match: r.match,
+                literalPath: r.literalPath,
+                html: r.html,
+                error: null,
+              }),
+              activeNav: `client:${id}`,
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+
+      // /app/clients/:id/custom-page/edit — handle save (overwrites R2)
+      if (sub === "custom-page/edit" && method === "POST") {
+        const result = await handleEditCustomPagePost(request, env, url, user, id);
+        if (result.response) return result.response;
+        const re = result.rerenderError;
+        if (!re) return new Response("Internal error", { status: 500 });
+        return htmlResponse(
+          htmlPage({
+            title: `Edit custom page — ${id}`,
+            body: appLayout({
+              title: `Edit custom page — ${id}`,
+              content: renderEditCustomPageForm({
+                client: re.client,
+                match: re.match,
+                literalPath: re.literalPath,
+                html: re.html,
+                error: re.error,
+              }),
+              activeNav: `client:${id}`,
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+          { status: 400 },
+        );
       }
 
       // /app/clients/:id/inspect/fetch — JSON endpoint for the
