@@ -38,9 +38,7 @@ export function checkCsrf(request: Request, url: URL): Response | null {
   const expected = `${url.protocol}//${url.host}`;
   const origin = request.headers.get("origin");
   if (origin) {
-    return origin === expected
-      ? null
-      : new Response("CSRF: Origin mismatch", { status: 403 });
+    return origin === expected ? null : new Response("CSRF: Origin mismatch", { status: 403 });
   }
   const referer = request.headers.get("referer");
   if (referer) {
