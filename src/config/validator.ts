@@ -153,8 +153,11 @@ export function checkRegexSafety(pattern: string): string | null {
   }
 
   // Canonical nested-quantifier shape: a group that contains `+` or `*`,
-  // immediately followed by another quantifier (`+`, `*`, `?`, or `{n,}`).
-  if (/\([^)]*[+*][^)]*\)\s*[+*?{]/.test(pattern)) {
+  // immediately followed by ANOTHER UNBOUNDED quantifier (`+`, `*`, or
+  // `{n,}` without an upper bound). The outer quantifier must be
+  // unbounded for catastrophic backtracking — `(/.*)?` is bounded (0
+  // or 1 reps) and is a common shape in our static-site routing.
+  if (/\([^)]*[+*][^)]*\)\s*(?:[+*]|\{\d*,\}(?!\d))/.test(pattern)) {
     return "nested quantifier — potential ReDoS (e.g. `(a+)+`)";
   }
 
