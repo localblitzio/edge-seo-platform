@@ -17,6 +17,7 @@
  */
 
 import { ConfigValidationError } from "../lib/errors.js";
+import { RESERVED_SUBDOMAINS, subdomainOfDefaultZone } from "./proxy-zone.js";
 import type { ClientConfig } from "./schema.js";
 
 const MAX_INLINE_STATIC_REDIRECTS = 1000;
@@ -33,7 +34,29 @@ export function assertConfigInvariants(config: ClientConfig): ClientConfig {
   assertStaticRedirectInvariants(config);
   assertRegexInvariants(config);
   assertJsonLdSerializability(config);
+  assertReservedSubdomain(config);
   return config;
+}
+
+/**
+ * If `proxy_domain` is on the default zone (`<sub>.${DEFAULT_PROXY_ZONE}`),
+ * the leftmost subdomain label must not collide with a reserved
+ * infrastructure name (www, api, admin, etc. — see `RESERVED_SUBDOMAINS`).
+ *
+ * Custom domains are NOT checked here — operators choosing their own domain
+ * are responsible for any subdomain collisions on that zone.
+ */
+function assertReservedSubdomain(config: ClientConfig): void {
+  const sub = subdomainOfDefaultZone(config.proxy_domain);
+  if (sub === null) return;
+  // Take the leftmost label only; multi-level subdomains (e.g.
+  // "foo.bar.localpage.us.com") only check "foo".
+  const leftmost = sub.split(".")[0] ?? "";
+  if (RESERVED_SUBDOMAINS.has(leftmost)) {
+    throw new ConfigValidationError(
+      `proxy_domain leftmost subdomain "${leftmost}" is reserved on the default zone`,
+    );
+  }
 }
 
 function assertStaticRedirectInvariants(config: ClientConfig): void {

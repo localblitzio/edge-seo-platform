@@ -19,6 +19,7 @@
     "src/**/*",
     "../src/config/schema.ts",
     "../src/config/validator.ts",
+    "../src/config/proxy-zone.ts",
     "../src/lib/errors.ts"
   ]
 }

@@ -15,6 +15,7 @@
  * For production, wrap this Worker behind Cloudflare Access for SSO.
  */
 
+import { DEFAULT_PROXY_ZONE } from "../../src/config/proxy-zone.js";
 import { ClientConfig } from "../../src/config/schema.js";
 import { assertConfigInvariants } from "../../src/config/validator.js";
 import { ConfigValidationError } from "../../src/lib/errors.js";
@@ -206,6 +207,11 @@ form.editor label{font-weight:600;font-size:.85rem}
 .form-grid input[type=text],.form-grid input[type=email],.form-grid select{font:inherit;font-family:inherit;font-size:.88rem;padding:.4rem .55rem;border:1px solid var(--border-strong);border-radius:var(--radius);background:var(--bg);color:var(--fg);width:100%}
 .form-grid input[readonly]{background:var(--bg-sidebar);cursor:not-allowed;color:var(--fg-muted)}
 .form-grid .field-hint{font-size:.72rem;color:var(--fg-muted);margin-top:.2rem;line-height:1.35}
+.proxy-mode{display:flex;flex-direction:column;gap:.4rem;margin-top:.2rem}
+.proxy-radio{display:flex;align-items:center;gap:.5rem;font-weight:400;font-size:.9rem;cursor:pointer}
+.proxy-radio input[type=radio]{margin:0}
+.proxy-radio input[type=text]{flex:0 0 auto}
+.proxy-suffix{font-family:var(--mono);font-size:.85rem;color:var(--fg-muted)}
 form.editor input[type=text],form.editor input[type=email],form.editor select,form.editor textarea{font:inherit;font-family:var(--mono);font-size:.85rem;padding:.5rem .65rem;border:1px solid var(--border-strong);border-radius:var(--radius);background:var(--bg-elevated);color:var(--fg);width:100%}
 form.editor textarea{min-height:520px;line-height:1.45;resize:vertical}
 form.editor .hint{font-size:.78rem;color:var(--fg-muted);margin-top:-.35rem}
@@ -687,7 +693,7 @@ async function renderKvDetail(env: Env, key: string): Promise<string> {
 
 const NEW_CLIENT_TEMPLATE = `{
   "client_id": "your-client-id",
-  "proxy_domain": "REPLACE_WITH_PROXY_HOST",
+  "proxy_domain": "your-client-id.${DEFAULT_PROXY_ZONE}",
   "source_domain": "REPLACE_WITH_SOURCE_HOST",
   "authorization": {
     "attested_by_email": "you@example.com",
@@ -763,15 +769,28 @@ function renderStructuredFormBody(opts: {
             <option value="terminated">terminated</option>
           </select>
         </div>
-        <div>
-          <label for="f_proxy_domain">proxy_domain</label>
-          <input id="f_proxy_domain" type="text" required>
-          <div class="field-hint">the host the platform serves under (e.g. yoursite.com)</div>
+        <div class="full-width">
+          <label>proxy_domain</label>
+          <div class="proxy-mode">
+            <label class="proxy-radio">
+              <input type="radio" name="proxy_mode" value="default" id="f_proxy_mode_default" checked>
+              <span>Default zone:</span>
+              <input id="f_proxy_subdomain" type="text" placeholder="client-id" style="width:14rem">
+              <span class="proxy-suffix">.${esc(DEFAULT_PROXY_ZONE)}</span>
+            </label>
+            <label class="proxy-radio">
+              <input type="radio" name="proxy_mode" value="custom" id="f_proxy_mode_custom">
+              <span>Custom domain:</span>
+              <input id="f_proxy_custom" type="text" placeholder="yourdomain.com" style="width:18rem" disabled>
+            </label>
+          </div>
+          <div class="field-hint" id="f_proxy_hint">Default zone: served by the platform's wildcard DNS — no DNS work needed. Custom: requires DNS pointed at the worker before it serves.</div>
+          <input type="hidden" id="f_proxy_domain">
         </div>
-        <div>
+        <div class="full-width">
           <label for="f_source_domain">source_domain</label>
           <input id="f_source_domain" type="text" required>
-          <div class="field-hint">the upstream the platform fetches from</div>
+          <div class="field-hint">the upstream the platform fetches from (e.g. customer-cms.example.com)</div>
         </div>
       </div>
     </div>
@@ -821,11 +840,12 @@ function renderStructuredFormBody(opts: {
 
     <script>
     (function () {
+      var ZONE = ${JSON.stringify(DEFAULT_PROXY_ZONE)};
+      var ZONE_SUFFIX = '.' + ZONE;
       var ta = document.getElementById('config_json');
       if (!ta) return;
       var scalarFields = {
         f_client_id: ['client_id'],
-        f_proxy_domain: ['proxy_domain'],
         f_source_domain: ['source_domain'],
         f_status: ['status'],
         f_attested_by_email: ['authorization', 'attested_by_email'],
@@ -850,6 +870,35 @@ function renderStructuredFormBody(opts: {
       function safeParse() {
         try { return JSON.parse(ta.value); } catch (e) { return null; }
       }
+      // Pick the radio mode based on whether proxy_domain ends with the zone.
+      // Multi-label leftmost (e.g. foo.bar.zone) still counts as default
+      // mode — the subdomain field shows the full prefix.
+      function applyProxyDomain(pd) {
+        var defRadio = document.getElementById('f_proxy_mode_default');
+        var custRadio = document.getElementById('f_proxy_mode_custom');
+        var subEl = document.getElementById('f_proxy_subdomain');
+        var custEl = document.getElementById('f_proxy_custom');
+        if (typeof pd === 'string' && pd.length > ZONE_SUFFIX.length && pd.slice(-ZONE_SUFFIX.length) === ZONE_SUFFIX) {
+          defRadio.checked = true;
+          subEl.value = pd.slice(0, -ZONE_SUFFIX.length);
+          subEl.disabled = false;
+          custEl.value = '';
+          custEl.disabled = true;
+        } else {
+          custRadio.checked = true;
+          custEl.value = pd || '';
+          custEl.disabled = false;
+          subEl.disabled = true;
+        }
+      }
+      function currentProxyDomain() {
+        var defOn = document.getElementById('f_proxy_mode_default').checked;
+        if (defOn) {
+          var sub = document.getElementById('f_proxy_subdomain').value.trim();
+          return sub === '' ? '' : sub + ZONE_SUFFIX;
+        }
+        return document.getElementById('f_proxy_custom').value.trim();
+      }
       function syncFromJson() {
         var json = safeParse();
         if (!json) return;
@@ -859,6 +908,7 @@ function renderStructuredFormBody(opts: {
           var v = get(json, scalarFields[id]);
           el.value = v == null ? '' : String(v);
         });
+        applyProxyDomain(json.proxy_domain || '');
         var sp = get(json, ['authorization', 'scope_paths']);
         var spEl = document.getElementById('f_scope_paths');
         if (spEl) spEl.value = Array.isArray(sp) ? sp.join(', ') : '';
@@ -874,6 +924,8 @@ function renderStructuredFormBody(opts: {
           if (!el) return;
           if (el.value !== '') setPath(json, scalarFields[id], el.value);
         });
+        var pd = currentProxyDomain();
+        if (pd) json.proxy_domain = pd;
         var spEl = document.getElementById('f_scope_paths');
         var scopeEl = document.getElementById('f_scope');
         if (json.authorization == null || typeof json.authorization !== 'object') json.authorization = {};
@@ -892,7 +944,38 @@ function renderStructuredFormBody(opts: {
         }
         ta.value = JSON.stringify(json, null, 2);
       }
-      var ids = Object.keys(scalarFields).concat(['f_scope_paths', 'f_origin']);
+      // Auto-fill the default subdomain from client_id when subdomain is empty
+      // (only on the new-client flow — once an id has been typed, don't keep
+      // overwriting an explicitly-set subdomain).
+      var clientIdEl = document.getElementById('f_client_id');
+      if (clientIdEl && !clientIdEl.readOnly) {
+        clientIdEl.addEventListener('input', function () {
+          var subEl = document.getElementById('f_proxy_subdomain');
+          if (!subEl) return;
+          // Only auto-fill if the user hasn't manually edited the subdomain
+          // (heuristic: subdomain field is empty or matches a previous id).
+          if (subEl.dataset.userEdited !== '1') {
+            subEl.value = clientIdEl.value;
+            syncToJson();
+          }
+        });
+      }
+      var subEl0 = document.getElementById('f_proxy_subdomain');
+      if (subEl0) {
+        subEl0.addEventListener('input', function () { subEl0.dataset.userEdited = '1'; });
+      }
+      // Mode-toggle wiring: enable/disable the matching input based on radio.
+      function onModeChange() {
+        var defOn = document.getElementById('f_proxy_mode_default').checked;
+        document.getElementById('f_proxy_subdomain').disabled = !defOn;
+        document.getElementById('f_proxy_custom').disabled = defOn;
+        syncToJson();
+      }
+      document.getElementById('f_proxy_mode_default').addEventListener('change', onModeChange);
+      document.getElementById('f_proxy_mode_custom').addEventListener('change', onModeChange);
+      var ids = Object.keys(scalarFields).concat([
+        'f_scope_paths', 'f_origin', 'f_proxy_subdomain', 'f_proxy_custom',
+      ]);
       ids.forEach(function (id) {
         var el = document.getElementById(id);
         if (el) el.addEventListener('input', syncToJson);

@@ -272,3 +272,36 @@ describe("assertConfigInvariants — JSON-LD serializability", () => {
     );
   });
 });
+
+describe("assertConfigInvariants — reserved subdomain on default zone", () => {
+  it("rejects a default-zone proxy_domain whose leftmost label is reserved", () => {
+    const parsed = parseFixture((cfg) => {
+      cfg.proxy_domain = "www.localpage.us.com";
+    });
+    expect(() => assertConfigInvariants(parsed)).toThrow(/reserved/);
+  });
+
+  it("accepts a default-zone proxy_domain with a non-reserved label", () => {
+    const parsed = parseFixture((cfg) => {
+      cfg.proxy_domain = "lantern-crest.localpage.us.com";
+    });
+    expect(() => assertConfigInvariants(parsed)).not.toThrow();
+  });
+
+  it("does NOT apply the stoplist to custom (non-default-zone) domains", () => {
+    // "www.example.com" is fine — operator chose their own zone, on which
+    // they are responsible for any subdomain collisions.
+    const parsed = parseFixture((cfg) => {
+      cfg.proxy_domain = "www.example.com";
+    });
+    expect(() => assertConfigInvariants(parsed)).not.toThrow();
+  });
+
+  it("only checks the leftmost label for multi-level default-zone subdomains", () => {
+    // "foo.www.localpage.us.com" — leftmost label is "foo", not reserved.
+    const parsed = parseFixture((cfg) => {
+      cfg.proxy_domain = "foo.www.localpage.us.com";
+    });
+    expect(() => assertConfigInvariants(parsed)).not.toThrow();
+  });
+});
