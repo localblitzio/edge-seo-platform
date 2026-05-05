@@ -30,7 +30,11 @@ import {
   OriginFetchError,
   RedirectLoopError,
 } from "./lib/errors.js";
-import { applySecurityHeaders, rewriteCookieDomain } from "./lib/headers.js";
+import {
+  applySecurityHeaders,
+  rewriteCookieDomain,
+  rewriteRedirectLocation,
+} from "./lib/headers.js";
 import { type LogEntry, classifyUserAgent, logRequest } from "./observability/logger.js";
 import { emitRequestCounter } from "./observability/metrics.js";
 import { fetchFromOrigin } from "./proxy/index.js";
@@ -196,6 +200,7 @@ async function runPipeline(
       });
     } else {
       response = rewriteResponseCookies(upstream, matched.rule, config);
+      response = rewriteResponseLocation(response, matched.rule, config);
     }
   } else {
     rctx.pipeline_stage = "custom_page";
@@ -253,6 +258,21 @@ function rewriteResponseCookies(
   const origin = route.origin ?? `https://${config.source_domain}`;
   const originHost = safeHostname(origin) ?? config.source_domain;
   return rewriteCookieDomain(response, originHost, config.proxy_domain);
+}
+
+/**
+ * Rewrite the upstream Location header so that an origin-host redirect
+ * (e.g. WordPress's trailing-slash 301 to `https://source.com/path/`)
+ * lands on the proxy domain instead of bouncing the user off the proxy.
+ */
+function rewriteResponseLocation(
+  response: Response,
+  route: import("./config/schema.js").RouteRule,
+  config: ClientConfig,
+): Response {
+  const origin = route.origin ?? `https://${config.source_domain}`;
+  const originHost = safeHostname(origin) ?? config.source_domain;
+  return rewriteRedirectLocation(response, originHost, config.proxy_domain);
 }
 
 function safeHostname(origin: string): string | null {

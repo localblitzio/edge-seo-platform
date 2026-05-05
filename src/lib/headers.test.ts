@@ -6,6 +6,7 @@ import {
   STRIP_RESPONSE_HEADERS,
   applySecurityHeaders,
   rewriteCookieDomain,
+  rewriteRedirectLocation,
 } from "./headers.js";
 
 describe("header policy constants", () => {
@@ -149,5 +150,113 @@ describe("rewriteCookieDomain", () => {
     expect(out.headers.getSetCookie()[0]).toBe(
       "session=abc; Domain=other-blog.example.com.evil.com; Path=/",
     );
+  });
+});
+
+describe("rewriteRedirectLocation", () => {
+  it("returns the same response when there is no Location header", () => {
+    const upstream = new Response("hi");
+    const out = rewriteRedirectLocation(upstream, "source.com", "proxy.com");
+    expect(out).toBe(upstream);
+  });
+
+  it("rewrites an absolute https Location pointing at the source", () => {
+    // Mirrors WordPress's trailing-slash 301: /about-us → /about-us/
+    const upstream = new Response(null, {
+      status: 301,
+      headers: { Location: "https://source.com/about-us/" },
+    });
+    const out = rewriteRedirectLocation(upstream, "source.com", "proxy.com");
+    expect(out.headers.get("location")).toBe("https://proxy.com/about-us/");
+    expect(out.status).toBe(301);
+  });
+
+  it("rewrites an http (non-TLS) Location and preserves the scheme", () => {
+    const upstream = new Response(null, {
+      status: 302,
+      headers: { Location: "http://source.com/legacy" },
+    });
+    const out = rewriteRedirectLocation(upstream, "source.com", "proxy.com");
+    expect(out.headers.get("location")).toBe("http://proxy.com/legacy");
+  });
+
+  it("strips a www. prefix on the source host", () => {
+    const upstream = new Response(null, {
+      status: 301,
+      headers: { Location: "https://www.source.com/page" },
+    });
+    const out = rewriteRedirectLocation(upstream, "source.com", "proxy.com");
+    expect(out.headers.get("location")).toBe("https://proxy.com/page");
+  });
+
+  it("rewrites a protocol-relative Location (//source.com/path)", () => {
+    const upstream = new Response(null, {
+      status: 301,
+      headers: { Location: "//source.com/path?q=1" },
+    });
+    const out = rewriteRedirectLocation(upstream, "source.com", "proxy.com");
+    expect(out.headers.get("location")).toBe("//proxy.com/path?q=1");
+  });
+
+  it("preserves query and fragment exactly", () => {
+    const upstream = new Response(null, {
+      status: 302,
+      headers: { Location: "https://source.com/p?utm=x&y=1#section-2" },
+    });
+    const out = rewriteRedirectLocation(upstream, "source.com", "proxy.com");
+    expect(out.headers.get("location")).toBe("https://proxy.com/p?utm=x&y=1#section-2");
+  });
+
+  it("matches the host case-insensitively", () => {
+    const upstream = new Response(null, {
+      status: 301,
+      headers: { Location: "https://SOURCE.COM/Page" },
+    });
+    const out = rewriteRedirectLocation(upstream, "source.com", "proxy.com");
+    expect(out.headers.get("location")).toBe("https://proxy.com/Page");
+  });
+
+  it("leaves a relative Location untouched (no host to rewrite)", () => {
+    const upstream = new Response(null, {
+      status: 301,
+      headers: { Location: "/about-us/" },
+    });
+    const out = rewriteRedirectLocation(upstream, "source.com", "proxy.com");
+    expect(out).toBe(upstream);
+    expect(out.headers.get("location")).toBe("/about-us/");
+  });
+
+  it("leaves a redirect to a foreign host untouched", () => {
+    const upstream = new Response(null, {
+      status: 302,
+      headers: { Location: "https://partner.example.com/landing" },
+    });
+    const out = rewriteRedirectLocation(upstream, "source.com", "proxy.com");
+    expect(out).toBe(upstream);
+    expect(out.headers.get("location")).toBe("https://partner.example.com/landing");
+  });
+
+  it("does NOT match a longer suffix (source.com.evil.com)", () => {
+    const upstream = new Response(null, {
+      status: 302,
+      headers: { Location: "https://source.com.evil.com/phish" },
+    });
+    const out = rewriteRedirectLocation(upstream, "source.com", "proxy.com");
+    expect(out.headers.get("location")).toBe("https://source.com.evil.com/phish");
+  });
+
+  it("preserves status, statusText, and other headers", () => {
+    const upstream = new Response(null, {
+      status: 308,
+      statusText: "Permanent Redirect",
+      headers: {
+        Location: "https://source.com/x",
+        "Cache-Control": "max-age=3600",
+      },
+    });
+    const out = rewriteRedirectLocation(upstream, "source.com", "proxy.com");
+    expect(out.status).toBe(308);
+    expect(out.statusText).toBe("Permanent Redirect");
+    expect(out.headers.get("cache-control")).toBe("max-age=3600");
   });
 });

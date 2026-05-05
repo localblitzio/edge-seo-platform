@@ -113,3 +113,82 @@ function buildDomainRewriteRegex(sourceDomain: string): RegExp {
   // The trailing word boundary stops mid-word matches of a longer domain.
   return new RegExp(`(;\\s*Domain=)\\.?${escapedSource}(?=$|;|\\s)`, "gi");
 }
+
+/**
+ * Rewrite the `Location` header on an upstream redirect response so that
+ * an absolute URL pointing at the source domain (e.g. WordPress's
+ * trailing-slash 301 to `https://source.com/path/`) lands on the proxy
+ * domain instead of bouncing the user off the proxy.
+ *
+ * Why this is needed:
+ *   Many origins (WordPress, Shopify, .NET) generate absolute Location
+ *   URLs from their configured site URL, not from the inbound request's
+ *   Host header. Without this rewrite the proxy is "leaky": the very
+ *   first redirect drops users back on the source.
+ *
+ * What gets rewritten (case-insensitive):
+ *   - Absolute URLs: `https://<source>` and `http://<source>` → proxy
+ *   - With or without a leading `www.` on the source host
+ *   - Protocol-relative URLs: `//<source>/...` → `//<proxy>/...`
+ *
+ * What is preserved:
+ *   - Scheme: `http://` stays `http://`, `https://` stays `https://`
+ *   - Path, query, fragment — only the host segment is replaced
+ *   - Same-origin relative redirects (no host) — left untouched
+ *   - Redirects pointing at OTHER hosts (e.g. an external partner) —
+ *     left untouched. The rewrite only fires when the redirect is to
+ *     the source itself.
+ *
+ * @param response upstream response (3xx or otherwise — we don't gate on
+ *   status; the caller decides which responses to rewrite)
+ * @param sourceDomain the origin's hostname (no scheme, no port)
+ * @param proxyDomain the proxy hostname the response is being served from
+ * @returns response with Location rewritten if applicable, or the
+ *   original response if no rewrite was needed (no allocation)
+ * @throws never
+ */
+export function rewriteRedirectLocation(
+  response: Response,
+  sourceDomain: string,
+  proxyDomain: string,
+): Response {
+  const location = response.headers.get("location");
+  if (!location) return response;
+
+  const rewritten = rewriteHostInUrl(location, sourceDomain, proxyDomain);
+  if (rewritten === location) return response;
+
+  const headers = new Headers(response.headers);
+  headers.set("location", rewritten);
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+/**
+ * Rewrite the host portion of a URL string if (and only if) the host
+ * matches `sourceDomain` (with optional `www.` prefix). Returns the
+ * input unchanged on any non-match — including relative URLs, foreign
+ * hosts, and unparseable strings.
+ */
+function rewriteHostInUrl(input: string, sourceDomain: string, proxyDomain: string): string {
+  const escapedSource = sourceDomain.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // Two patterns: absolute (`https://host…`) and protocol-relative
+  // (`//host…`). Both anchor at the start of the URL since Location is
+  // a single value, not a list. The trailing lookahead requires the
+  // host to end at a URL boundary — `/`, `?`, `#`, or end-of-string —
+  // so a longer suffix like `source.com.evil.com` doesn't match.
+  // `\b` is too loose here because `.` is a word boundary.
+  const tail = "(?=$|[/?#])";
+  const absRe = new RegExp(`^(https?:)\\/\\/(?:www\\.)?${escapedSource}${tail}`, "i");
+  const protoRelRe = new RegExp(`^\\/\\/(?:www\\.)?${escapedSource}${tail}`, "i");
+  if (absRe.test(input)) {
+    return input.replace(absRe, `$1//${proxyDomain}`);
+  }
+  if (protoRelRe.test(input)) {
+    return input.replace(protoRelRe, `//${proxyDomain}`);
+  }
+  return input;
+}
