@@ -12,7 +12,7 @@
  *                     initial password (combines verify + set-password)
  *
  * All emails:
- *   From:     Edge SEO Platform <noreply@localpage.us.com>
+ *   From:     Edge SEO Platform <noreply@edgeseo.app>
  *   Reply-To: simon@localblitzmarketing.com
  *
  * Plain-text variants are always supplied alongside HTML — many corporate
@@ -21,7 +21,7 @@
  */
 
 const FROM_NAME = "Edge SEO Platform";
-const FROM_EMAIL = "noreply@localpage.us.com";
+const FROM_EMAIL = "noreply@edgeseo.app";
 const REPLY_TO = "simon@localblitzmarketing.com";
 const BRAND = "Edge SEO Platform";
 
