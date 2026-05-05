@@ -539,7 +539,11 @@ function isWildcardMatch(m: string): boolean {
   // Heuristic: any pattern with regex repetition or character-class
   // ranges is treated as wildcard. Literal matches like `^/about$` use
   // only escaped specials and have no repetition operators.
-  return /[*+?]|\[\^/.test(m);
+  // Strip a trailing `/?` (optional-slash form emitted by the per-page
+  // editor for `^/path/?$`) before testing — that's still a per-page
+  // literal, not a real wildcard.
+  const stripped = m.replace(/\/\?\$$/, "$");
+  return /[*+?]|\[\^/.test(stripped);
 }
 
 /**
@@ -548,7 +552,12 @@ function isWildcardMatch(m: string): boolean {
  */
 function derivLiteralPath(m: string): string | null {
   if (!m.startsWith("^") || !m.endsWith("$")) return null;
-  const inner = m.slice(1, -1);
+  // The per-page editor emits `^/path/?$` so the rule matches both
+  // `/path` and `/path/`. Strip the optional-slash so the inner-loop
+  // sees a clean literal — display the slash-form for clarity since
+  // most origins canonicalize to it.
+  const trailingOptionalSlash = m.endsWith("/?$");
+  const inner = trailingOptionalSlash ? m.slice(1, -3) : m.slice(1, -1);
   // Un-escape regex specials. If any unescaped special remains, it's
   // not a clean literal and we return null.
   let out = "";
@@ -566,7 +575,13 @@ function derivLiteralPath(m: string): string | null {
       i += 1;
     }
   }
-  return out.startsWith("/") ? out : null;
+  if (!out.startsWith("/")) return null;
+  // Display the slash-form for clarity — origins usually canonicalize
+  // to it. `^/$` (root) stays as `/`.
+  if (trailingOptionalSlash && out !== "/" && !out.endsWith("/")) {
+    out += "/";
+  }
+  return out;
 }
 
 function renderPagesWithEditsPanel(clientId: string, cfg: Record<string, unknown>): string {
