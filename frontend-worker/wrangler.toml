@@ -1,0 +1,36 @@
+name = "edge-seo-frontend"
+main = "src/index.ts"
+compatibility_date = "2026-04-01"
+workers_dev = true
+
+# The frontend worker reads + writes the SAME D1 + KV bindings the main
+# edge worker uses. Auth state, client CRUD, attestations, audit log all
+# live in the same D1 (multi-user, multi-tenant via owner_id since
+# migration 0002).
+
+[[kv_namespaces]]
+binding = "CONFIG_KV"
+id = "dc95f90063cd4493bb3ea462759f4002"
+
+[[d1_databases]]
+binding = "CONFIG_DB"
+database_name = "edge-seo-platform-staging"
+database_id = "a6c1786a-4999-4ac5-ad60-7faafec61283"
+migrations_dir = "../migrations"
+
+# EMAIL binding — Cloudflare Email Service (public beta, April 2026).
+# Configured during Phase C; requires Workers paid plan and Email Sending
+# enabled on the account.
+#
+# [[send_email]]
+# name = "EMAIL"
+
+# Secrets set via wrangler:
+#   npx wrangler secret put SESSION_SECRET --config=frontend-worker/wrangler.toml
+#
+# SESSION_SECRET — 32 random bytes (hex) used as HMAC key for signed
+# session cookies. Rotate to invalidate all active sessions at once.
+
+# Apex zone route is added in Phase G (cut-over). Until then this worker
+# is reachable only via its workers.dev URL for staging testing:
+#   https://edge-seo-frontend.localblitzio.workers.dev
