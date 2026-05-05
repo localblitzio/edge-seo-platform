@@ -310,12 +310,26 @@ export const LIST_EDITOR_JS = String.raw`
     if (!json) return;
     var arr = getByPath(json, pathParts(key));
     if (!Array.isArray(arr)) arr = [];
-    if (arr.length === 0) {
+    var filter = container.getAttribute('data-filter-match');
+    // In per-page editor, render only entries whose match equals the
+    // active filter — but preserve the ORIGINAL index from the array
+    // so add/remove handlers target the right slot in the underlying
+    // JSON.
+    var visible;
+    if (filter) {
+      visible = [];
+      for (var i = 0; i < arr.length; i++) {
+        if (arr[i] && arr[i].match === filter) visible.push({ entry: arr[i], idx: i });
+      }
+    } else {
+      visible = arr.map(function (entry, idx) { return { entry: entry, idx: idx }; });
+    }
+    if (visible.length === 0) {
       container.innerHTML = '<div class="empty">none configured — click + Add to create one</div>';
       return;
     }
     var renderer = RENDERERS[key];
-    container.innerHTML = arr.map(function (e, i) { return renderer(e, i); }).join('');
+    container.innerHTML = visible.map(function (p) { return renderer(p.entry, p.idx); }).join('');
   }
 
   function renderAllLists() {
@@ -398,7 +412,19 @@ export const LIST_EDITOR_JS = String.raw`
         arr = [];
         setByPath(json, p, arr);
       }
-      arr.push(fac());
+      var newEntry = fac();
+      // In per-page editor, force the new entry's match to the filter
+      // value so the entry appears under "this page" rather than going
+      // to the default ^/.* match. text_rewrites/meta_rewrites/schema_
+      // injections/indexation/canonicals all have a "match" field.
+      // redirects.static uses "from" instead and isn't filtered, so
+      // the filter doesn't apply to it.
+      var addContainer = document.querySelector('[data-list-container="' + key + '"]');
+      var addFilter = addContainer && addContainer.getAttribute('data-filter-match');
+      if (addFilter && key !== 'redirects.static') {
+        newEntry.match = addFilter;
+      }
+      arr.push(newEntry);
       ta.value = JSON.stringify(json, null, 2);
       renderListSection(key);
       return;
