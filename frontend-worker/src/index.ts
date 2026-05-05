@@ -32,8 +32,11 @@ import {
   appLayout,
   handleAttestPost,
   handleCachePurgePost,
+  handleDeleteCustomPagePost,
   handleEditClientPost,
   handleNewClientPost,
+  handleNewCustomPageGet,
+  handleNewCustomPagePost,
   handleStatusPost,
   literalPathFromMatch,
   loadVisibleClient,
@@ -44,6 +47,7 @@ import {
   renderClientsList,
   renderEditClientForm,
   renderNewClientForm,
+  renderNewCustomPageForm,
   renderOverview,
   renderPerPageEditor,
   summarizeEditedPages,
@@ -1039,6 +1043,59 @@ export default {
             flash: null,
           }),
         );
+      }
+
+      // /app/clients/:id/custom-page/new — render upload form
+      if (sub === "custom-page/new" && method === "GET") {
+        const r = await handleNewCustomPageGet(env, user, id);
+        if (r instanceof Response) return r;
+        return htmlResponse(
+          htmlPage({
+            title: `New custom page — ${id}`,
+            body: appLayout({
+              title: `New custom page — ${id}`,
+              content: renderNewCustomPageForm(r.client, null),
+              activeNav: `client:${id}`,
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+
+      // /app/clients/:id/custom-page/new — handle upload submission
+      if (sub === "custom-page/new" && method === "POST") {
+        const result = await handleNewCustomPagePost(request, env, url, user, id);
+        if (result.response) return result.response;
+        const re = result.rerenderError;
+        if (!re) return new Response("Internal error", { status: 500 });
+        return htmlResponse(
+          htmlPage({
+            title: `New custom page — ${id}`,
+            body: appLayout({
+              title: `New custom page — ${id}`,
+              content: renderNewCustomPageForm(re.client, re.error, {
+                path: re.path,
+                html: re.html,
+              }),
+              activeNav: `client:${id}`,
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+          { status: 400 },
+        );
+      }
+
+      // /app/clients/:id/custom-page/delete — remove R2 object + route
+      if (sub === "custom-page/delete" && method === "POST") {
+        return handleDeleteCustomPagePost(request, env, url, user, id);
       }
 
       // /app/clients/:id/inspect/fetch — JSON endpoint for the
