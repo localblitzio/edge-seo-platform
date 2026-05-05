@@ -19,11 +19,12 @@ database_id = "a6c1786a-4999-4ac5-ad60-7faafec61283"
 migrations_dir = "../migrations"
 
 # EMAIL binding — Cloudflare Email Service (public beta, April 2026).
-# Configured during Phase C; requires Workers paid plan and Email Sending
-# enabled on the account.
-#
-# [[send_email]]
-# name = "EMAIL"
+# Requires Workers paid plan and Email Sending enabled on the account.
+# `allowed_sender_addresses` locks the From: header at the binding layer so a
+# bug in our code can't send From: arbitrary addresses.
+[[send_email]]
+name = "EMAIL"
+allowed_sender_addresses = ["noreply@localpage.us.com"]
 
 # Secrets set via wrangler:
 #   npx wrangler secret put SESSION_SECRET --config=frontend-worker/wrangler.toml

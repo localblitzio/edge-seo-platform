@@ -25,11 +25,14 @@
  * basic-auth `edge-seo-admin` worker.
  */
 
+import type { EmailBinding } from "./email.js";
+
 interface Env {
   CONFIG_KV: KVNamespace;
   CONFIG_DB: D1Database;
   SESSION_SECRET?: string;
-  // EMAIL: SendEmail; // wired in Phase C
+  /** Cloudflare Email Service (public beta) — wired in Phase C, used in Phase D+. */
+  EMAIL: EmailBinding;
 }
 
 const HTML_ENTITIES: Record<string, string> = {
