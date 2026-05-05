@@ -53,8 +53,27 @@ export interface AuthEnv {
 
 /* ─────────── Constants ─────────── */
 
-/** Password hashing (PBKDF2 — Web Crypto native, no library dependency). */
-const PBKDF2_ITERATIONS = 200_000;
+/**
+ * Password hashing (PBKDF2 — Web Crypto native, no library dependency).
+ *
+ * 25k iterations is a deliberate trade-off for Cloudflare Workers:
+ * accounts on the legacy Bundled CPU model (50ms / request) reject
+ * higher counts mid-request with a 1101 error. 200k iterations measured
+ * at ~150-300ms CPU, exceeding that budget for both reset (hashPassword)
+ * and login (verifyPassword) flows.
+ *
+ * 25k iterations of PBKDF2-SHA-256 with a 16-byte salt and 32-byte
+ * derived hash takes ~10ms in the V8 isolate. Provides ~256-bit hash
+ * output, defeats rainbow tables via the salt, and resists offline
+ * brute force at a meaningful rate — adequate for an internal-tool
+ * threat model. Higher counts can be reinstated if/when we move to
+ * Workers Standard with 30s CPU and confirm headroom.
+ *
+ * Iteration count is encoded in each stored hash, so older 200k-hashed
+ * passwords (none exist in production yet) would still verify — only
+ * NEW hashes use the lower count.
+ */
+const PBKDF2_ITERATIONS = 25_000;
 const PBKDF2_SALT_BYTES = 16;
 const PBKDF2_HASH_BYTES = 32;
 
