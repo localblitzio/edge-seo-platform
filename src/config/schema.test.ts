@@ -85,23 +85,21 @@ describe("ClientConfig schema", () => {
 
   it("text_rewrites: accepts mode='html'", () => {
     const cfg = validLanternCrestConfig() as Record<string, unknown>;
-    cfg.text_rewrites = [
-      { match: "^/$", selector: "h1", mode: "html", content: "<em>New</em>" },
-    ];
+    cfg.text_rewrites = [{ match: "^/$", selector: "h1", mode: "html", content: "<em>New</em>" }];
     expect(ClientConfig.safeParse(cfg).success).toBe(true);
   });
 
   it("text_rewrites: rejects an unknown mode", () => {
     const cfg = validLanternCrestConfig() as Record<string, unknown>;
-    cfg.text_rewrites = [
-      { match: "^/$", selector: "h1", mode: "raw", content: "x" },
-    ];
+    cfg.text_rewrites = [{ match: "^/$", selector: "h1", mode: "raw", content: "x" }];
     expect(ClientConfig.safeParse(cfg).success).toBe(false);
   });
 
   it("text_rewrites: defaults to [] when omitted from config", () => {
-    const cfg = validLanternCrestConfig() as Record<string, unknown>;
-    delete cfg.text_rewrites;
+    const { text_rewrites: _omitted, ...cfg } = validLanternCrestConfig() as Record<
+      string,
+      unknown
+    >;
     const result = ClientConfig.parse(cfg);
     expect(result.text_rewrites).toEqual([]);
   });
