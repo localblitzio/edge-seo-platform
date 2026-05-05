@@ -28,11 +28,21 @@
 
 import {
   APP_STYLE,
+  NEW_CLIENT_TEMPLATE,
   appLayout,
+  handleAttestPost,
+  handleCachePurgePost,
+  handleEditClientPost,
+  handleNewClientPost,
+  handleStatusPost,
+  loadVisibleClient,
   loadVisibleClients,
+  renderAttestForm,
   renderAuditPage,
   renderClientDetail,
   renderClientsList,
+  renderEditClientForm,
+  renderNewClientForm,
   renderOverview,
 } from "./app.js";
 import {
@@ -736,21 +746,17 @@ export default {
       );
     }
 
-    if (path.startsWith("/app/clients/")) {
+    // /app/clients/new (must come before the /app/clients/:id catch-all)
+    if (path === "/app/clients/new" && method === "GET") {
       if (!user) return redirectToLogin(url);
-      const id = decodeURIComponent(path.slice("/app/clients/".length));
-      // No nested sub-routes yet (Phase E v2 adds /edit, /attest, /status,
-      // /cache-purge, /new). For now, anything past /app/clients/:id
-      // renders the detail page (slash-tolerant).
-      const cleanId = id.split("/")[0] ?? "";
       const clients = await loadVisibleClients(env, user);
       return htmlResponse(
         htmlPage({
-          title: `${cleanId} — Edge SEO Platform`,
+          title: "New client — Edge SEO Platform",
           body: appLayout({
-            title: cleanId,
-            content: await renderClientDetail(env, user, cleanId),
-            activeNav: `client:${cleanId}`,
+            title: "New client",
+            content: renderNewClientForm(NEW_CLIENT_TEMPLATE, null),
+            activeNav: "clients",
             user,
             flash,
             clients,
@@ -759,6 +765,198 @@ export default {
           flash: null,
         }),
       );
+    }
+    if (path === "/app/clients/new" && method === "POST") {
+      if (!user) return redirectToLogin(url);
+      const result = await handleNewClientPost(request, env, url, user);
+      if (result.response) return result.response;
+      // Validation failed: re-render the form with the error + the user's
+      // submitted JSON pre-filled so they don't lose their work.
+      const clients = await loadVisibleClients(env, user);
+      return htmlResponse(
+        htmlPage({
+          title: "New client — Edge SEO Platform",
+          body: appLayout({
+            title: "New client",
+            content: renderNewClientForm(
+              result.rerenderError?.raw ?? NEW_CLIENT_TEMPLATE,
+              result.rerenderError?.error ?? "Unknown error",
+            ),
+            activeNav: "clients",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+        { status: 400 },
+      );
+    }
+
+    if (path.startsWith("/app/clients/")) {
+      if (!user) return redirectToLogin(url);
+      const rest = path.slice("/app/clients/".length);
+      const slash = rest.indexOf("/");
+      const id = decodeURIComponent(slash === -1 ? rest : rest.slice(0, slash));
+      const sub = slash === -1 ? "" : rest.slice(slash + 1);
+      const clients = await loadVisibleClients(env, user);
+
+      // Detail page (read-only)
+      if (sub === "" && method === "GET") {
+        return htmlResponse(
+          htmlPage({
+            title: `${id} — Edge SEO Platform`,
+            body: appLayout({
+              title: id,
+              content: await renderClientDetail(env, user, id),
+              activeNav: `client:${id}`,
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+
+      // Edit form + handler
+      if (sub === "edit" && method === "GET") {
+        const client = await loadVisibleClient(env, user, id);
+        if (!client) {
+          return htmlResponse(
+            htmlPage({
+              title: `${id} — Edge SEO Platform`,
+              body: appLayout({
+                title: id,
+                content:
+                  '<h1>Not found</h1><div class="empty">No client with that id, or you don\'t have access to it.</div>',
+                activeNav: `client:${id}`,
+                user,
+                flash,
+                clients,
+              }),
+              user,
+              flash: null,
+            }),
+            { status: 404 },
+          );
+        }
+        const pretty = JSON.stringify(JSON.parse(client.config_json), null, 2);
+        return htmlResponse(
+          htmlPage({
+            title: `Edit ${id} — Edge SEO Platform`,
+            body: appLayout({
+              title: `Edit ${id}`,
+              content: renderEditClientForm(client, pretty, null),
+              activeNav: `client:${id}`,
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+      if (sub === "edit" && method === "POST") {
+        const result = await handleEditClientPost(request, env, url, user, id);
+        if (result.response) return result.response;
+        return htmlResponse(
+          htmlPage({
+            title: `Edit ${id} — Edge SEO Platform`,
+            body: appLayout({
+              title: `Edit ${id}`,
+              content: renderEditClientForm(
+                result.rerenderError?.client ?? ({} as never),
+                result.rerenderError?.raw ?? "",
+                result.rerenderError?.error ?? "Unknown error",
+              ),
+              activeNav: `client:${id}`,
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+          { status: 400 },
+        );
+      }
+
+      // Status flip (POST only)
+      if (sub === "status" && method === "POST") {
+        return handleStatusPost(request, env, url, user, id);
+      }
+
+      // Cache purge (POST only)
+      if (sub === "cache-purge" && method === "POST") {
+        return handleCachePurgePost(request, env, url, user, id);
+      }
+
+      // Attestation form + handler
+      if (sub === "attest" && method === "GET") {
+        const client = await loadVisibleClient(env, user, id);
+        if (!client) {
+          return htmlResponse(
+            htmlPage({
+              title: `${id} — Edge SEO Platform`,
+              body: appLayout({
+                title: id,
+                content: "<h1>Not found</h1>",
+                activeNav: `client:${id}`,
+                user,
+                flash,
+                clients,
+              }),
+              user,
+              flash: null,
+            }),
+            { status: 404 },
+          );
+        }
+        return htmlResponse(
+          htmlPage({
+            title: `Attest ${id} — Edge SEO Platform`,
+            body: appLayout({
+              title: `Attest ${id}`,
+              content: renderAttestForm(client, null),
+              activeNav: `client:${id}`,
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+      if (sub === "attest" && method === "POST") {
+        const result = await handleAttestPost(request, env, url, user, id);
+        if (result.response) return result.response;
+        return htmlResponse(
+          htmlPage({
+            title: `Attest ${id} — Edge SEO Platform`,
+            body: appLayout({
+              title: `Attest ${id}`,
+              content: renderAttestForm(
+                result.rerenderError?.client ?? ({} as never),
+                result.rerenderError?.error ?? "Unknown error",
+              ),
+              activeNav: `client:${id}`,
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+          { status: 400 },
+        );
+      }
+
+      // Unknown sub-route — fall through to 404 below.
     }
 
     if (path === "/app/audit") {
