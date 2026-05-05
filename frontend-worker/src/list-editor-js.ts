@@ -445,5 +445,167 @@ export const LIST_EDITOR_JS = String.raw`
 
   renderAllLists();
   maybeRerenderLists();
+
+  // Page-element picker.
+  // GET /app/clients/:id/inspect/fetch?path=... returns
+  //   { url, status, elements: [{tag, id, classes, text, selector}, ...] }
+  // The form has been rendered with a [data-inspect-panel] div containing
+  // an input + Fetch button + result placeholders. We wire those here.
+
+  /**
+   * Escape a path string into a regex that matches it literally + nothing else.
+   * Built character-by-character to avoid putting the literal sequence
+   * \${...} in this file (it would otherwise be interpreted by TypeScript's
+   * template-literal interpolator at compile time, even inside String.raw).
+   */
+  function pathToRegex(p) {
+    // Concat-built so the source doesn't contain '\${' — TypeScript would
+    // try to interpolate that even though we're inside String.raw.
+    var SPECIALS = '.*+?^' + '$' + '(){}|[]\\\\';
+    var out = '';
+    for (var i = 0; i < p.length; i++) {
+      var c = p.charAt(i);
+      out += SPECIALS.indexOf(c) !== -1 ? '\\\\' + c : c;
+    }
+    return '^' + out + '$';
+  }
+
+  /** Determine the inspect endpoint URL from this edit page's path. */
+  function inspectEndpoint() {
+    // Edit URL is /app/clients/:id/edit. We strip /edit and append
+    // /inspect/fetch.
+    var p = window.location.pathname;
+    if (!/\/edit\/?$/.test(p)) return null;
+    return p.replace(/\/edit\/?$/, '') + '/inspect/fetch';
+  }
+
+  function escHtml(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function renderInspectResult(data) {
+    if (!data || !Array.isArray(data.elements) || data.elements.length === 0) {
+      return '<div class="empty">No headings or paragraphs found on that page.</div>';
+    }
+    var rows = data.elements
+      .map(function (el, i) {
+        var preview = el.text && el.text.length > 0 ? el.text : '<em style="color:var(--fg-muted)">(no text)</em>';
+        return (
+          '<div class="inspect-result-row">' +
+            '<span class="inspect-result-tag">' + escHtml(el.tag) + '</span>' +
+            '<div class="inspect-result-text">' +
+              escHtml(preview) +
+              '<code class="inspect-result-selector">' + escHtml(el.selector) + '</code>' +
+            '</div>' +
+            '<button type="button" class="btn" data-inspect-use="' + i + '">Use this</button>' +
+          '</div>'
+        );
+      })
+      .join('');
+    return '<div class="inspect-result-list">' + rows + '</div>';
+  }
+
+  function setInspectStatus(panel, msg, kind) {
+    var statusEl = panel.querySelector('[data-inspect-status]');
+    if (!statusEl) return;
+    if (!msg) { statusEl.innerHTML = ''; return; }
+    statusEl.innerHTML = '<span class="inspect-status-' + kind + '">' + escHtml(msg) + '</span>';
+  }
+
+  // Cache the most-recent fetch result so click handlers on "Use this"
+  // buttons can look up the element by index.
+  var lastFetched = null;
+  var lastFetchedPath = '/';
+
+  function doFetch(panel) {
+    var pathInput = panel.querySelector('#inspect_path');
+    if (!pathInput) return;
+    var path = pathInput.value.trim() || '/';
+    var endpoint = inspectEndpoint();
+    if (!endpoint) {
+      setInspectStatus(panel, 'Inspect only works on the edit page.', 'err');
+      return;
+    }
+    setInspectStatus(panel, 'Fetching ' + path + ' from source…', 'loading');
+    var resultsEl = panel.querySelector('[data-inspect-results]');
+    if (resultsEl) resultsEl.innerHTML = '';
+
+    var url = endpoint + '?path=' + encodeURIComponent(path);
+    fetch(url, { credentials: 'same-origin', headers: { accept: 'application/json' } })
+      .then(function (r) {
+        return r.json().then(function (j) { return { ok: r.ok, status: r.status, body: j }; });
+      })
+      .then(function (resp) {
+        if (!resp.ok) {
+          setInspectStatus(panel, 'Error: ' + (resp.body.error || ('HTTP ' + resp.status)), 'err');
+          return;
+        }
+        var data = resp.body;
+        if (data.status >= 400) {
+          setInspectStatus(panel, 'Source returned ' + data.status + ' on ' + data.url, 'err');
+          if (resultsEl) resultsEl.innerHTML = '';
+          return;
+        }
+        lastFetched = data;
+        lastFetchedPath = path;
+        setInspectStatus(panel, 'Fetched ' + data.url + ' — ' + data.elements.length + ' element(s)', 'ok');
+        if (resultsEl) resultsEl.innerHTML = renderInspectResult(data);
+      })
+      .catch(function (err) {
+        setInspectStatus(panel, 'Network error: ' + err.message, 'err');
+      });
+  }
+
+  // Delegated click for Fetch + Use-this buttons.
+  document.addEventListener('click', function (e) {
+    var t = e.target;
+    if (!t || !t.dataset) return;
+
+    if (t.hasAttribute('data-inspect-fetch')) {
+      var panel = t.closest('[data-inspect-panel]');
+      if (panel) doFetch(panel);
+      return;
+    }
+
+    if (t.dataset.inspectUse !== undefined) {
+      // Use the element at the given index from the last fetch.
+      if (!lastFetched) return;
+      var idx = parseInt(t.dataset.inspectUse, 10);
+      var el = lastFetched.elements[idx];
+      if (!el) return;
+      var json = safeParse();
+      if (!json) {
+        alert('JSON has parse errors — fix them in the textarea before adding entries.');
+        return;
+      }
+      if (!Array.isArray(json.text_rewrites)) json.text_rewrites = [];
+      json.text_rewrites.push({
+        match: pathToRegex(lastFetchedPath),
+        selector: el.selector,
+        mode: 'text',
+        content: el.text,
+      });
+      ta.value = JSON.stringify(json, null, 2);
+      renderListSection('text_rewrites');
+      // Scroll to the new entry (it's at the end of the list).
+      var section = document.getElementById('section-text-rewrites');
+      if (section) section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      return;
+    }
+  });
+
+  // Allow Enter in the path input to trigger Fetch.
+  document.addEventListener('keydown', function (e) {
+    var t = e.target;
+    if (!t || t.id !== 'inspect_path' || e.key !== 'Enter') return;
+    e.preventDefault();
+    var panel = t.closest('[data-inspect-panel]');
+    if (panel) doFetch(panel);
+  });
 })();
 `;

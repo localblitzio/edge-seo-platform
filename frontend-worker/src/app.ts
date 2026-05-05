@@ -260,6 +260,20 @@ form.editor .form-actions{display:flex;gap:.5rem;align-items:center;margin-top:.
 .checkbox-inline input[type=checkbox]{margin:0}
 .form-section h2{display:flex;justify-content:space-between;align-items:center}
 .form-section h2 .btn{font-size:.75rem;padding:.3rem .7rem;font-weight:600}
+.inspect-panel{background:var(--bg-sidebar,#f4f4f5);border:1px solid var(--border);border-radius:var(--radius);padding:.75rem 1rem;margin:0 0 .85rem}
+@media (prefers-color-scheme:dark){.inspect-panel{background:#0d0d10}}
+.inspect-row{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap}
+.inspect-row label{font-weight:600;font-size:.85rem}
+.inspect-row input[type=text]{font:inherit;font-size:.9rem;padding:.4rem .55rem;border:1px solid var(--border-strong);border-radius:var(--radius);background:var(--bg-elevated);color:var(--fg)}
+.inspect-result-list{display:flex;flex-direction:column;gap:.4rem;max-height:400px;overflow-y:auto}
+.inspect-result-row{display:flex;gap:.6rem;align-items:flex-start;background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius);padding:.5rem .75rem}
+.inspect-result-tag{display:inline-block;padding:.05rem .45rem;border-radius:9999px;font-size:.7rem;font-weight:700;background:var(--accent);color:var(--accent-fg);text-transform:uppercase;flex-shrink:0;font-family:var(--mono);min-width:1.6rem;text-align:center}
+.inspect-result-text{flex:1;font-size:.85rem;line-height:1.4;color:var(--fg);overflow-wrap:break-word;min-width:0}
+.inspect-result-selector{font-family:var(--mono);font-size:.7rem;color:var(--fg-muted);margin-top:.15rem;display:block}
+.inspect-result-row .btn{flex-shrink:0;font-size:.72rem;padding:.25rem .65rem}
+.inspect-status-ok{color:var(--green);font-size:.85rem}
+.inspect-status-err{color:var(--red);font-size:.85rem}
+.inspect-status-loading{color:var(--fg-muted);font-size:.85rem}
 `;
 
 interface AppLayoutOpts {
@@ -697,6 +711,21 @@ function renderStructuredFormBody(opts: {
     '<div data-list-container="meta_rewrites"></div></div>',
     '<div class="form-section" id="section-text-rewrites"><h2>Text &amp; heading rewrites <button type="button" class="btn" data-add-to="text_rewrites">+ Add</button></h2>',
     '<p class="field-hint" style="margin:0 0 .6rem">Replaces the inner content of any element matching a CSS selector — H1/H2/H3, paragraphs, taglines, button text, etc. Element attributes and classes are preserved. Example: match <code>^/$</code>, selector <code>h1</code>, content <code>Welcome — Now Accepting Residents</code>. Use <code>html</code> mode to wrap part of the replacement in an <code>&lt;em&gt;</code> or <code>&lt;span&gt;</code>.</p>',
+    // Page-element picker. Operator types a path, clicks Fetch, the
+    // worker hits the source domain and returns a list of h1/h2/h3/p
+    // elements with computed CSS selectors. Clicking "Use this" adds
+    // a text_rewrites entry pre-filled with match=^path$, the
+    // selector, and the current text as the starting content.
+    '<div class="inspect-panel" data-inspect-panel>',
+    '<div class="inspect-row">',
+    '<label for="inspect_path">Inspect page on source:</label>',
+    '<input id="inspect_path" type="text" value="/" placeholder="/about" style="flex:1">',
+    '<button type="button" class="btn" data-inspect-fetch>Fetch</button>',
+    "</div>",
+    '<div class="field-hint" style="margin-top:.4rem">Loads the page from the source domain and lists its headings + paragraphs. Click <strong>Use this</strong> on any to pre-fill a text_rewrites rule. Selectors are starting points — edit before saving if your source DOM is volatile.</div>',
+    '<div data-inspect-status style="margin-top:.6rem"></div>',
+    '<div data-inspect-results style="margin-top:.6rem"></div>',
+    "</div>",
     '<div data-list-container="text_rewrites"></div></div>',
     '<div class="form-section"><h2>Raw <code>ClientConfig</code> JSON</h2>',
     '<p class="field-hint" style="margin-bottom:.6rem">Source of truth on submit. Form fields above sync into this textarea on every keystroke. Advanced fields not exposed as form sections (pattern/conditional redirects, link rewrites, element removals, content injections, caching, forms) are edited directly here.</p>',
