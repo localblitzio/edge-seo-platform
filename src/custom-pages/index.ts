@@ -37,17 +37,36 @@ export async function renderCustomPage(url: URL, route: RouteRule, env: Env): Pr
     return new Response("not a custom_page route", { status: 500 });
   }
 
-  const storageKey = `${route.custom_page_key ?? ""}${url.pathname}`;
+  const prefix = route.custom_page_key ?? "";
+  // The route's match regex usually uses `^<path>/?$` so it matches both
+  // /foo and /foo/. The R2 object was stored under whichever form the
+  // operator typed in the upload form. Try the URL's pathname verbatim
+  // first (so explicitly-stored "/foo/" wins over a stripped "/foo"
+  // collision); fall back to the toggled-trailing-slash form. Root `/`
+  // has no alternate form.
+  const primaryKey = `${prefix}${url.pathname}`;
+  let altKey: string | null = null;
+  if (url.pathname !== "/") {
+    altKey = url.pathname.endsWith("/")
+      ? `${prefix}${url.pathname.slice(0, -1)}`
+      : `${prefix}${url.pathname}/`;
+  }
 
-  // R2 first.
-  const r2Object = await env.CONTENT_R2.get(storageKey);
+  // R2 first — try primary then alt.
+  let r2Object = await env.CONTENT_R2.get(primaryKey);
+  if (r2Object === null && altKey) {
+    r2Object = await env.CONTENT_R2.get(altKey);
+  }
   if (r2Object !== null) {
     const body = await r2Object.text();
     return buildHtmlResponse(body, r2Object.httpEtag, r2Object.uploaded);
   }
 
-  // KV fallback.
-  const kvContent = await env.CONFIG_KV.get(`page:${storageKey}`);
+  // KV fallback — same primary/alt strategy.
+  let kvContent = await env.CONFIG_KV.get(`page:${primaryKey}`);
+  if (kvContent === null && altKey) {
+    kvContent = await env.CONFIG_KV.get(`page:${altKey}`);
+  }
   if (kvContent !== null) {
     return buildHtmlResponse(kvContent);
   }
