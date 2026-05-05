@@ -40,6 +40,42 @@ describe("ClientConfig schema", () => {
     expect(ClientConfig.safeParse(cfg).success).toBe(false);
   });
 
+  it("rejects a client_id with underscores (not DNS-safe)", () => {
+    const cfg = validLanternCrestConfig() as Record<string, unknown>;
+    cfg.client_id = "lantern_crest";
+    expect(ClientConfig.safeParse(cfg).success).toBe(false);
+  });
+
+  it("rejects a client_id starting with a hyphen", () => {
+    const cfg = validLanternCrestConfig() as Record<string, unknown>;
+    cfg.client_id = "-lantern-crest";
+    expect(ClientConfig.safeParse(cfg).success).toBe(false);
+  });
+
+  it("rejects a client_id ending with a hyphen", () => {
+    const cfg = validLanternCrestConfig() as Record<string, unknown>;
+    cfg.client_id = "lantern-crest-";
+    expect(ClientConfig.safeParse(cfg).success).toBe(false);
+  });
+
+  it("rejects a client_id longer than 63 chars (DNS label cap)", () => {
+    const cfg = validLanternCrestConfig() as Record<string, unknown>;
+    cfg.client_id = "a".repeat(64);
+    expect(ClientConfig.safeParse(cfg).success).toBe(false);
+  });
+
+  it("accepts a 63-character client_id at the boundary", () => {
+    const cfg = validLanternCrestConfig() as Record<string, unknown>;
+    cfg.client_id = "a".repeat(63);
+    expect(ClientConfig.safeParse(cfg).success).toBe(true);
+  });
+
+  it("accepts a single-letter client_id", () => {
+    const cfg = validLanternCrestConfig() as Record<string, unknown>;
+    cfg.client_id = "a";
+    expect(ClientConfig.safeParse(cfg).success).toBe(true);
+  });
+
   it("rejects an unknown schema_version", () => {
     const cfg = validLanternCrestConfig() as Record<string, unknown>;
     cfg.schema_version = 2;

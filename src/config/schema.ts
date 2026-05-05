@@ -192,7 +192,17 @@ export const Authorization = z.object({
 });
 
 export const ClientConfig = z.object({
-  client_id: z.string().regex(/^[a-z0-9_-]+$/),
+  /**
+   * RFC 1035 LDH (letter-digit-hyphen), no leading/trailing hyphen, ≤63 chars.
+   * Tighter than the original `[a-z0-9_-]+` so the same string is safe to use
+   * as a DNS subdomain when a client adopts the default proxy zone (no
+   * underscores in DNS labels, length cap, edge-hyphen rule). Existing
+   * clients are unaffected as long as their ids are already DNS-safe.
+   */
+  client_id: z
+    .string()
+    .regex(/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/)
+    .max(63),
   proxy_domain: z.string(),
   source_domain: z.string(),
   authorization: Authorization,
