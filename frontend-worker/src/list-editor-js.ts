@@ -498,11 +498,12 @@ export const LIST_EDITOR_JS = String.raw`
 
   /** Determine the inspect endpoint URL from this edit page's path. */
   function inspectEndpoint() {
-    // Edit URL is /app/clients/:id/edit. We strip /edit and append
+    // Edit URL is /app/clients/:id/edit OR /app/clients/:id/page (the
+    // per-page editor). Strip the trailing segment and append
     // /inspect/fetch.
     var p = window.location.pathname;
-    if (!/\/edit\/?$/.test(p)) return null;
-    return p.replace(/\/edit\/?$/, '') + '/inspect/fetch';
+    if (!/\/(edit|page)\/?$/.test(p)) return null;
+    return p.replace(/\/(edit|page)\/?$/, '') + '/inspect/fetch';
   }
 
   function escHtml(s) {
