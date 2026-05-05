@@ -28,6 +28,7 @@ import { ConfigValidationError } from "../../src/lib/errors.js";
 import type { User } from "./auth.js";
 import { BUILD_VERSION } from "./build-version.js";
 import { LIST_EDITOR_JS } from "./list-editor-js.js";
+import { ZIP_MAX_BYTES, contentTypeForPath, extractZip } from "./zip-extractor.js";
 
 /* ─── Types ─── */
 
@@ -585,6 +586,37 @@ function derivLiteralPath(m: string): string | null {
     out += "/";
   }
   return out;
+}
+
+/**
+ * Derive the base path from a static-site route regex. The form
+ * emitted by the upload handler is `^<basePath>(/.*)?$` (and the
+ * legacy `^<basePath>/.*` is also accepted for forward compatibility
+ * with hand-edited configs). Returns the basePath portion (e.g.
+ * `/site/landing`) or null if the regex doesn't match either shape.
+ */
+function deriveStaticSiteBase(match: string): string | null {
+  // Try the canonical shape first: `^<basePath>(/.*)?$`.
+  let m = match.match(/^\^(.+?)\(\/\.\*\)\?\$$/);
+  if (!m) {
+    // Legacy shape: `^<basePath>/.*` (no closing $).
+    m = match.match(/^\^(.+?)\/\.\*$/);
+  }
+  if (!m || !m[1]) return null;
+  // Un-escape regex specials in the basePath segment.
+  let out = "";
+  const inner = m[1];
+  for (let i = 0; i < inner.length; i++) {
+    const c = inner[i] ?? "";
+    if (c === "\\" && i + 1 < inner.length) {
+      out += inner[++i] ?? "";
+    } else if (".*+?()[]{}|^$\\".includes(c)) {
+      return null;
+    } else {
+      out += c;
+    }
+  }
+  return out.startsWith("/") ? out : null;
 }
 
 function renderPagesWithEditsPanel(
@@ -1175,6 +1207,13 @@ export interface CustomPageEntry {
   literalPath: string | null;
   /** The R2/KV storage key prefix on the route. */
   customPageKey: string;
+  /**
+   * Whether this is a single-page upload (anchored match like
+   * `^/foo/?$`) or a static-site bundle (open match like `^/foo/.*`).
+   * Drives the Edit/Delete UI: single pages have an Edit form, sites
+   * are delete + reupload.
+   */
+  kind: "page" | "site";
 }
 
 /**
@@ -1188,10 +1227,18 @@ export function listCustomPages(cfg: Record<string, unknown>): CustomPageEntry[]
     if (r.type !== "custom_page") continue;
     const match = typeof r.match === "string" ? r.match : "";
     const customPageKey = typeof r.custom_page_key === "string" ? r.custom_page_key : "";
+    // Static-site routes are open-ended (e.g. `^/site/(/.*)?$` or
+    // `^/site/.*`). Single-page routes are anchored (`^/path/?$`).
+    // Heuristic: if the regex contains `.*` or `(/.*)` it's a site.
+    const kind: "page" | "site" = /\.\*|\(\/\.\*/.test(match) ? "site" : "page";
+    // For static-site routes, derive the base prefix from the regex
+    // for display + delete listing.
+    const literalPath = kind === "site" ? deriveStaticSiteBase(match) : derivLiteralPath(match);
     out.push({
       match,
-      literalPath: derivLiteralPath(match),
+      literalPath,
       customPageKey,
+      kind,
     });
   }
   return out;
@@ -1205,21 +1252,40 @@ function renderCustomPagesPanel(client: ClientRow, cfg: Record<string, unknown>)
   const entries = listCustomPages(cfg);
   const rows = entries
     .map((e) => {
-      const display = e.literalPath ?? e.match;
-      const liveCell = e.literalPath
-        ? `<a href="https://${esc(client.proxy_domain)}${esc(e.literalPath)}" target="_blank" rel="noopener" title="Open on proxy">↗</a>`
+      // For static sites the displayed path is the base prefix shown
+      // with a trailing slash so it's clear it covers everything below.
+      const display =
+        e.kind === "site" && e.literalPath ? `${e.literalPath}/` : (e.literalPath ?? e.match);
+      const kindLabel =
+        e.kind === "site"
+          ? '<span class="pill pill-neutral" style="margin-left:.4rem">site</span>'
+          : "";
+      const liveHref =
+        e.kind === "site" && e.literalPath
+          ? `https://${client.proxy_domain}${e.literalPath}/`
+          : e.literalPath
+            ? `https://${client.proxy_domain}${e.literalPath}`
+            : null;
+      const liveCell = liveHref
+        ? `<a href="${esc(liveHref)}" target="_blank" rel="noopener" title="Open on proxy">↗</a>`
         : "";
-      // Edit link only meaningful for literal paths — wildcard custom_page
-      // routes can't be unambiguously round-tripped through a path field.
-      const editLink = e.literalPath
-        ? `<a href="/app/clients/${esc(client.client_id)}/custom-page/edit?match=${encodeURIComponent(e.match)}" class="btn-link">Edit →</a>`
-        : "";
-      const deleteForm = `<form method="POST" action="/app/clients/${esc(client.client_id)}/custom-page/delete" style="display:inline" onsubmit="return confirm('Delete this custom page? The R2 object and routing rule are both removed.');">
+      // Edit only for single-page entries with a literal path. Static
+      // sites are delete + reupload (zip semantics make incremental
+      // edit a separate, larger feature).
+      const editLink =
+        e.kind === "page" && e.literalPath
+          ? `<a href="/app/clients/${esc(client.client_id)}/custom-page/edit?match=${encodeURIComponent(e.match)}" class="btn-link">Edit →</a>`
+          : "";
+      const confirmMsg =
+        e.kind === "site"
+          ? "Delete this static site? All R2 objects under the prefix are removed along with the routing rule."
+          : "Delete this custom page? The R2 object and routing rule are both removed.";
+      const deleteForm = `<form method="POST" action="/app/clients/${esc(client.client_id)}/custom-page/delete" style="display:inline" onsubmit="return confirm('${esc(confirmMsg)}');">
           <input type="hidden" name="match" value="${esc(e.match)}">
           <button type="submit" class="btn-link" style="color:var(--red);background:none;border:none;cursor:pointer;font:inherit;padding:0">Delete</button>
         </form>`;
       return `<tr>
-        <td class="mono">${esc(display)}</td>
+        <td class="mono">${esc(display)}${kindLabel}</td>
         <td style="text-align:center;width:1.5rem">${liveCell}</td>
         <td>${editLink}</td>
         <td>${deleteForm}</td>
@@ -1230,12 +1296,15 @@ function renderCustomPagesPanel(client: ClientRow, cfg: Record<string, unknown>)
     ? `<table class="data" style="margin-bottom:.6rem"><thead><tr><th>path</th><th></th><th></th><th></th></tr></thead><tbody>${rows}</tbody></table>`
     : '<div class="empty" style="margin:0 0 .6rem">no custom pages yet</div>';
   return `<div class="card" style="margin-bottom:1rem">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin:0 0 .85rem">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin:0 0 .85rem;gap:.5rem;flex-wrap:wrap">
       <h2 style="margin:0;font-size:1.05rem;font-weight:600">Custom pages</h2>
-      <a href="/app/clients/${esc(client.client_id)}/custom-page/new" class="btn btn-primary" style="font-size:.78rem;padding:.3rem .8rem">+ New custom page</a>
+      <div style="display:flex;gap:.5rem;flex-wrap:wrap">
+        <a href="/app/clients/${esc(client.client_id)}/custom-page/new" class="btn" style="font-size:.78rem;padding:.3rem .8rem">+ New page (HTML)</a>
+        <a href="/app/clients/${esc(client.client_id)}/custom-page/new-site" class="btn btn-primary" style="font-size:.78rem;padding:.3rem .8rem">+ Upload site (zip)</a>
+      </div>
     </div>
     ${body}
-    <p class="field-hint" style="margin:0">Pages on the proxy domain whose HTML is uploaded here (not fetched from source). Use this for landers, microsites, or any path that doesn't exist on the origin.</p>
+    <p class="field-hint" style="margin:0"><strong>Page (HTML):</strong> single path served from R2. <strong>Site (zip):</strong> upload an archive — a base path covers all files inside (assets, sub-pages, etc).</p>
   </div>`;
 }
 
@@ -1297,6 +1366,37 @@ export function renderEditCustomPageForm(opts: {
       <div class="form-actions">
         <button class="btn btn-primary" type="submit">Save</button>
         <a class="btn" href="/app/clients/${esc(opts.client.client_id)}">Cancel</a>
+      </div>
+    </form>`;
+}
+
+/**
+ * Render the upload form for a static-site bundle. Operator picks a
+ * base path (e.g. `/lp`) and uploads a zip. The form posts as
+ * multipart/form-data because <input type="file"> requires it.
+ */
+export function renderNewStaticSiteForm(
+  client: ClientRow,
+  error: string | null,
+  prefilledBase?: string,
+): string {
+  const base = prefilledBase ?? "";
+  return `<div class="crumbs"><a href="/app/clients/${esc(client.client_id)}">← ${esc(client.client_id)}</a></div>
+    <h1>Upload static site <span style="color:var(--fg-muted);font-size:.6em;font-weight:400">on ${esc(client.client_id)}</span></h1>
+    <p class="subtitle">Upload a ZIP archive containing HTML, CSS, JS, images, and any other files. The bundle is extracted and served on the proxy domain at the base path you choose.</p>
+    ${error ? `<div class="error-box">${esc(error)}</div>` : ""}
+    <form class="editor" method="POST" enctype="multipart/form-data" action="/app/clients/${esc(client.client_id)}/custom-page/new-site">
+      <label for="base_path">Base path</label>
+      <input id="base_path" name="base_path" type="text" required value="${esc(base)}" placeholder="/lp/austin" pattern="^/[A-Za-z0-9/_\\-]+$">
+      <div class="hint">Must start with <code>/</code>. Allowed: letters, digits, <code>/</code>, <code>_</code>, <code>-</code>. Files in the zip serve relative to this base — e.g. with base <code>/lp</code>, an entry <code>css/main.css</code> serves at <code>https://${esc(client.proxy_domain)}/lp/css/main.css</code>.</div>
+      <label for="zip">ZIP archive</label>
+      <input id="zip" name="zip" type="file" accept=".zip,application/zip" required>
+      <div class="hint">Max 50 MB total / 500 entries / 10 MB per file. Path traversal (<code>..</code>, absolute paths) is rejected.</div>
+      <div class="hint">Index resolution: requesting <code>&lt;base&gt;/</code> serves <code>index.html</code> from the bundle. Requesting <code>&lt;base&gt;/about/</code> serves <code>about/index.html</code>.</div>
+      <div class="hint">On save: each entry written to R2 at <code>${esc(client.client_id)}&lt;base&gt;/&lt;entry-path&gt;</code>, one custom_page route prepended to <code>routing[]</code>, KV invalidated, audit_log entry written.</div>
+      <div class="form-actions">
+        <button class="btn btn-primary" type="submit">Upload site</button>
+        <a class="btn" href="/app/clients/${esc(client.client_id)}">Cancel</a>
       </div>
     </form>`;
 }
@@ -1776,6 +1876,172 @@ export async function handleNewCustomPagePost(
 }
 
 /**
+ * Serve the GET form for static-site upload.
+ */
+export async function handleNewStaticSiteGet(
+  env: AppEnv,
+  user: User,
+  clientId: string,
+): Promise<Response | { client: ClientRow }> {
+  const client = await loadVisibleClient(env, user, clientId);
+  if (!client) return new Response("Not found", { status: 404 });
+  return { client };
+}
+
+/**
+ * Build the match regex for a static-site route: `^<basePath>(/.*)?$`.
+ * The optional `(/.*)?` group ensures both the bare base path
+ * (`/site`) and any sub-path (`/site/foo/bar.css`) match the route.
+ */
+function staticSiteMatch(basePath: string): string {
+  const escaped = basePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return `^${escaped}(/.*)?$`;
+}
+
+/**
+ * Handle the static-site upload POST. Extracts the zip in-memory,
+ * validates entries, writes each file to R2 under
+ * `<client_id><basePath>/<entry-path>`, and prepends a single
+ * custom_page route to routing[].
+ */
+export async function handleNewStaticSitePost(
+  request: Request,
+  env: AppEnv,
+  url: URL,
+  user: User,
+  clientId: string,
+): Promise<{
+  response?: Response;
+  rerenderError?: { client: ClientRow; basePath: string; error: string };
+}> {
+  const csrf = checkCsrf(request, url);
+  if (csrf) return { response: csrf };
+  const client = await loadVisibleClient(env, user, clientId);
+  if (!client) return { response: new Response("Not found", { status: 404 }) };
+  if (!env.CONTENT_R2) {
+    return { response: new Response("CONTENT_R2 binding not configured", { status: 500 }) };
+  }
+
+  const form = await request.formData();
+  const basePath = String(form.get("base_path") ?? "").trim();
+  const file = form.get("zip");
+
+  if (!basePath || !CUSTOM_PAGE_PATH_RE.test(basePath) || basePath === "/") {
+    return {
+      rerenderError: {
+        client,
+        basePath,
+        error:
+          "Base path must start with `/`, contain only letters/digits/`/`/`_`/`-`, and not be the root.",
+      },
+    };
+  }
+  if (!(file instanceof File)) {
+    return { rerenderError: { client, basePath, error: "ZIP file is required." } };
+  }
+  if (file.size === 0) {
+    return { rerenderError: { client, basePath, error: "Uploaded ZIP is empty." } };
+  }
+  if (file.size > ZIP_MAX_BYTES) {
+    return {
+      rerenderError: {
+        client,
+        basePath,
+        error: `ZIP exceeds ${ZIP_MAX_BYTES} bytes (got ${file.size}).`,
+      },
+    };
+  }
+
+  // Reject if a route at this base already exists — operator must
+  // delete first. Same defensive posture as single-page uploads.
+  const cfg = JSON.parse(client.config_json) as Record<string, unknown>;
+  const existing = listCustomPages(cfg).find(
+    (e) => e.kind === "site" && e.literalPath === basePath,
+  );
+  if (existing) {
+    return {
+      rerenderError: {
+        client,
+        basePath,
+        error: `A static site already exists at \`${basePath}\`. Delete it first to replace.`,
+      },
+    };
+  }
+
+  // Extract.
+  let extracted: ReturnType<typeof extractZip>;
+  try {
+    const buf = new Uint8Array(await file.arrayBuffer());
+    extracted = extractZip(buf);
+  } catch (e) {
+    return {
+      rerenderError: { client, basePath, error: `Invalid ZIP: ${(e as Error).message}` },
+    };
+  }
+  if (extracted.files.length === 0) {
+    return {
+      rerenderError: { client, basePath, error: "ZIP contains no files." },
+    };
+  }
+
+  // Write each file to R2 with the right content-type. Bundle path
+  // shape: `<client_id><basePath>/<entry-path>` — matches what
+  // renderCustomPage will look up for an inbound URL of
+  // `<basePath>/<entry-path>`.
+  const beforeHash = fnvHash(client.config_json);
+  const r2 = env.CONTENT_R2;
+  for (const entry of extracted.files) {
+    const ct = contentTypeForPath(entry.path) ?? "application/octet-stream";
+    const key = `${clientId}${basePath}/${entry.path}`;
+    await r2.put(key, entry.bytes, {
+      httpMetadata: { contentType: ct },
+      customMetadata: {
+        uploaded_by: user.email,
+        uploaded_at: new Date().toISOString(),
+      },
+    });
+  }
+
+  // Add the routing entry.
+  const routing = Array.isArray(cfg.routing) ? (cfg.routing as Array<unknown>) : [];
+  const newRoute = {
+    match: staticSiteMatch(basePath),
+    type: "custom_page",
+    custom_page_key: clientId,
+    origin_auth: { type: "none" },
+  };
+  cfg.routing = [newRoute, ...routing];
+  const newJson = JSON.stringify(cfg);
+  const afterHash = fnvHash(newJson);
+
+  await env.CONFIG_DB.prepare(
+    "UPDATE clients SET config_json = ?, updated_at = CURRENT_TIMESTAMP WHERE client_id = ?",
+  )
+    .bind(newJson, clientId)
+    .run();
+  await invalidateKv(env, clientId, client.proxy_domain);
+  const actor = actorOf(user, request);
+  await writeAudit(env, {
+    client_id: clientId,
+    actor_email: actor.user.email,
+    actor_ip: actor.ip,
+    event_type: "config_update",
+    before_hash: beforeHash,
+    after_hash: afterHash,
+    previous_status: client.status,
+    new_status: client.status,
+    notes: `uploaded static site ${basePath} (${extracted.files.length} files, ${extracted.totalBytes} bytes uncompressed)`,
+  });
+
+  return {
+    response: flashRedirect(`/app/clients/${clientId}`, {
+      text: `Site uploaded at ${basePath} (${extracted.files.length} files). View at https://${client.proxy_domain}${basePath}/`,
+      kind: "ok",
+    }),
+  };
+}
+
+/**
  * Look up an existing custom_page route by its match regex and load
  * the current R2 body. Used by the edit-form GET handler.
  *
@@ -1940,7 +2206,12 @@ export async function handleDeleteCustomPagePost(
       kind: "err",
     });
   }
-  const literalPath = derivLiteralPath(matchToDelete);
+  // Use the catalog entry to know the route's kind (page vs site) and
+  // its literalPath (single page) or basePath (site). Falls back to
+  // the regex-derived literal for legacy entries.
+  const catalogEntry = listCustomPages(cfg).find((e) => e.match === matchToDelete);
+  const literalPath = catalogEntry?.literalPath ?? derivLiteralPath(matchToDelete);
+  const isSite = catalogEntry?.kind === "site";
 
   const beforeHash = fnvHash(client.config_json);
   cfg.routing = routing.filter((r) => r !== target);
@@ -1952,19 +2223,49 @@ export async function handleDeleteCustomPagePost(
   )
     .bind(newJson, clientId)
     .run();
+
   // Best-effort R2 delete. If it fails, we still want the route gone
   // from the config so traffic stops. Orphaned R2 objects are a
   // cleanup-script concern, not a correctness issue.
+  let r2DeletedCount = 0;
   if (literalPath) {
-    const storageKey = customPageStorageKey(clientId, literalPath);
-    try {
-      await env.CONTENT_R2.delete(storageKey);
-    } catch {
-      /* best-effort */
+    if (isSite) {
+      // Static-site route — sweep all R2 keys under <client_id><base>/.
+      // R2 list pagination is handled by the truncated/cursor loop
+      // below; in practice a single bundle stays under one page (1000
+      // objects) but the loop is correct for arbitrarily large sites.
+      const prefix = `${clientId}${literalPath}/`;
+      try {
+        let cursor: string | undefined;
+        for (;;) {
+          const listed = await env.CONTENT_R2.list({ prefix, cursor });
+          for (const obj of listed.objects) {
+            try {
+              await env.CONTENT_R2.delete(obj.key);
+              r2DeletedCount += 1;
+            } catch {
+              /* best-effort per-object */
+            }
+          }
+          if (!listed.truncated) break;
+          cursor = listed.cursor;
+        }
+      } catch {
+        /* best-effort listing */
+      }
+    } else {
+      const storageKey = customPageStorageKey(clientId, literalPath);
+      try {
+        await env.CONTENT_R2.delete(storageKey);
+        r2DeletedCount = 1;
+      } catch {
+        /* best-effort */
+      }
     }
   }
   await invalidateKv(env, clientId, client.proxy_domain);
   const actor = actorOf(user, request);
+  const kindLabel = isSite ? "static site" : "custom page";
   await writeAudit(env, {
     client_id: clientId,
     actor_email: actor.user.email,
@@ -1974,11 +2275,14 @@ export async function handleDeleteCustomPagePost(
     after_hash: afterHash,
     previous_status: client.status,
     new_status: client.status,
-    notes: `deleted custom page ${literalPath ?? matchToDelete}`,
+    notes: `deleted ${kindLabel} ${literalPath ?? matchToDelete} (R2 objects removed: ${r2DeletedCount})`,
   });
 
+  const flashText = isSite
+    ? `Deleted static site ${literalPath ?? matchToDelete} (${r2DeletedCount} R2 object${r2DeletedCount === 1 ? "" : "s"}).`
+    : `Deleted custom page ${literalPath ?? matchToDelete}.`;
   return flashRedirect(`/app/clients/${clientId}`, {
-    text: `Deleted custom page ${literalPath ?? matchToDelete}.`,
+    text: flashText,
     kind: "ok",
   });
 }

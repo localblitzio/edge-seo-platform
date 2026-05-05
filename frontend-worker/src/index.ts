@@ -39,6 +39,8 @@ import {
   handleNewClientPost,
   handleNewCustomPageGet,
   handleNewCustomPagePost,
+  handleNewStaticSiteGet,
+  handleNewStaticSitePost,
   handleStatusPost,
   literalPathFromMatch,
   loadVisibleClient,
@@ -51,6 +53,7 @@ import {
   renderEditCustomPageForm,
   renderNewClientForm,
   renderNewCustomPageForm,
+  renderNewStaticSiteForm,
   renderOverview,
   renderPerPageEditor,
   summarizeEditedPages,
@@ -1099,6 +1102,51 @@ export default {
       // /app/clients/:id/custom-page/delete — remove R2 object + route
       if (sub === "custom-page/delete" && method === "POST") {
         return handleDeleteCustomPagePost(request, env, url, user, id);
+      }
+
+      // /app/clients/:id/custom-page/new-site — render zip upload form
+      if (sub === "custom-page/new-site" && method === "GET") {
+        const r = await handleNewStaticSiteGet(env, user, id);
+        if (r instanceof Response) return r;
+        return htmlResponse(
+          htmlPage({
+            title: `Upload static site — ${id}`,
+            body: appLayout({
+              title: `Upload static site — ${id}`,
+              content: renderNewStaticSiteForm(r.client, null),
+              activeNav: `client:${id}`,
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+
+      // /app/clients/:id/custom-page/new-site — handle zip upload submission
+      if (sub === "custom-page/new-site" && method === "POST") {
+        const result = await handleNewStaticSitePost(request, env, url, user, id);
+        if (result.response) return result.response;
+        const re = result.rerenderError;
+        if (!re) return new Response("Internal error", { status: 500 });
+        return htmlResponse(
+          htmlPage({
+            title: `Upload static site — ${id}`,
+            body: appLayout({
+              title: `Upload static site — ${id}`,
+              content: renderNewStaticSiteForm(re.client, re.error, re.basePath),
+              activeNav: `client:${id}`,
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+          { status: 400 },
+        );
       }
 
       // /app/clients/:id/custom-page/edit?match=... — render edit form

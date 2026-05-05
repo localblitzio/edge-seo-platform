@@ -21,7 +21,7 @@
 
 import type { RouteRule } from "../config/schema.js";
 import type { Env } from "../env.js";
-import { buildHtmlResponse, buildNotFoundResponse } from "./renderer.js";
+import { buildAssetResponse, buildHtmlResponse, buildNotFoundResponse } from "./renderer.js";
 
 /**
  * Render a custom page from R2/KV by route key.
@@ -38,38 +38,63 @@ export async function renderCustomPage(url: URL, route: RouteRule, env: Env): Pr
   }
 
   const prefix = route.custom_page_key ?? "";
-  // The route's match regex usually uses `^<path>/?$` so it matches both
-  // /foo and /foo/. The R2 object was stored under whichever form the
-  // operator typed in the upload form. Try the URL's pathname verbatim
-  // first (so explicitly-stored "/foo/" wins over a stripped "/foo"
-  // collision); fall back to the toggled-trailing-slash form. Root `/`
-  // has no alternate form.
-  const primaryKey = `${prefix}${url.pathname}`;
-  let altKey: string | null = null;
-  if (url.pathname !== "/") {
-    altKey = url.pathname.endsWith("/")
-      ? `${prefix}${url.pathname.slice(0, -1)}`
-      : `${prefix}${url.pathname}/`;
+  // Lookup strategy:
+  //   1. Primary key: `<prefix><pathname>` verbatim
+  //   2. Trailing-slash alt (single-page custom_page tolerance — see PR #35)
+  //   3. Index-html fallback for directory-style URLs (`/site/`,
+  //      `/site/about/`) → `<prefix><pathname>index.html`. Mirrors how
+  //      static hosts (Netlify, Vercel) resolve directories. Static-site
+  //      uploads rely on this; single-page custom_page uploads ignore
+  //      it because their key always has an extension or terminator.
+  const candidates = buildLookupKeys(prefix, url.pathname);
+
+  // R2 first.
+  for (const key of candidates) {
+    const r2Object = await env.CONTENT_R2.get(key);
+    if (r2Object !== null) {
+      // Honor the content-type stored at upload time so CSS / JS /
+      // images / fonts in a static-site bundle don't all serve as
+      // text/html. Single-page uploads (no metadata, or explicit
+      // text/html) keep the legacy buildHtmlResponse path so the
+      // existing tests and behavior are unchanged.
+      const ct = r2Object.httpMetadata?.contentType;
+      if (ct && !ct.startsWith("text/html")) {
+        const body = await r2Object.arrayBuffer();
+        return buildAssetResponse(body, ct, r2Object.httpEtag, r2Object.uploaded);
+      }
+      const text = await r2Object.text();
+      return buildHtmlResponse(text, r2Object.httpEtag, r2Object.uploaded);
+    }
   }
 
-  // R2 first — try primary then alt.
-  let r2Object = await env.CONTENT_R2.get(primaryKey);
-  if (r2Object === null && altKey) {
-    r2Object = await env.CONTENT_R2.get(altKey);
-  }
-  if (r2Object !== null) {
-    const body = await r2Object.text();
-    return buildHtmlResponse(body, r2Object.httpEtag, r2Object.uploaded);
-  }
-
-  // KV fallback — same primary/alt strategy.
-  let kvContent = await env.CONFIG_KV.get(`page:${primaryKey}`);
-  if (kvContent === null && altKey) {
-    kvContent = await env.CONFIG_KV.get(`page:${altKey}`);
-  }
-  if (kvContent !== null) {
-    return buildHtmlResponse(kvContent);
+  // KV fallback (single-page only — KV-stored pages never had asset variants).
+  for (const key of candidates) {
+    const kvContent = await env.CONFIG_KV.get(`page:${key}`);
+    if (kvContent !== null) {
+      return buildHtmlResponse(kvContent);
+    }
   }
 
   return buildNotFoundResponse();
+}
+
+/**
+ * Build the ordered list of R2 keys to try for a given pathname. Order
+ * matters: explicit storage wins over fallbacks, fallbacks degrade
+ * from "very close" (slash toggle) to "directory index" (index.html).
+ */
+function buildLookupKeys(prefix: string, pathname: string): string[] {
+  const keys: string[] = [`${prefix}${pathname}`];
+  if (pathname !== "/") {
+    if (pathname.endsWith("/")) {
+      keys.push(`${prefix}${pathname.slice(0, -1)}`);
+      keys.push(`${prefix}${pathname}index.html`);
+    } else {
+      keys.push(`${prefix}${pathname}/`);
+      keys.push(`${prefix}${pathname}/index.html`);
+    }
+  } else {
+    keys.push(`${prefix}/index.html`);
+  }
+  return keys;
 }
