@@ -990,9 +990,18 @@ export default {
         const pathParam = url.searchParams.get("path");
         let effectiveMatch = matchParam;
         if (!effectiveMatch && pathParam) {
-          // Derive a literal-match regex from a path query param.
-          const escaped = pathParam.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-          effectiveMatch = `^${escaped}$`;
+          // Derive a literal-match regex from a path query param. Use
+          // `/?$` so the rule matches BOTH `/about-us` and `/about-us/`
+          // — many origins (WordPress) canonicalize to the trailing-
+          // slash form, and we don't want operators to have to know
+          // which form the proxy is currently serving.
+          const stripped = pathParam.replace(/\/+$/, "");
+          if (stripped === "") {
+            effectiveMatch = "^/$";
+          } else {
+            const escaped = stripped.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            effectiveMatch = `^${escaped}/?$`;
+          }
         }
         if (!effectiveMatch) {
           return new Response(null, {
