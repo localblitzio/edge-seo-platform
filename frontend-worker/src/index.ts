@@ -27,6 +27,15 @@
  */
 
 import {
+  APP_STYLE,
+  appLayout,
+  loadVisibleClients,
+  renderAuditPage,
+  renderClientDetail,
+  renderClientsList,
+  renderOverview,
+} from "./app.js";
+import {
   type EmailTokenKind,
   RESET_PASSWORD_TOKEN_TTL_MS,
   type Role,
@@ -106,6 +115,7 @@ code,.mono{font-family:var(--mono);font-size:.92em}
 .flash-ok{background:var(--green-bg);color:var(--green);border-color:var(--green)}
 .flash-warn{background:var(--amber-bg);color:var(--amber);border-color:var(--amber)}
 .flash-err{background:var(--red-bg);color:var(--red);border-color:var(--red)}
+${APP_STYLE}
 `;
 
 /* ─── Layout ─── */
@@ -684,19 +694,89 @@ export default {
       );
     }
 
-    /* ─── Authenticated app (Phase E fills these in) ─── */
+    /* ─── Authenticated app (Phase E v1: read-only client + audit views) ─── */
 
-    if (path === "/app" || path.startsWith("/app/")) {
+    if (path === "/app" || path === "/app/") {
       if (!user) return redirectToLogin(url);
+      const clients = await loadVisibleClients(env, user);
       return htmlResponse(
         htmlPage({
-          title: "Dashboard — Edge SEO Platform",
-          body: renderPlaceholder(
-            `Hello, ${esc(user.email)}`,
-            "Phase E moves the admin-worker functionality (clients, attestations, audit, KV) here behind your session. Until then, the legacy <code>edge-seo-admin</code> worker still has it.",
-          ),
+          title: "Overview — Edge SEO Platform",
+          body: appLayout({
+            title: "Overview",
+            content: await renderOverview(env, user),
+            activeNav: "home",
+            user,
+            flash,
+            clients,
+          }),
           user,
-          flash,
+          flash: null, // flash rendered inside app layout
+        }),
+      );
+    }
+
+    if (path === "/app/clients") {
+      if (!user) return redirectToLogin(url);
+      const clients = await loadVisibleClients(env, user);
+      return htmlResponse(
+        htmlPage({
+          title: "Clients — Edge SEO Platform",
+          body: appLayout({
+            title: "Clients",
+            content: await renderClientsList(env, user),
+            activeNav: "clients",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+      );
+    }
+
+    if (path.startsWith("/app/clients/")) {
+      if (!user) return redirectToLogin(url);
+      const id = decodeURIComponent(path.slice("/app/clients/".length));
+      // No nested sub-routes yet (Phase E v2 adds /edit, /attest, /status,
+      // /cache-purge, /new). For now, anything past /app/clients/:id
+      // renders the detail page (slash-tolerant).
+      const cleanId = id.split("/")[0] ?? "";
+      const clients = await loadVisibleClients(env, user);
+      return htmlResponse(
+        htmlPage({
+          title: `${cleanId} — Edge SEO Platform`,
+          body: appLayout({
+            title: cleanId,
+            content: await renderClientDetail(env, user, cleanId),
+            activeNav: `client:${cleanId}`,
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+      );
+    }
+
+    if (path === "/app/audit") {
+      if (!user) return redirectToLogin(url);
+      const clients = await loadVisibleClients(env, user);
+      return htmlResponse(
+        htmlPage({
+          title: "Audit log — Edge SEO Platform",
+          body: appLayout({
+            title: "Audit log",
+            content: await renderAuditPage(env, user),
+            activeNav: "audit",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
         }),
       );
     }
