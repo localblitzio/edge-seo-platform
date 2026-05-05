@@ -34,6 +34,9 @@ import { LIST_EDITOR_JS } from "./list-editor-js.js";
 export interface AppEnv {
   CONFIG_KV: KVNamespace;
   CONFIG_DB: D1Database;
+  /** Custom-page HTML uploads. Only present on workers configured for
+   *  the write surface (admin/frontend), not on read-only auth flows. */
+  CONTENT_R2?: R2Bucket;
 }
 
 export interface ClientRow {
@@ -730,6 +733,7 @@ export async function renderClientDetail(env: AppEnv, user: User, id: string): P
     ${renderActionsRow(client)}
     ${parseError ? `<div class="empty">⚠ Config JSON parse error: ${esc(parseError)}</div>` : ""}
     ${renderPagesWithEditsPanel(client.client_id, client.proxy_domain, cfg)}
+    ${renderCustomPagesPanel(client, cfg)}
     <div class="card"><h2 style="margin-top:0">Authorization</h2><dl class="kv">
       <dt>Attested by</dt><dd>${esc(auth.attested_by_email)}</dd>
       <dt>At</dt><dd>${esc(auth.attested_at)}</dd>
@@ -1156,6 +1160,109 @@ export function renderPerPageEditor(opts: {
     <script>${LIST_EDITOR_JS}</script>`;
 }
 
+/* ─── Custom pages (raw HTML upload) ─── */
+
+/**
+ * A custom_page route stored in the client's routing[]. We surface only
+ * the literal-path subset (where the operator can derive a real URL),
+ * not arbitrary regex routes — those would have been written by hand
+ * via the structured config edit, not via the upload form.
+ */
+export interface CustomPageEntry {
+  /** The match regex on the routing rule (e.g. "^/lp/austin/?$"). */
+  match: string;
+  /** The literal path derived from the regex, or null if not literal. */
+  literalPath: string | null;
+  /** The R2/KV storage key prefix on the route. */
+  customPageKey: string;
+}
+
+/**
+ * Walk a parsed config and return one entry per custom_page route. Used
+ * to render the "Custom pages" panel on the client detail.
+ */
+export function listCustomPages(cfg: Record<string, unknown>): CustomPageEntry[] {
+  const routing = (cfg.routing as Array<Record<string, unknown>> | undefined) ?? [];
+  const out: CustomPageEntry[] = [];
+  for (const r of routing) {
+    if (r.type !== "custom_page") continue;
+    const match = typeof r.match === "string" ? r.match : "";
+    const customPageKey = typeof r.custom_page_key === "string" ? r.custom_page_key : "";
+    out.push({
+      match,
+      literalPath: derivLiteralPath(match),
+      customPageKey,
+    });
+  }
+  return out;
+}
+
+/**
+ * Render the Custom pages section on the client detail. Shows existing
+ * routes (path + ↗ live link + Delete) and a "+ New custom page" CTA.
+ */
+function renderCustomPagesPanel(client: ClientRow, cfg: Record<string, unknown>): string {
+  const entries = listCustomPages(cfg);
+  const rows = entries
+    .map((e) => {
+      const display = e.literalPath ?? e.match;
+      const liveCell = e.literalPath
+        ? `<a href="https://${esc(client.proxy_domain)}${esc(e.literalPath)}" target="_blank" rel="noopener" title="Open on proxy">↗</a>`
+        : "";
+      const deleteForm = `<form method="POST" action="/app/clients/${esc(client.client_id)}/custom-page/delete" style="display:inline" onsubmit="return confirm('Delete this custom page? The R2 object and routing rule are both removed.');">
+          <input type="hidden" name="match" value="${esc(e.match)}">
+          <button type="submit" class="btn-link" style="color:var(--red);background:none;border:none;cursor:pointer;font:inherit;padding:0">Delete</button>
+        </form>`;
+      return `<tr>
+        <td class="mono">${esc(display)}</td>
+        <td style="text-align:center;width:1.5rem">${liveCell}</td>
+        <td>${deleteForm}</td>
+      </tr>`;
+    })
+    .join("");
+  const body = entries.length
+    ? `<table class="data" style="margin-bottom:.6rem"><thead><tr><th>path</th><th></th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+    : '<div class="empty" style="margin:0 0 .6rem">no custom pages yet</div>';
+  return `<div class="card" style="margin-bottom:1rem">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin:0 0 .85rem">
+      <h2 style="margin:0;font-size:1.05rem;font-weight:600">Custom pages</h2>
+      <a href="/app/clients/${esc(client.client_id)}/custom-page/new" class="btn btn-primary" style="font-size:.78rem;padding:.3rem .8rem">+ New custom page</a>
+    </div>
+    ${body}
+    <p class="field-hint" style="margin:0">Pages on the proxy domain whose HTML is uploaded here (not fetched from source). Use this for landers, microsites, or any path that doesn't exist on the origin.</p>
+  </div>`;
+}
+
+/**
+ * Render the form for creating a new custom page. Operator picks a path
+ * (e.g. `/lp/austin`) and pastes raw HTML.
+ */
+export function renderNewCustomPageForm(
+  client: ClientRow,
+  error: string | null,
+  prefilled?: { path?: string; html?: string },
+): string {
+  const path = prefilled?.path ?? "";
+  const html = prefilled?.html ?? "";
+  return `<div class="crumbs"><a href="/app/clients/${esc(client.client_id)}">← ${esc(client.client_id)}</a></div>
+    <h1>New custom page <span style="color:var(--fg-muted);font-size:.6em;font-weight:400">on ${esc(client.client_id)}</span></h1>
+    <p class="subtitle">Upload raw HTML for a path on <span class="mono">${esc(client.proxy_domain)}</span>. The path is added to the routing rules as <code>type: custom_page</code> and the body is stored in R2 at <code>${esc(client.client_id)}/&lt;path&gt;</code>.</p>
+    ${error ? `<div class="error-box">${esc(error)}</div>` : ""}
+    <form class="editor" method="POST" action="/app/clients/${esc(client.client_id)}/custom-page/new">
+      <label for="path">Path</label>
+      <input id="path" name="path" type="text" required value="${esc(path)}" placeholder="/lp/austin" pattern="^/[A-Za-z0-9/_\\-]*$">
+      <div class="hint">Must start with <code>/</code>. Allowed: letters, digits, <code>/</code>, <code>_</code>, <code>-</code>. The page will be reachable at <code>https://${esc(client.proxy_domain)}&lt;path&gt;</code>.</div>
+      <label for="html">HTML body</label>
+      <textarea id="html" name="html" rows="20" required placeholder="<!doctype html>&#10;<html>&#10;  <head><title>...</title></head>&#10;  <body>...</body>&#10;</html>" style="font-family:var(--mono);font-size:.85rem">${esc(html)}</textarea>
+      <div class="hint">Full document recommended (doctype + head + body). The HTMLRewriter pipeline still runs on this response — your meta_rewrites / canonicals / indexation rules apply if their <code>match</code> regex covers this path.</div>
+      <div class="hint">On save: HTML written to R2, custom_page route prepended to <code>routing[]</code> (so it precedes the catch-all proxy), KV invalidated, audit_log entry written.</div>
+      <div class="form-actions">
+        <button class="btn btn-primary" type="submit">Create page</button>
+        <a class="btn" href="/app/clients/${esc(client.client_id)}">Cancel</a>
+      </div>
+    </form>`;
+}
+
 export function renderAttestForm(client: ClientRow, error: string | null): string {
   return `<div class="crumbs"><a href="/app/clients/${esc(client.client_id)}">← ${esc(client.client_id)}</a></div>
     <h1>Capture attestation — ${esc(client.client_id)}</h1>
@@ -1463,6 +1570,247 @@ export async function handleCachePurgePost(
   });
   return flashRedirect(`/app/clients/${clientId}`, {
     text: `Purged config:${clientId} and domain:${client.proxy_domain} from KV.`,
+    kind: "ok",
+  });
+}
+
+/* ─── Custom-page handlers ─── */
+
+const CUSTOM_PAGE_PATH_RE = /^\/[A-Za-z0-9/_-]*$/;
+/**
+ * R2 has a 5 GB per-object cap; this app-level cap is well below it but
+ * far above any sane HTML size. Catches accidental binary uploads.
+ */
+const CUSTOM_PAGE_MAX_HTML_BYTES = 1_000_000; // 1 MB
+
+/**
+ * The R2/KV storage key for a client's custom-page upload. Per-client
+ * scoping (`<client_id>/<path…>`) ensures pages from different clients
+ * can't collide on the same path. The trailing path always starts with
+ * `/`, giving keys like `lantern-crest/lp/austin`.
+ */
+function customPageStorageKey(clientId: string, path: string): string {
+  return `${clientId}${path}`;
+}
+
+/**
+ * The match regex emitted for a custom_page route. Mirrors the per-page
+ * editor convention: `/?$` so both `/lp/austin` and `/lp/austin/` match.
+ */
+function customPageMatch(path: string): string {
+  const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return `^${escaped}/?$`;
+}
+
+export async function handleNewCustomPageGet(
+  env: AppEnv,
+  user: User,
+  clientId: string,
+): Promise<Response | { client: ClientRow }> {
+  const client = await loadVisibleClient(env, user, clientId);
+  if (!client) return new Response("Not found", { status: 404 });
+  return { client };
+}
+
+export async function handleNewCustomPagePost(
+  request: Request,
+  env: AppEnv,
+  url: URL,
+  user: User,
+  clientId: string,
+): Promise<{
+  response?: Response;
+  rerenderError?: { client: ClientRow; error: string; path: string; html: string };
+}> {
+  const csrf = checkCsrf(request, url);
+  if (csrf) return { response: csrf };
+  const client = await loadVisibleClient(env, user, clientId);
+  if (!client) return { response: new Response("Not found", { status: 404 }) };
+  if (!env.CONTENT_R2) {
+    return { response: new Response("CONTENT_R2 binding not configured", { status: 500 }) };
+  }
+
+  const form = await request.formData();
+  const path = String(form.get("path") ?? "").trim();
+  const html = String(form.get("html") ?? "");
+
+  if (!path || !CUSTOM_PAGE_PATH_RE.test(path)) {
+    return {
+      rerenderError: {
+        client,
+        path,
+        html,
+        error: "Path must start with `/` and contain only letters, digits, `/`, `_`, `-`.",
+      },
+    };
+  }
+  if (path === "/") {
+    return {
+      rerenderError: {
+        client,
+        path,
+        html,
+        error: "Cannot create a custom page at the root `/`. Use a subpath like `/lp/austin`.",
+      },
+    };
+  }
+  if (!html.trim()) {
+    return { rerenderError: { client, path, html, error: "HTML body is required." } };
+  }
+  if (new TextEncoder().encode(html).byteLength > CUSTOM_PAGE_MAX_HTML_BYTES) {
+    return {
+      rerenderError: {
+        client,
+        path,
+        html,
+        error: `HTML body exceeds ${CUSTOM_PAGE_MAX_HTML_BYTES} bytes.`,
+      },
+    };
+  }
+
+  // Reject paths that already have a custom_page route. Editing an
+  // existing custom page is a separate flow (delete + recreate, for
+  // now — clarifies that re-uploads invalidate cache).
+  const cfg = JSON.parse(client.config_json) as Record<string, unknown>;
+  const existing = listCustomPages(cfg).find((e) => e.literalPath === path);
+  if (existing) {
+    return {
+      rerenderError: {
+        client,
+        path,
+        html,
+        error: `A custom page already exists at \`${path}\`. Delete it first to replace the content.`,
+      },
+    };
+  }
+
+  const beforeHash = fnvHash(client.config_json);
+  const storageKey = customPageStorageKey(clientId, path);
+
+  // Write to R2. Content-Type is set as metadata so future inspectors
+  // can tell it's HTML; the proxy renderer always serves text/html.
+  await env.CONTENT_R2.put(storageKey, html, {
+    httpMetadata: { contentType: "text/html; charset=utf-8" },
+    customMetadata: {
+      uploaded_by: user.email,
+      uploaded_at: new Date().toISOString(),
+    },
+  });
+
+  // Prepend the route so it precedes the catch-all proxy rule (route
+  // resolution is first-match-wins per spec §5 step 6).
+  const routing = Array.isArray(cfg.routing) ? (cfg.routing as Array<unknown>) : [];
+  const newRoute = {
+    match: customPageMatch(path),
+    type: "custom_page",
+    custom_page_key: clientId,
+    origin_auth: { type: "none" },
+  };
+  cfg.routing = [newRoute, ...routing];
+  const newJson = JSON.stringify(cfg);
+  const afterHash = fnvHash(newJson);
+
+  await env.CONFIG_DB.prepare(
+    "UPDATE clients SET config_json = ?, updated_at = CURRENT_TIMESTAMP WHERE client_id = ?",
+  )
+    .bind(newJson, clientId)
+    .run();
+  await invalidateKv(env, clientId, client.proxy_domain);
+  const actor = actorOf(user, request);
+  await writeAudit(env, {
+    client_id: clientId,
+    actor_email: actor.user.email,
+    actor_ip: actor.ip,
+    event_type: "config_update",
+    before_hash: beforeHash,
+    after_hash: afterHash,
+    previous_status: client.status,
+    new_status: client.status,
+    notes: `created custom page ${path} (R2 key ${storageKey})`,
+  });
+
+  return {
+    response: flashRedirect(`/app/clients/${clientId}`, {
+      text: `Custom page created at ${path}. View it at https://${client.proxy_domain}${path}`,
+      kind: "ok",
+    }),
+  };
+}
+
+export async function handleDeleteCustomPagePost(
+  request: Request,
+  env: AppEnv,
+  url: URL,
+  user: User,
+  clientId: string,
+): Promise<Response> {
+  const csrf = checkCsrf(request, url);
+  if (csrf) return csrf;
+  const client = await loadVisibleClient(env, user, clientId);
+  if (!client) return new Response("Not found", { status: 404 });
+  if (!env.CONTENT_R2) {
+    return new Response("CONTENT_R2 binding not configured", { status: 500 });
+  }
+
+  const form = await request.formData();
+  const matchToDelete = String(form.get("match") ?? "");
+  if (!matchToDelete) {
+    return flashRedirect(`/app/clients/${clientId}`, {
+      text: "Delete failed: missing match.",
+      kind: "err",
+    });
+  }
+
+  const cfg = JSON.parse(client.config_json) as Record<string, unknown>;
+  const routing = Array.isArray(cfg.routing) ? (cfg.routing as Array<Record<string, unknown>>) : [];
+  const target = routing.find(
+    (r) => r.type === "custom_page" && typeof r.match === "string" && r.match === matchToDelete,
+  );
+  if (!target) {
+    return flashRedirect(`/app/clients/${clientId}`, {
+      text: `No custom_page route found with match=${matchToDelete}`,
+      kind: "err",
+    });
+  }
+  const literalPath = derivLiteralPath(matchToDelete);
+
+  const beforeHash = fnvHash(client.config_json);
+  cfg.routing = routing.filter((r) => r !== target);
+  const newJson = JSON.stringify(cfg);
+  const afterHash = fnvHash(newJson);
+
+  await env.CONFIG_DB.prepare(
+    "UPDATE clients SET config_json = ?, updated_at = CURRENT_TIMESTAMP WHERE client_id = ?",
+  )
+    .bind(newJson, clientId)
+    .run();
+  // Best-effort R2 delete. If it fails, we still want the route gone
+  // from the config so traffic stops. Orphaned R2 objects are a
+  // cleanup-script concern, not a correctness issue.
+  if (literalPath) {
+    const storageKey = customPageStorageKey(clientId, literalPath);
+    try {
+      await env.CONTENT_R2.delete(storageKey);
+    } catch {
+      /* best-effort */
+    }
+  }
+  await invalidateKv(env, clientId, client.proxy_domain);
+  const actor = actorOf(user, request);
+  await writeAudit(env, {
+    client_id: clientId,
+    actor_email: actor.user.email,
+    actor_ip: actor.ip,
+    event_type: "config_update",
+    before_hash: beforeHash,
+    after_hash: afterHash,
+    previous_status: client.status,
+    new_status: client.status,
+    notes: `deleted custom page ${literalPath ?? matchToDelete}`,
+  });
+
+  return flashRedirect(`/app/clients/${clientId}`, {
+    text: `Deleted custom page ${literalPath ?? matchToDelete}.`,
     kind: "ok",
   });
 }

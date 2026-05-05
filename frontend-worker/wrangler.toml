@@ -27,6 +27,14 @@ database_name = "edge-seo-platform-staging"
 database_id = "a6c1786a-4999-4ac5-ad60-7faafec61283"
 migrations_dir = "../migrations"
 
+# Custom-page HTML uploads. Same bucket the proxy worker reads from on
+# custom_page route hits — admin writes here, edge reads. Per-client
+# scoping uses the storage-key convention `<client_id>/<path…>` so
+# pages from different clients can't collide.
+[[r2_buckets]]
+binding = "CONTENT_R2"
+bucket_name = "edge-seo-content-staging"
+
 # EMAIL binding — Cloudflare Email Service (public beta, April 2026).
 # Requires Workers paid plan, Email Sending enabled on the account, and
 # the sender domain (edgeseo.app) onboarded into Email Sending so SPF +
