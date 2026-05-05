@@ -26,6 +26,7 @@ import { ClientConfig } from "../../src/config/schema.js";
 import { assertConfigInvariants } from "../../src/config/validator.js";
 import { ConfigValidationError } from "../../src/lib/errors.js";
 import type { User } from "./auth.js";
+import { LIST_EDITOR_JS } from "./list-editor-js.js";
 
 /* ─── Types ─── */
 
@@ -251,6 +252,14 @@ form.editor .form-actions{display:flex;gap:.5rem;align-items:center;margin-top:.
 .btn-success{border-color:var(--green);color:var(--green)}.btn-success:hover{background:var(--green-bg);color:var(--green)}
 .btn-warn{border-color:var(--amber);color:var(--amber)}.btn-warn:hover{background:var(--amber-bg);color:var(--amber)}
 .btn-danger{border-color:var(--red);color:var(--red)}.btn-danger:hover{background:var(--red-bg);color:var(--red)}
+.list-entry{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:.85rem 1rem;margin-bottom:.6rem}
+.list-entry .list-entry-foot{margin-top:.75rem;display:flex;justify-content:flex-end}
+.list-entry textarea{font-family:var(--mono);font-size:.82rem;width:100%;padding:.5rem .65rem;border:1px solid var(--border-strong);border-radius:var(--radius);background:var(--bg-elevated);color:var(--fg);resize:vertical}
+.checkbox-row{display:flex;flex-wrap:wrap;gap:.85rem;margin-top:.3rem}
+.checkbox-inline{display:inline-flex;align-items:center;gap:.4rem;font-weight:400;font-size:.85rem;cursor:pointer}
+.checkbox-inline input[type=checkbox]{margin:0}
+.form-section h2{display:flex;justify-content:space-between;align-items:center}
+.form-section h2 .btn{font-size:.75rem;padding:.3rem .7rem;font-weight:600}
 `;
 
 interface AppLayoutOpts {
@@ -671,8 +680,23 @@ function renderStructuredFormBody(opts: {
     '<label for="f_origin">routing[0].origin</label><input id="f_origin" type="text" placeholder="https://example.com">',
     '<div class="field-hint">URL the proxy fetches from for the default route. For multiple routes / custom_pages / origin_auth / strip_prefix, edit the JSON below.</div>',
     "</div></div></div>",
+    '<div class="form-section" id="section-indexation"><h2>Indexation rules <button type="button" class="btn" data-add-to="indexation">+ Add</button></h2>',
+    '<p class="field-hint" style="margin:0 0 .6rem">Tells search engines which pages to index. Each entry pairs a path-regex with a <code>robots</code> meta value. Example: match <code>^/blog/.*</code> with robots <code>index,follow</code> to allow indexing of blog posts.</p>',
+    '<div data-list-container="indexation"></div></div>',
+    '<div class="form-section" id="section-canonicals"><h2>Canonical rules <button type="button" class="btn" data-add-to="canonicals">+ Add</button></h2>',
+    '<p class="field-hint" style="margin:0 0 .6rem">Sets <code>&lt;link rel="canonical"&gt;</code>. <code>origin</code> points to the upstream (don\'t compete with source). <code>self</code> points to the proxy (rank the proxy). <code>custom</code> takes a URL. Example: match <code>^/.*</code> with strategy <code>origin</code> for a SaaS subfolder.</p>',
+    '<div data-list-container="canonicals"></div></div>',
+    '<div class="form-section" id="section-schema-injections"><h2>Schema injections <button type="button" class="btn" data-add-to="schema_injections">+ Add</button></h2>',
+    '<p class="field-hint" style="margin:0 0 .6rem">Injects JSON-LD <code>&lt;script type="application/ld+json"&gt;</code> into <code>&lt;head&gt;</code>. Example: match <code>^/about</code>, schema_type <code>LocalBusiness</code>, payload with <code>@type:LocalBusiness</code>, name, address, phone.</p>',
+    '<div data-list-container="schema_injections"></div></div>',
+    '<div class="form-section" id="section-static-redirects"><h2>Static redirects <button type="button" class="btn" data-add-to="redirects.static">+ Add</button></h2>',
+    '<p class="field-hint" style="margin:0 0 .6rem">Exact-path redirects evaluated before proxy fetch. Example: from <code>/old-product</code>, to <code>/products/new-product</code>, status <code>301</code>.</p>',
+    '<div data-list-container="redirects.static"></div></div>',
+    '<div class="form-section" id="section-meta-rewrites"><h2>Meta rewrites <button type="button" class="btn" data-add-to="meta_rewrites">+ Add</button></h2>',
+    '<p class="field-hint" style="margin:0 0 .6rem">Rewrites <code>&lt;title&gt;</code>, <code>meta name="description"</code>, OG/Twitter tags. Example: match <code>^/blog/post-x</code>, tag <code>title</code>, value <code>Post X — My Blog</code>.</p>',
+    '<div data-list-container="meta_rewrites"></div></div>',
     '<div class="form-section"><h2>Raw <code>ClientConfig</code> JSON</h2>',
-    '<p class="field-hint" style="margin-bottom:.6rem">Source of truth on submit. Form fields above sync into this textarea on every keystroke.</p>',
+    '<p class="field-hint" style="margin-bottom:.6rem">Source of truth on submit. Form fields above sync into this textarea on every keystroke. Advanced fields not exposed as form sections (pattern/conditional redirects, link rewrites, element removals, content injections, caching, forms) are edited directly here.</p>',
     `<textarea id="config_json" name="config_json" spellcheck="false" autocomplete="off">${esc(opts.prefilledJson)}</textarea>`,
     "</div>",
     "<script>",
@@ -696,6 +720,13 @@ function renderStructuredFormBody(opts: {
     "Object.keys(scalarFields).concat(['f_scope_paths','f_origin','f_proxy_subdomain','f_proxy_custom']).forEach(function(id){var el=document.getElementById(id);if(el)el.addEventListener('input',syncToJson);});",
     "ta.addEventListener('input',syncFromJson);syncFromJson();",
     "})();",
+    "</script>",
+    // List-section editors live in their own clean IIFE in
+    // list-editor-js.ts (separate file so syntax errors are caught by
+    // the unit test before deploy — Phase E v3 was rolled back because
+    // the original array-of-strings approach broke V8 parsing).
+    "<script>",
+    LIST_EDITOR_JS,
     "</script>",
   ].join("");
 }
