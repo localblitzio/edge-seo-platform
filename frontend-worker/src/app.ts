@@ -441,6 +441,184 @@ function jsonHtml(value: unknown): string {
   return esc(String(value));
 }
 
+/* ─── Per-page edit grouping ─── */
+
+/**
+ * Rule-array keys we group by `match` for the per-page editor. These are
+ * the rule types where a `match` regex names a path or path-pattern.
+ */
+const PER_PAGE_RULE_KINDS = [
+  "text_rewrites",
+  "meta_rewrites",
+  "redirects.static",
+  "schema_injections",
+  "indexation",
+  "canonicals",
+] as const;
+
+type PerPageRuleKind = (typeof PER_PAGE_RULE_KINDS)[number];
+
+interface PageGroup {
+  /** The raw match value (regex source) used as the grouping key. */
+  match: string;
+  /**
+   * Whether this match looks like a per-page literal (e.g. `^/about-us$`)
+   * or a wildcard pattern (e.g. `^/.*`, `^/blog/.*`). Wildcards group
+   * under "Site-wide / section-wide" so they don't crowd the per-page list.
+   */
+  wildcard: boolean;
+  /** Human-readable derived path if the match is a literal `^/path$`. */
+  literalPath: string | null;
+  /** Per-rule-kind counts. */
+  counts: Partial<Record<PerPageRuleKind, number>>;
+}
+
+/**
+ * Walk a client config and return one group per distinct `match` value
+ * across the per-page rule kinds. Wildcards (anything containing `.*`,
+ * `.+`, `[^/]*`, etc.) get the `wildcard` flag set so the UI separates
+ * them from per-page literal matches.
+ */
+export function summarizeEditedPages(cfg: Record<string, unknown>): PageGroup[] {
+  const groupsByMatch = new Map<string, PageGroup>();
+
+  function pushRule(match: string, kind: PerPageRuleKind): void {
+    const existing = groupsByMatch.get(match);
+    if (existing) {
+      existing.counts[kind] = (existing.counts[kind] ?? 0) + 1;
+      return;
+    }
+    const wildcard = isWildcardMatch(match);
+    groupsByMatch.set(match, {
+      match,
+      wildcard,
+      literalPath: wildcard ? null : derivLiteralPath(match),
+      counts: { [kind]: 1 },
+    });
+  }
+
+  function arr(key: string): Array<Record<string, unknown>> {
+    if (key === "redirects.static") {
+      const r = cfg.redirects as Record<string, unknown> | undefined;
+      return ((r?.static ?? []) as Array<Record<string, unknown>>) || [];
+    }
+    return ((cfg[key] ?? []) as Array<Record<string, unknown>>) || [];
+  }
+
+  for (const kind of PER_PAGE_RULE_KINDS) {
+    for (const rule of arr(kind)) {
+      const match = typeof rule.match === "string" ? rule.match : null;
+      if (match) pushRule(match, kind);
+    }
+  }
+
+  return [...groupsByMatch.values()].sort((a, b) => {
+    // Literal per-page first, then wildcards. Within each, alphabetical.
+    if (a.wildcard !== b.wildcard) return a.wildcard ? 1 : -1;
+    return a.match.localeCompare(b.match);
+  });
+}
+
+function isWildcardMatch(m: string): boolean {
+  // Heuristic: any pattern with regex repetition or character-class
+  // ranges is treated as wildcard. Literal matches like `^/about$` use
+  // only escaped specials and have no repetition operators.
+  return /[*+?]|\[\^/.test(m);
+}
+
+/**
+ * Try to derive a literal path from a regex like `^/about-us$`. Returns
+ * null if the pattern isn't a clean literal-match shape.
+ */
+function derivLiteralPath(m: string): string | null {
+  if (!m.startsWith("^") || !m.endsWith("$")) return null;
+  const inner = m.slice(1, -1);
+  // Un-escape regex specials. If any unescaped special remains, it's
+  // not a clean literal and we return null.
+  let out = "";
+  let i = 0;
+  while (i < inner.length) {
+    const c = inner[i] ?? "";
+    if (c === "\\" && i + 1 < inner.length) {
+      out += inner[i + 1] ?? "";
+      i += 2;
+    } else if (".*+?()[]{}|^$\\".includes(c)) {
+      // Unescaped regex special — not a literal path.
+      return null;
+    } else {
+      out += c;
+      i += 1;
+    }
+  }
+  return out.startsWith("/") ? out : null;
+}
+
+function renderPagesWithEditsPanel(clientId: string, cfg: Record<string, unknown>): string {
+  const groups = summarizeEditedPages(cfg);
+  const literal = groups.filter((g) => !g.wildcard);
+  const wildcard = groups.filter((g) => g.wildcard);
+
+  const renderCounts = (counts: PageGroup["counts"]): string => {
+    const parts: string[] = [];
+    const labels: Record<PerPageRuleKind, string> = {
+      text_rewrites: "text",
+      meta_rewrites: "meta",
+      "redirects.static": "redirect",
+      schema_injections: "schema",
+      indexation: "indexation",
+      canonicals: "canonical",
+    };
+    for (const [kind, count] of Object.entries(counts)) {
+      parts.push(`${count} ${labels[kind as PerPageRuleKind]}`);
+    }
+    return parts.join(" · ");
+  };
+
+  const renderRow = (g: PageGroup): string => {
+    const display = g.literalPath ?? g.match;
+    const editHref = `/app/clients/${esc(clientId)}/page?match=${encodeURIComponent(g.match)}`;
+    return `<tr>
+      <td class="mono">${esc(display)}${g.wildcard ? ' <span class="pill pill-neutral">wildcard</span>' : ""}</td>
+      <td style="color:var(--fg-muted);font-size:.85rem">${esc(renderCounts(g.counts))}</td>
+      <td><a href="${editHref}" class="btn-link">Edit →</a></td>
+    </tr>`;
+  };
+
+  const literalRows = literal.length
+    ? `<table class="data" style="margin-bottom:.6rem"><thead><tr><th>path</th><th>edits</th><th></th></tr></thead><tbody>${literal.map(renderRow).join("")}</tbody></table>`
+    : '<div class="empty" style="margin:0 0 .6rem">no per-page edits yet</div>';
+
+  const wildcardRows = wildcard.length
+    ? `<details class="section" style="margin:0 0 1rem"><summary>Site-wide / section-wide rules <span class="count">${wildcard.length}</span></summary><div class="body"><table class="data"><thead><tr><th>match</th><th>edits</th><th></th></tr></thead><tbody>${wildcard.map(renderRow).join("")}</tbody></table></div></details>`
+    : "";
+
+  return `<div class="card" style="margin-bottom:1rem">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin:0 0 .85rem">
+      <h2 style="margin:0;font-size:1.05rem;font-weight:600">Pages with edits</h2>
+      <button type="button" class="btn btn-primary" data-edit-page-prompt="${esc(clientId)}" style="font-size:.78rem;padding:.3rem .8rem">+ Edit a page</button>
+    </div>
+    ${literalRows}
+    ${wildcardRows}
+    <p class="field-hint" style="margin:0">Each row is a unique <code>match</code> regex across your text/meta/redirect/schema/indexation/canonical rules. Click <strong>Edit →</strong> to manage all rules for that path in one view.</p>
+  </div>
+  <script>
+  (function() {
+    document.addEventListener('click', function(e) {
+      var t = e.target;
+      if (t && t.dataset && t.dataset.editPagePrompt) {
+        var p = prompt('Edit which path? (e.g. /about-us)', '/');
+        if (p == null) return;
+        var clean = p.trim();
+        if (!clean) return;
+        if (!clean.startsWith('/')) clean = '/' + clean;
+        var match = '^' + clean.replace(/[.*+?^\$()|[\\]{}\\\\]/g, '\\\\$&') + '$';
+        location.href = '/app/clients/' + encodeURIComponent(t.dataset.editPagePrompt) + '/page?match=' + encodeURIComponent(match);
+      }
+    });
+  })();
+  </script>`;
+}
+
 export async function renderClientDetail(env: AppEnv, user: User, id: string): Promise<string> {
   const client = await loadVisibleClient(env, user, id);
   if (!client) {
@@ -500,6 +678,7 @@ export async function renderClientDetail(env: AppEnv, user: User, id: string): P
     <p class="subtitle"><span class="mono">${esc(client.proxy_domain)}</span> &nbsp;→&nbsp; <span class="mono">${esc(client.source_domain)}</span></p>
     ${renderActionsRow(client)}
     ${parseError ? `<div class="empty">⚠ Config JSON parse error: ${esc(parseError)}</div>` : ""}
+    ${renderPagesWithEditsPanel(client.client_id, cfg)}
     <div class="card"><h2 style="margin-top:0">Authorization</h2><dl class="kv">
       <dt>Attested by</dt><dd>${esc(auth.attested_by_email)}</dd>
       <dt>At</dt><dd>${esc(auth.attested_at)}</dd>
@@ -835,6 +1014,84 @@ export function renderEditClientForm(
       <div class="form-actions">
         <button class="btn btn-primary" type="submit">Save</button>
         <a class="btn" href="/app/clients/${esc(client.client_id)}">Cancel</a>
+      </div>
+    </form>`;
+}
+
+/**
+ * Per-page editor — alternate view of the same client config that
+ * filters the list-section rules by their `match` regex. Operator
+ * mental model: "I'm editing /about-us" rather than "I'm adding rule
+ * #5 with match=^/about-us$".
+ *
+ * Same backend: this form POSTs to /app/clients/:id/edit (the regular
+ * edit handler), submitting the FULL config_json. The list-section
+ * editors render with `data-filter-match` attributes so they only
+ * show rules whose match equals the active filter — but the underlying
+ * JSON contains all rules, so saving doesn't drop anything.
+ */
+export function renderPerPageEditor(opts: {
+  client: ClientRow;
+  match: string;
+  literalPath: string | null;
+  prefilledJson: string;
+  error: string | null;
+}): string {
+  const display = opts.literalPath ?? opts.match;
+  const inspectInitialPath = opts.literalPath ?? "/";
+  return `<div class="crumbs"><a href="/app/clients/${esc(opts.client.client_id)}">← ${esc(opts.client.client_id)}</a></div>
+    <h1>Edit page <code style="font-size:.7em">${esc(display)}</code></h1>
+    <p class="subtitle">All rules whose <code>match</code> equals <code>${esc(opts.match)}</code> on <strong>${esc(opts.client.client_id)}</strong>. Other client config (identity, auth, routing, site-wide rules) is preserved on save.</p>
+    ${opts.error ? `<div class="error-box">${esc(opts.error)}</div>` : ""}
+    <form class="editor" method="POST" action="/app/clients/${esc(opts.client.client_id)}/edit">
+      <div class="form-section">
+        <h2 style="margin-top:0">Inspect this page</h2>
+        <div class="inspect-panel" data-inspect-panel>
+          <div class="inspect-row">
+            <label for="inspect_path">Path on source:</label>
+            <input id="inspect_path" type="text" value="${esc(inspectInitialPath)}" placeholder="/about-us" style="flex:1">
+            <button type="button" class="btn" data-inspect-fetch>Fetch</button>
+          </div>
+          <div class="field-hint" style="margin-top:.4rem">Loads the live source page so you can grab selectors. <strong>Use this</strong> on any element pre-fills a text rewrite for this path.</div>
+          <div data-inspect-status style="margin-top:.6rem"></div>
+          <div data-inspect-results style="margin-top:.6rem"></div>
+        </div>
+      </div>
+      <div class="form-section" id="section-text-rewrites">
+        <h2>Text &amp; heading rewrites <button type="button" class="btn" data-add-to="text_rewrites">+ Add</button></h2>
+        <p class="field-hint" style="margin:0 0 .6rem">Replaces the inner content of any element matching a CSS selector. Examples in the Inspect panel above.</p>
+        <div data-list-container="text_rewrites" data-filter-match="${esc(opts.match)}"></div>
+      </div>
+      <div class="form-section" id="section-meta-rewrites">
+        <h2>Meta rewrites <button type="button" class="btn" data-add-to="meta_rewrites">+ Add</button></h2>
+        <p class="field-hint" style="margin:0 0 .6rem">Override <code>&lt;title&gt;</code>, meta description, OG/Twitter tags for this path.</p>
+        <div data-list-container="meta_rewrites" data-filter-match="${esc(opts.match)}"></div>
+      </div>
+      <div class="form-section" id="section-static-redirects">
+        <h2>Static redirects <button type="button" class="btn" data-add-to="redirects.static">+ Add</button></h2>
+        <p class="field-hint" style="margin:0 0 .6rem">Redirect this path to another URL. Static redirects don't use the <code>match</code> field — they use <code>from</code> — so changes here add to the global static-redirect list.</p>
+        <div data-list-container="redirects.static"></div>
+      </div>
+      <div class="form-section" id="section-schema-injections">
+        <h2>Schema injections <button type="button" class="btn" data-add-to="schema_injections">+ Add</button></h2>
+        <p class="field-hint" style="margin:0 0 .6rem">Inject JSON-LD <code>&lt;script type="application/ld+json"&gt;</code> for this path.</p>
+        <div data-list-container="schema_injections" data-filter-match="${esc(opts.match)}"></div>
+      </div>
+      <div class="form-section" id="section-indexation">
+        <h2>Indexation rules <button type="button" class="btn" data-add-to="indexation">+ Add</button></h2>
+        <p class="field-hint" style="margin:0 0 .6rem">Robots meta override for this path.</p>
+        <div data-list-container="indexation" data-filter-match="${esc(opts.match)}"></div>
+      </div>
+      <div class="form-section" id="section-canonicals">
+        <h2>Canonical rules <button type="button" class="btn" data-add-to="canonicals">+ Add</button></h2>
+        <p class="field-hint" style="margin:0 0 .6rem">Canonical link strategy for this path.</p>
+        <div data-list-container="canonicals" data-filter-match="${esc(opts.match)}"></div>
+      </div>
+      <textarea id="config_json" name="config_json" hidden>${esc(opts.prefilledJson)}</textarea>
+      <div class="hint">On save: full config UPDATE, KV invalidated, audit log entry. Rules outside this page (other paths, site-wide, identity, auth) are preserved untouched.</div>
+      <div class="form-actions">
+        <button class="btn btn-primary" type="submit">Save</button>
+        <a class="btn" href="/app/clients/${esc(opts.client.client_id)}">Cancel</a>
       </div>
     </form>`;
 }

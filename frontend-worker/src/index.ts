@@ -44,6 +44,8 @@ import {
   renderEditClientForm,
   renderNewClientForm,
   renderOverview,
+  renderPerPageEditor,
+  summarizeEditedPages,
 } from "./app.js";
 import {
   type EmailTokenKind,
@@ -954,6 +956,74 @@ export default {
             flash: null,
           }),
           { status: 400 },
+        );
+      }
+
+      // /app/clients/:id/page?match=...&path=... — per-page editor
+      // (Piece B of the page-tracking work). Filters list-section
+      // rules by match=`<filter>` and renders an Inspect panel
+      // pre-loaded with `path` (or the literal path derived from the
+      // filter regex). Submits to /edit so existing handler runs.
+      if (sub === "page" && method === "GET") {
+        const client = await loadVisibleClient(env, user, id);
+        if (!client) {
+          return htmlResponse(
+            htmlPage({
+              title: `${id} — Edge SEO Platform`,
+              body: appLayout({
+                title: id,
+                content:
+                  '<h1>Not found</h1><div class="empty">No client with that id, or you don\'t have access to it.</div>',
+                activeNav: `client:${id}`,
+                user,
+                flash,
+                clients,
+              }),
+              user,
+              flash: null,
+            }),
+            { status: 404 },
+          );
+        }
+        const matchParam = url.searchParams.get("match") ?? "";
+        const pathParam = url.searchParams.get("path");
+        let effectiveMatch = matchParam;
+        if (!effectiveMatch && pathParam) {
+          // Derive a literal-match regex from a path query param.
+          const escaped = pathParam.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          effectiveMatch = `^${escaped}$`;
+        }
+        if (!effectiveMatch) {
+          return new Response(null, {
+            status: 303,
+            headers: { location: `/app/clients/${encodeURIComponent(id)}` },
+          });
+        }
+        // Try to derive a literal path for display only.
+        const summary = summarizeEditedPages(JSON.parse(client.config_json));
+        const existing = summary.find((g) => g.match === effectiveMatch);
+        const literalPath = existing?.literalPath ?? null;
+        const pretty = JSON.stringify(JSON.parse(client.config_json), null, 2);
+        return htmlResponse(
+          htmlPage({
+            title: `Edit page — ${id} — Edge SEO Platform`,
+            body: appLayout({
+              title: literalPath ?? effectiveMatch,
+              content: renderPerPageEditor({
+                client,
+                match: effectiveMatch,
+                literalPath,
+                prefilledJson: pretty,
+                error: null,
+              }),
+              activeNav: `client:${id}`,
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
         );
       }
 
