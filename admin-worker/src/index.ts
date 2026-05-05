@@ -198,6 +198,14 @@ dl.kv dd{margin:0;font-family:var(--mono);font-size:.85rem;word-break:break-word
 .flash-err{background:var(--red-bg);color:var(--red);border-color:var(--red)}
 form.editor{display:flex;flex-direction:column;gap:.85rem}
 form.editor label{font-weight:600;font-size:.85rem}
+.form-section{background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius);padding:1rem 1.25rem}
+.form-section h2{margin-top:0;margin-bottom:.85rem;font-size:.95rem;font-weight:600}
+.form-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:.85rem 1.25rem}
+.form-grid .full-width{grid-column:span 2}
+.form-grid label{font-weight:600;font-size:.78rem;display:block;margin-bottom:.2rem}
+.form-grid input[type=text],.form-grid input[type=email],.form-grid select{font:inherit;font-family:inherit;font-size:.88rem;padding:.4rem .55rem;border:1px solid var(--border-strong);border-radius:var(--radius);background:var(--bg);color:var(--fg);width:100%}
+.form-grid input[readonly]{background:var(--bg-sidebar);cursor:not-allowed;color:var(--fg-muted)}
+.form-grid .field-hint{font-size:.72rem;color:var(--fg-muted);margin-top:.2rem;line-height:1.35}
 form.editor input[type=text],form.editor input[type=email],form.editor select,form.editor textarea{font:inherit;font-family:var(--mono);font-size:.85rem;padding:.5rem .65rem;border:1px solid var(--border-strong);border-radius:var(--radius);background:var(--bg-elevated);color:var(--fg);width:100%}
 form.editor textarea{min-height:520px;line-height:1.45;resize:vertical}
 form.editor .hint{font-size:.78rem;color:var(--fg-muted);margin-top:-.35rem}
@@ -718,14 +726,190 @@ const NEW_CLIENT_TEMPLATE = `{
   "schema_version": 1
 }`;
 
+/**
+ * Renders the structured form body shared by /clients/new and /clients/:id/edit.
+ *
+ * Layout: three sections of structured input fields (Identity, Permission
+ * attestation, Primary route) above a raw JSON textarea. The textarea is the
+ * canonical submitted value — form fields are convenience for the most-edited
+ * scalar values, and an inline script keeps the textarea and form fields in
+ * two-way sync. Anything not covered by the form fields (canonicals, schema
+ * injections, redirects, etc.) is edited directly in the JSON textarea.
+ *
+ * Why textarea-as-source-of-truth: keeps the server handler unchanged
+ * (single `config_json` form field, same Zod validation), and lossless for
+ * advanced fields the form doesn't know about.
+ */
+function renderStructuredFormBody(opts: {
+  prefilledJson: string;
+  /** When true, client_id is rendered readonly (rename via edit not supported). */
+  isEdit: boolean;
+}): string {
+  const idAttrs = opts.isEdit ? "readonly" : 'required pattern="[a-z0-9_-]+"';
+  return `
+    <div class="form-section">
+      <h2>Identity</h2>
+      <div class="form-grid">
+        <div>
+          <label for="f_client_id">client_id</label>
+          <input id="f_client_id" type="text" ${idAttrs}>
+          <div class="field-hint">${opts.isEdit ? "cannot be changed via edit" : "lowercase letters, digits, _ or -"}</div>
+        </div>
+        <div>
+          <label for="f_status">status</label>
+          <select id="f_status">
+            <option value="active">active</option>
+            <option value="paused">paused</option>
+            <option value="terminated">terminated</option>
+          </select>
+        </div>
+        <div>
+          <label for="f_proxy_domain">proxy_domain</label>
+          <input id="f_proxy_domain" type="text" required>
+          <div class="field-hint">the host the platform serves under (e.g. yoursite.com)</div>
+        </div>
+        <div>
+          <label for="f_source_domain">source_domain</label>
+          <input id="f_source_domain" type="text" required>
+          <div class="field-hint">the upstream the platform fetches from</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="form-section">
+      <h2>Permission attestation</h2>
+      <div class="form-grid">
+        <div>
+          <label for="f_attested_by_email">attested_by_email</label>
+          <input id="f_attested_by_email" type="email" required>
+        </div>
+        <div>
+          <label for="f_attested_ip">attested_ip</label>
+          <input id="f_attested_ip" type="text" placeholder="0.0.0.0">
+        </div>
+        <div>
+          <label for="f_scope">scope</label>
+          <select id="f_scope">
+            <option value="full_site">full_site</option>
+            <option value="specified_paths">specified_paths</option>
+          </select>
+        </div>
+        <div>
+          <label for="f_scope_paths">scope_paths (CSV)</label>
+          <input id="f_scope_paths" type="text" placeholder="/blog,/landing">
+          <div class="field-hint">used only when scope = specified_paths</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="form-section">
+      <h2>Primary route</h2>
+      <div class="form-grid">
+        <div class="full-width">
+          <label for="f_origin">routing[0].origin</label>
+          <input id="f_origin" type="text" placeholder="https://example.com">
+          <div class="field-hint">URL the proxy fetches from for the default route. For multiple routes, custom_pages, origin_auth, or strip_prefix, edit the JSON below.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="form-section">
+      <h2>Raw <code>ClientConfig</code> JSON</h2>
+      <p class="field-hint" style="margin-bottom:.6rem">Source of truth on submit. Form fields above sync into this textarea on every keystroke. Edit the JSON directly for advanced fields (canonicals, schema_injections, redirects, link_rewrites, content_injections, etc.).</p>
+      <textarea id="config_json" name="config_json" spellcheck="false" autocomplete="off">${esc(opts.prefilledJson)}</textarea>
+    </div>
+
+    <script>
+    (function () {
+      var ta = document.getElementById('config_json');
+      if (!ta) return;
+      var scalarFields = {
+        f_client_id: ['client_id'],
+        f_proxy_domain: ['proxy_domain'],
+        f_source_domain: ['source_domain'],
+        f_status: ['status'],
+        f_attested_by_email: ['authorization', 'attested_by_email'],
+        f_attested_ip: ['authorization', 'attested_ip'],
+        f_scope: ['authorization', 'scope']
+      };
+      function get(obj, path) {
+        for (var i = 0; i < path.length; i++) {
+          if (obj == null) return undefined;
+          obj = obj[path[i]];
+        }
+        return obj;
+      }
+      function setPath(obj, path, val) {
+        for (var i = 0; i < path.length - 1; i++) {
+          var k = path[i];
+          if (obj[k] == null || typeof obj[k] !== 'object') obj[k] = {};
+          obj = obj[k];
+        }
+        obj[path[path.length - 1]] = val;
+      }
+      function safeParse() {
+        try { return JSON.parse(ta.value); } catch (e) { return null; }
+      }
+      function syncFromJson() {
+        var json = safeParse();
+        if (!json) return;
+        Object.keys(scalarFields).forEach(function (id) {
+          var el = document.getElementById(id);
+          if (!el) return;
+          var v = get(json, scalarFields[id]);
+          el.value = v == null ? '' : String(v);
+        });
+        var sp = get(json, ['authorization', 'scope_paths']);
+        var spEl = document.getElementById('f_scope_paths');
+        if (spEl) spEl.value = Array.isArray(sp) ? sp.join(', ') : '';
+        var origin = get(json, ['routing', 0, 'origin']);
+        var oEl = document.getElementById('f_origin');
+        if (oEl) oEl.value = origin || '';
+      }
+      function syncToJson() {
+        var json = safeParse();
+        if (!json) return;
+        Object.keys(scalarFields).forEach(function (id) {
+          var el = document.getElementById(id);
+          if (!el) return;
+          if (el.value !== '') setPath(json, scalarFields[id], el.value);
+        });
+        var spEl = document.getElementById('f_scope_paths');
+        var scopeEl = document.getElementById('f_scope');
+        if (json.authorization == null || typeof json.authorization !== 'object') json.authorization = {};
+        if (scopeEl && scopeEl.value === 'specified_paths' && spEl && spEl.value.trim() !== '') {
+          json.authorization.scope_paths = spEl.value.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+        } else {
+          delete json.authorization.scope_paths;
+        }
+        var oEl = document.getElementById('f_origin');
+        if (oEl && oEl.value !== '') {
+          if (!Array.isArray(json.routing)) json.routing = [];
+          if (json.routing[0] == null || typeof json.routing[0] !== 'object') {
+            json.routing[0] = { match: '^/.*', type: 'proxy', origin_auth: { type: 'none' } };
+          }
+          json.routing[0].origin = oEl.value;
+        }
+        ta.value = JSON.stringify(json, null, 2);
+      }
+      var ids = Object.keys(scalarFields).concat(['f_scope_paths', 'f_origin']);
+      ids.forEach(function (id) {
+        var el = document.getElementById(id);
+        if (el) el.addEventListener('input', syncToJson);
+      });
+      ta.addEventListener('input', syncFromJson);
+      syncFromJson();
+    })();
+    </script>`;
+}
+
 function renderNewClientForm(prefilledJson: string, error: string | null): string {
   return `<div class="crumbs"><a href="/clients">← Clients</a></div>
     <h1>New client</h1>
-    <p class="subtitle">Paste a complete <code>ClientConfig</code> JSON. Validates against the same Zod schema the Worker uses at load time.</p>
+    <p class="subtitle">Fill the structured fields below or edit the JSON directly. Validates against the same Zod schema the Worker uses at load time.</p>
     ${error ? `<div class="error-box">${esc(error)}</div>` : ""}
     <form class="editor" method="POST" action="/clients/new">
-      <label for="config_json">ClientConfig JSON</label>
-      <textarea id="config_json" name="config_json" spellcheck="false" autocomplete="off">${esc(prefilledJson)}</textarea>
+      ${renderStructuredFormBody({ prefilledJson, isEdit: false })}
       <div class="hint">After save: D1 INSERT, KV primed with the new config under <code>config:&lt;id&gt;</code> and <code>domain:&lt;proxy_domain&gt;</code>, audit_log entry written.</div>
       <div class="form-actions">
         <button class="btn btn-primary" type="submit">Create client</button>
@@ -744,8 +928,7 @@ function renderEditClientForm(
     <p class="subtitle">Editing the full <code>ClientConfig</code>. <code>client_id</code> cannot change via this form.</p>
     ${error ? `<div class="error-box">${esc(error)}</div>` : ""}
     <form class="editor" method="POST" action="/clients/${esc(client.client_id)}/edit">
-      <label for="config_json">ClientConfig JSON</label>
-      <textarea id="config_json" name="config_json" spellcheck="false" autocomplete="off">${esc(prefilledJson)}</textarea>
+      ${renderStructuredFormBody({ prefilledJson, isEdit: true })}
       <div class="hint">On save: D1 UPDATE, KV invalidated for <code>config:${esc(client.client_id)}</code> and <code>domain:${esc(client.proxy_domain)}</code>, audit_log entry written.</div>
       <div class="form-actions">
         <button class="btn btn-primary" type="submit">Save</button>
