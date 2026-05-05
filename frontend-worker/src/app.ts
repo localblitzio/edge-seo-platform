@@ -584,7 +584,11 @@ function derivLiteralPath(m: string): string | null {
   return out;
 }
 
-function renderPagesWithEditsPanel(clientId: string, cfg: Record<string, unknown>): string {
+function renderPagesWithEditsPanel(
+  clientId: string,
+  proxyDomain: string,
+  cfg: Record<string, unknown>,
+): string {
   const groups = summarizeEditedPages(cfg);
   const literal = groups.filter((g) => !g.wildcard);
   const wildcard = groups.filter((g) => g.wildcard);
@@ -608,19 +612,25 @@ function renderPagesWithEditsPanel(clientId: string, cfg: Record<string, unknown
   const renderRow = (g: PageGroup): string => {
     const display = g.literalPath ?? g.match;
     const editHref = `/app/clients/${esc(clientId)}/page?match=${encodeURIComponent(g.match)}`;
+    // Wildcards have no concrete URL to open; only literal paths get
+    // the live-link.
+    const liveCell = g.literalPath
+      ? `<a href="https://${esc(proxyDomain)}${esc(g.literalPath)}" target="_blank" rel="noopener" title="Open on proxy">↗</a>`
+      : "";
     return `<tr>
       <td class="mono">${esc(display)}${g.wildcard ? ' <span class="pill pill-neutral">wildcard</span>' : ""}</td>
       <td style="color:var(--fg-muted);font-size:.85rem">${esc(renderCounts(g.counts))}</td>
+      <td style="text-align:center;width:1.5rem">${liveCell}</td>
       <td><a href="${editHref}" class="btn-link">Edit →</a></td>
     </tr>`;
   };
 
   const literalRows = literal.length
-    ? `<table class="data" style="margin-bottom:.6rem"><thead><tr><th>path</th><th>edits</th><th></th></tr></thead><tbody>${literal.map(renderRow).join("")}</tbody></table>`
+    ? `<table class="data" style="margin-bottom:.6rem"><thead><tr><th>path</th><th>edits</th><th></th><th></th></tr></thead><tbody>${literal.map(renderRow).join("")}</tbody></table>`
     : '<div class="empty" style="margin:0 0 .6rem">no per-page edits yet</div>';
 
   const wildcardRows = wildcard.length
-    ? `<details class="section" style="margin:0 0 1rem"><summary>Site-wide / section-wide rules <span class="count">${wildcard.length}</span></summary><div class="body"><table class="data"><thead><tr><th>match</th><th>edits</th><th></th></tr></thead><tbody>${wildcard.map(renderRow).join("")}</tbody></table></div></details>`
+    ? `<details class="section" style="margin:0 0 1rem"><summary>Site-wide / section-wide rules <span class="count">${wildcard.length}</span></summary><div class="body"><table class="data"><thead><tr><th>match</th><th>edits</th><th></th><th></th></tr></thead><tbody>${wildcard.map(renderRow).join("")}</tbody></table></div></details>`
     : "";
 
   return `<div class="card" style="margin-bottom:1rem">
@@ -716,10 +726,10 @@ export async function renderClientDetail(env: AppEnv, user: User, id: string): P
 
   return `<div class="crumbs"><a href="/app/clients">← Clients</a></div>
     <h1>${esc(client.client_id)} ${statusPill(client.status)}</h1>
-    <p class="subtitle"><span class="mono">${esc(client.proxy_domain)}</span> &nbsp;→&nbsp; <span class="mono">${esc(client.source_domain)}</span></p>
+    <p class="subtitle"><a class="mono" href="https://${esc(client.proxy_domain)}/" target="_blank" rel="noopener">${esc(client.proxy_domain)}</a> &nbsp;→&nbsp; <span class="mono">${esc(client.source_domain)}</span></p>
     ${renderActionsRow(client)}
     ${parseError ? `<div class="empty">⚠ Config JSON parse error: ${esc(parseError)}</div>` : ""}
-    ${renderPagesWithEditsPanel(client.client_id, cfg)}
+    ${renderPagesWithEditsPanel(client.client_id, client.proxy_domain, cfg)}
     <div class="card"><h2 style="margin-top:0">Authorization</h2><dl class="kv">
       <dt>Attested by</dt><dd>${esc(auth.attested_by_email)}</dd>
       <dt>At</dt><dd>${esc(auth.attested_at)}</dd>
@@ -1080,8 +1090,16 @@ export function renderPerPageEditor(opts: {
 }): string {
   const display = opts.literalPath ?? opts.match;
   const inspectInitialPath = opts.literalPath ?? "/";
+  // If we have a literal path, build a one-click link to the live proxy
+  // URL so the operator can open the page they just edited in a new tab.
+  const liveUrl = opts.literalPath
+    ? `https://${opts.client.proxy_domain}${opts.literalPath}`
+    : null;
+  const liveLink = liveUrl
+    ? ` <a href="${esc(liveUrl)}" target="_blank" rel="noopener" style="font-size:.55em;font-weight:400;margin-left:.5rem;text-decoration:none">↗ open live</a>`
+    : "";
   return `<div class="crumbs"><a href="/app/clients/${esc(opts.client.client_id)}">← ${esc(opts.client.client_id)}</a></div>
-    <h1>Edit page <code style="font-size:.7em">${esc(display)}</code></h1>
+    <h1>Edit page <code style="font-size:.7em">${esc(display)}</code>${liveLink}</h1>
     <p class="subtitle">All rules whose <code>match</code> equals <code>${esc(opts.match)}</code> on <strong>${esc(opts.client.client_id)}</strong>. Other client config (identity, auth, routing, site-wide rules) is preserved on save.</p>
     ${opts.error ? `<div class="error-box">${esc(opts.error)}</div>` : ""}
     <form class="editor" method="POST" action="/app/clients/${esc(opts.client.client_id)}/edit">
