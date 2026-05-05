@@ -18,6 +18,7 @@ on:
           - all
           - main-worker
           - admin-worker
+          - frontend-worker
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -102,9 +103,34 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
+  # Frontend worker deploy — Phase B+ user-facing landing, auth flows,
+  # authenticated app dashboard, super-admin user CRUD. Replaces the
+  # admin-worker functionality once Phase G cuts over.
+  deploy-staging-frontend:
+    name: Deploy frontend worker (staging)
+    needs: verify
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' &&
+       (github.event.inputs.target == 'all' || github.event.inputs.target == 'frontend-worker'))
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - name: Deploy frontend worker (staging)
+        run: npx wrangler deploy --config frontend-worker/wrangler.toml
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
   deploy-production:
     name: Deploy to production
-    needs: [deploy-staging-main, deploy-staging-admin]
+    needs: [deploy-staging-main, deploy-staging-admin, deploy-staging-frontend]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment:

@@ -1,0 +1,10 @@
+{
+  "name": "edge-seo-frontend-worker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "User-facing frontend for the Edge SEO Platform — landing page, auth flows (login, signup-via-invite, email verification, password reset), authenticated app dashboard (clients CRUD, audit, KV browser), and super-admin user CRUD. Replaces the basic-auth-gated edge-seo-admin worker.",
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy --config wrangler.toml"
+  }
+}
