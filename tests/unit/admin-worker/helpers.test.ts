@@ -1,11 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  checkCsrf,
-  flashRedirect,
-  fnvHash,
-  readFlash,
-} from "../../../admin-worker/src/helpers.js";
+import { checkCsrf, flashRedirect, fnvHash, readFlash } from "../../../admin-worker/src/helpers.js";
 
 describe("fnvHash", () => {
   it("produces a deterministic 8-character lowercase hex digest", () => {
@@ -53,9 +48,7 @@ describe("checkCsrf", () => {
   });
 
   it("falls back to Referer when Origin is missing", () => {
-    expect(
-      checkCsrf(reqWith({ referer: "https://admin.example/clients" }), url),
-    ).toBeNull();
+    expect(checkCsrf(reqWith({ referer: "https://admin.example/clients" }), url)).toBeNull();
   });
 
   it("rejects when Referer host mismatches", () => {
