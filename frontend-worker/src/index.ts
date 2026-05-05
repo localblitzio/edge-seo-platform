@@ -64,6 +64,7 @@ import {
   verifyPassword,
 } from "./auth.js";
 import { type EmailBinding, resetPasswordMessage, sendEmail } from "./email.js";
+import { inspectSourcePage } from "./inspector.js";
 
 interface Env {
   CONFIG_KV: KVNamespace;
@@ -954,6 +955,51 @@ export default {
           }),
           { status: 400 },
         );
+      }
+
+      // /app/clients/:id/inspect/fetch — JSON endpoint for the
+      // page-element picker. Fetches the source domain at the given
+      // ?path= and returns a list of structural elements with
+      // computed CSS selectors so the UI can pre-fill text_rewrites.
+      if (sub === "inspect/fetch" && method === "GET") {
+        const client = await loadVisibleClient(env, user, id);
+        if (!client) {
+          return new Response(JSON.stringify({ error: "Not found" }), {
+            status: 404,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        const inspectPath = url.searchParams.get("path") ?? "/";
+        let cfg: { source_domain?: string; routing?: Array<{ origin?: string }> };
+        try {
+          cfg = JSON.parse(client.config_json);
+        } catch (e) {
+          return new Response(
+            JSON.stringify({ error: `config_json parse error: ${(e as Error).message}` }),
+            { status: 500, headers: { "content-type": "application/json" } },
+          );
+        }
+        // Prefer routing[0].origin (the URL the proxy actually fetches
+        // from), fall back to https://${source_domain}.
+        const sourceBase =
+          cfg.routing?.[0]?.origin ?? (cfg.source_domain ? `https://${cfg.source_domain}` : null);
+        if (!sourceBase) {
+          return new Response(
+            JSON.stringify({ error: "No routing[0].origin or source_domain configured" }),
+            { status: 422, headers: { "content-type": "application/json" } },
+          );
+        }
+        try {
+          const result = await inspectSourcePage(sourceBase, inspectPath);
+          return new Response(JSON.stringify(result), {
+            headers: { "content-type": "application/json", "cache-control": "no-store" },
+          });
+        } catch (e) {
+          return new Response(JSON.stringify({ error: `fetch failed: ${(e as Error).message}` }), {
+            status: 502,
+            headers: { "content-type": "application/json" },
+          });
+        }
       }
 
       // Unknown sub-route — fall through to 404 below.
