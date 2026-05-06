@@ -285,7 +285,64 @@ form.editor .form-actions{display:flex;gap:.5rem;align-items:center;margin-top:.
 .inspect-status-ok{color:var(--green);font-size:.85rem}
 .inspect-status-err{color:var(--red);font-size:.85rem}
 .inspect-status-loading{color:var(--fg-muted);font-size:.85rem}
+
+/* ─── Polish: stat-card categories, sidebar icons, table hover ─── */
+:root{--cat-clients:#6366f1;--cat-routes:#0d9488;--cat-redirects:#d97706;--cat-canonicals:#8b5cf6;--cat-schemas:#10b981}
+@media (prefers-color-scheme:dark){:root{--cat-clients:#818cf8;--cat-routes:#2dd4bf;--cat-redirects:#fbbf24;--cat-canonicals:#a78bfa;--cat-schemas:#34d399}}
+.app-main .stat{position:relative;border-top:3px solid var(--stat-color,var(--accent));padding-top:.95rem}
+.app-main .stat .stat-icon{position:absolute;top:.7rem;right:.75rem;width:1.05rem;height:1.05rem;color:var(--stat-color,var(--fg-muted));opacity:.45}
+.app-main .stat .value{color:var(--stat-color,var(--fg))}
+.app-main .stat-clients{--stat-color:var(--cat-clients)}
+.app-main .stat-routes{--stat-color:var(--cat-routes)}
+.app-main .stat-redirects{--stat-color:var(--cat-redirects)}
+.app-main .stat-canonicals{--stat-color:var(--cat-canonicals)}
+.app-main .stat-schemas{--stat-color:var(--cat-schemas)}
+.app-sidebar a{display:flex;align-items:center;gap:.55rem}
+.app-sidebar a .nav-icon{width:1rem;height:1rem;flex:0 0 auto;opacity:.65;color:currentColor}
+.app-sidebar a:hover .nav-icon,.app-sidebar a.active .nav-icon{opacity:1}
+.app-sidebar a.active{box-shadow:0 1px 2px rgba(0,0,0,.08)}
+.status-dot{display:inline-block;width:.45rem;height:.45rem;border-radius:50%;flex:0 0 auto}
+.status-dot-active{background:var(--green)}
+.status-dot-paused{background:var(--amber)}
+.status-dot-terminated{background:var(--red)}
+table.data tbody tr:hover{background:color-mix(in srgb,var(--accent) 5%,transparent)}
+@supports not (background:color-mix(in srgb,red,blue)){table.data tbody tr:hover{background:var(--bg-sidebar,#f4f4f5)}}
+table.data tbody tr{transition:background .12s ease}
 `;
+
+/* ─── Inline-SVG icons (lucide-style, no dep) ─── */
+
+const SVG_ATTRS =
+  'class="stat-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"';
+const NAV_SVG_ATTRS =
+  'class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"';
+
+type StatKind = "clients" | "routes" | "redirects" | "canonicals" | "schemas";
+const STAT_ICONS: Record<StatKind, string> = {
+  // users (Clients)
+  clients: `<svg ${SVG_ATTRS}><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>`,
+  // route line (Routes)
+  routes: `<svg ${SVG_ATTRS}><circle cx="6" cy="19" r="3"/><path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"/><circle cx="18" cy="5" r="3"/></svg>`,
+  // corner-up-right (Redirects)
+  redirects: `<svg ${SVG_ATTRS}><polyline points="15 14 20 9 15 4"/><path d="M4 20v-7a4 4 0 0 1 4-4h12"/></svg>`,
+  // link (Canonicals)
+  canonicals: `<svg ${SVG_ATTRS}><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`,
+  // database (Schemas)
+  schemas: `<svg ${SVG_ATTRS}><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/></svg>`,
+};
+
+const NAV_ICONS: Record<string, string> = {
+  // home (Overview)
+  home: `<svg ${NAV_SVG_ATTRS}><path d="M3 9.5L12 2l9 7.5"/><path d="M5 9v11a1 1 0 0 0 1 1h4v-7h4v7h4a1 1 0 0 0 1-1V9"/></svg>`,
+  // users
+  clients: `<svg ${NAV_SVG_ATTRS}><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>`,
+  // file-text (Audit)
+  audit: `<svg ${NAV_SVG_ATTRS}><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="16" y2="17"/></svg>`,
+  // shield-user (Super-admin Users)
+  admin: `<svg ${NAV_SVG_ATTRS}><path d="M12 2l8 4v6c0 5-3.5 9-8 10-4.5-1-8-5-8-10V6z"/><circle cx="12" cy="10" r="2.5"/><path d="M8 16c1-1.5 2.5-2.5 4-2.5s3 1 4 2.5"/></svg>`,
+  // globe (per-client row)
+  site: `<svg ${NAV_SVG_ATTRS}><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15 15 0 0 1 0 20 15 15 0 0 1 0-20z"/></svg>`,
+};
 
 interface AppLayoutOpts {
   title: string;
@@ -297,30 +354,35 @@ interface AppLayoutOpts {
 }
 
 export function appSidebar(opts: { activeNav: string; clients: ClientRow[]; user: User }): string {
-  const navLinks = [
-    { href: "/app", id: "home", label: "Overview" },
-    { href: "/app/clients", id: "clients", label: "Clients" },
-    { href: "/app/audit", id: "audit", label: "Audit log" },
+  const navLinks: Array<{ href: string; id: string; label: string; icon: string }> = [
+    { href: "/app", id: "home", label: "Overview", icon: NAV_ICONS.home ?? "" },
+    { href: "/app/clients", id: "clients", label: "Clients", icon: NAV_ICONS.clients ?? "" },
+    { href: "/app/audit", id: "audit", label: "Audit log", icon: NAV_ICONS.audit ?? "" },
   ];
   const items = navLinks
     .map(
       (l) =>
-        `<a href="${l.href}"${opts.activeNav === l.id ? ' class="active"' : ""}>${esc(l.label)}</a>`,
+        `<a href="${l.href}"${opts.activeNav === l.id ? ' class="active"' : ""}>${l.icon}<span>${esc(l.label)}</span></a>`,
     )
     .join("");
   const adminLink =
     opts.user.role === "super_admin"
-      ? `<div class="app-sidebar-section">Super-admin</div><a href="/admin/users"${opts.activeNav === "admin:users" ? ' class="active"' : ""}>Users</a>`
+      ? `<div class="app-sidebar-section">Super-admin</div><a href="/admin/users"${opts.activeNav === "admin:users" ? ' class="active"' : ""}>${NAV_ICONS.admin}<span>Users</span></a>`
       : "";
   const clientList =
     opts.clients.length > 0
       ? `<div class="app-sidebar-section">Clients</div>${opts.clients
-          .map(
-            (c) =>
-              `<a href="/app/clients/${esc(c.client_id)}"${
-                opts.activeNav === `client:${c.client_id}` ? ' class="active"' : ""
-              } style="padding-left:1.25rem;font-size:.85rem;">${esc(c.client_id)}</a>`,
-          )
+          .map((c) => {
+            const dotClass =
+              c.status === "active"
+                ? "status-dot-active"
+                : c.status === "paused"
+                  ? "status-dot-paused"
+                  : "status-dot-terminated";
+            return `<a href="/app/clients/${esc(c.client_id)}"${
+              opts.activeNav === `client:${c.client_id}` ? ' class="active"' : ""
+            } style="padding-left:.95rem;font-size:.85rem" title="${esc(c.status)}"><span class="status-dot ${dotClass}"></span><span>${esc(c.client_id)}</span></a>`;
+          })
           .join("")}`
       : "";
   // Build version pinned at deploy time — operators use this to
@@ -362,8 +424,8 @@ export async function renderOverview(env: AppEnv, user: User): Promise<string> {
       /* ignore */
     }
   }
-  const stat = (label: string, value: number | string) =>
-    `<div class="stat"><div class="label">${esc(label)}</div><div class="value">${esc(value)}</div></div>`;
+  const stat = (kind: StatKind, label: string, value: number | string) =>
+    `<div class="stat stat-${kind}">${STAT_ICONS[kind]}<div class="label">${esc(label)}</div><div class="value">${esc(value)}</div></div>`;
   const rows = clients
     .map(
       (c) => `<tr>
@@ -380,7 +442,7 @@ export async function renderOverview(env: AppEnv, user: User): Promise<string> {
       : `Showing ${clients.length} client${clients.length === 1 ? "" : "s"} you own.`;
   return `<h1>Overview</h1>
     <p class="subtitle">${ownership}</p>
-    <div class="stats">${stat("Clients", clients.length)}${stat("Routes", totalRoutes)}${stat("Redirects", totalRedirects)}${stat("Canonicals", totalCanonicals)}${stat("Schemas", totalSchema)}</div>
+    <div class="stats">${stat("clients", "Clients", clients.length)}${stat("routes", "Routes", totalRoutes)}${stat("redirects", "Redirects", totalRedirects)}${stat("canonicals", "Canonicals", totalCanonicals)}${stat("schemas", "Schemas", totalSchema)}</div>
     ${
       clients.length === 0
         ? `<div class="empty">No clients to show. Use the legacy admin worker to create one (write surface ports here in a follow-up).</div>`
