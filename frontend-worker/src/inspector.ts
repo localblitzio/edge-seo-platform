@@ -159,8 +159,14 @@ function computeSelectors(elements: InspectedElement[]): void {
 
   for (const [tag, group] of Object.entries(byTag)) {
     group.forEach((el, idx) => {
-      // 1. ID — always unique, always wins.
-      if (el.id) {
+      // 1. ID — preferred, but only if it looks human-authored.
+      //    Site builders (Wix Studio, Editor X, Webflow, etc.) emit
+      //    auto-generated IDs like `vbid-9e859d8e-ylldheqp`, `comp-...`,
+      //    `w-node-...`, `mantine-...`. These IDs are technically
+      //    unique but they're brittle (regenerated on republish) and
+      //    don't read semantically. Fall through to tag/class
+      //    strategies for a saner default.
+      if (el.id && !looksGenerated(el.id)) {
         el.selector = `#${cssEscape(el.id)}`;
         return;
       }
@@ -188,6 +194,37 @@ function computeSelectors(elements: InspectedElement[]): void {
       el.selector = `${tag}:nth-of-type(${idx + 1})`;
     });
   }
+}
+
+/**
+ * Detect IDs emitted by site builders (Wix Studio, Editor X, Webflow,
+ * Mantine, Radix UI, CSS-in-JS, etc.) that are unique but brittle —
+ * regenerated on every republish, opaque to humans, and not stable
+ * targets for text_rewrites.
+ *
+ * Heuristics, in order of weight:
+ *   - Known prefixes: `vbid-`, `comp-`, `w-node-`, `mantine-`,
+ *     `radix-`, `css-`, `chakra-`, `headlessui-`, `aria-`, `react-`.
+ *   - Embedded hex hash: any 6+ consecutive hex chars (`9e859d8e`).
+ *   - Embedded alpha-numeric token of 8+ chars that isn't a real word
+ *     (caught loosely by the hex rule for most builder IDs).
+ *
+ * Conservative on the false-positive side: a hand-written ID like
+ * `header-2024` would survive the hex check (only 4 hex digits in a
+ * row) and not trip any prefix rule.
+ *
+ * @param id the element's id attribute value
+ * @returns true if the ID looks builder-generated
+ */
+export function looksGenerated(id: string): boolean {
+  const lower = id.toLowerCase();
+  // Known builder/framework prefixes.
+  if (/^(vbid|comp|w-node|mantine|radix|css|chakra|headlessui|react|aria)[-_]/.test(lower)) {
+    return true;
+  }
+  // Any 6+ consecutive hex chars almost always means hash/uuid fragment.
+  if (/[0-9a-f]{6,}/.test(lower)) return true;
+  return false;
 }
 
 /**
