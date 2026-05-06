@@ -1261,22 +1261,14 @@ export const NEW_CLIENT_TEMPLATE = `{
     }
   ],
   "redirects": { "static": [], "patterns": [], "conditional": [] },
-  "canonicals": [
-    {
-      "match": "^/.*",
-      "strategy": { "type": "origin" },
-      "sync_og_url": true,
-      "sync_twitter_url": true,
-      "sync_jsonld_url": true
-    }
-  ],
+  "canonicals": [],
   "schema_injections": [],
   "link_rewrites": [],
   "element_removals": [],
   "content_injections": [],
   "text_rewrites": [],
   "meta_rewrites": [],
-  "indexation": [{ "match": "^/.*", "robots": "noindex,follow", "additional_directives": [] }],
+  "indexation": [],
   "caching": [{ "match": "^/.*", "ttl_seconds": 600, "cache_key_includes_cookies": [], "bypass_on_cookie": [] }],
   "forms": [],
   "schema_version": 1

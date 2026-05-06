@@ -31,16 +31,24 @@ export function applyStrategy(
   sourceDomain: string,
 ): ResolvedStrategy {
   switch (strategy.type) {
-    case "self":
-      return { strategy: "self", url: url.toString() };
+    case "self": {
+      // Canonical URL must NOT carry the request's query string —
+      // otherwise every cache-busted / tracking-paramed URL becomes
+      // its own canonical, fragmenting ranking signals across what
+      // should be one page. Strip query + hash; preserve path only.
+      const u = new URL(url.toString());
+      u.search = "";
+      u.hash = "";
+      return { strategy: "self", url: u.toString() };
+    }
     case "origin": {
-      // Rewrite hostname to source_domain. Per spec §6.3 we preserve
-      // path and query; the port from the proxy URL is dropped because
-      // source_domain is conventionally a bare host (origin runs on the
-      // standard HTTPS port). Protocol stays as-is.
+      // Rewrite hostname to source_domain, drop port + query + hash
+      // (same SEO reasoning as the `self` branch). Protocol stays.
       const u = new URL(url.toString());
       u.hostname = sourceDomain;
       u.port = "";
+      u.search = "";
+      u.hash = "";
       return { strategy: "origin", url: u.toString() };
     }
     case "custom":
