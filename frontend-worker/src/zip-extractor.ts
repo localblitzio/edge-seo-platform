@@ -109,6 +109,46 @@ function normalizeZipPath(raw: string): string {
 }
 
 /**
+ * If every entry shares the same first path segment, strip it.
+ * Many website-builder exports wrap content in a parent folder
+ * (e.g. `mysite/index.html`, `mysite/css/main.css`). The operator
+ * uploads the zip expecting `/site/index.html` to serve, but the
+ * stored key ends up as `mysite/index.html` instead of `index.html`,
+ * so directory requests miss the index fallback.
+ *
+ * Heuristic: only strip when EVERY entry has the same first segment
+ * AND there are no root-level entries. If a single file lives at the
+ * root (e.g. `robots.txt` next to a `mysite/` folder), we leave the
+ * structure alone — the operator probably meant it that way.
+ *
+ * Returns the (possibly mutated) input list and the prefix that was
+ * stripped (or null if no stripping happened).
+ */
+export function autoFlattenCommonPrefix(files: ExtractedFile[]): {
+  files: ExtractedFile[];
+  strippedPrefix: string | null;
+} {
+  if (files.length < 2) return { files, strippedPrefix: null };
+  const firstSegments = new Set<string>();
+  for (const f of files) {
+    const slash = f.path.indexOf("/");
+    if (slash < 0) {
+      // A root-level file. No common parent to strip.
+      return { files, strippedPrefix: null };
+    }
+    firstSegments.add(f.path.slice(0, slash));
+  }
+  if (firstSegments.size !== 1) return { files, strippedPrefix: null };
+  const prefix = [...firstSegments][0];
+  if (!prefix) return { files, strippedPrefix: null };
+  const stripped: ExtractedFile[] = files.map((f) => ({
+    path: f.path.slice(prefix.length + 1),
+    bytes: f.bytes,
+  }));
+  return { files: stripped, strippedPrefix: prefix };
+}
+
+/**
  * Map a file extension to a Content-Type. Covers the common static-
  * site asset types. Unknown extensions return undefined so the caller
  * can decide between octet-stream and rejection.

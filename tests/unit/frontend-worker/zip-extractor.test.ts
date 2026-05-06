@@ -5,6 +5,7 @@ import {
   ZIP_ENTRY_MAX_BYTES,
   ZIP_MAX_BYTES,
   ZIP_MAX_ENTRIES,
+  autoFlattenCommonPrefix,
   contentTypeForPath,
   extractZip,
 } from "../../../frontend-worker/src/zip-extractor.js";
@@ -84,6 +85,58 @@ describe("extractZip", () => {
     const oversize = new Uint8Array(ZIP_ENTRY_MAX_BYTES + 1).fill(0x61);
     const zip = makeZip({ "big.txt": oversize });
     expect(() => extractZip(zip)).toThrow(/exceeds .* bytes/);
+  });
+});
+
+describe("autoFlattenCommonPrefix", () => {
+  const f = (path: string): { path: string; bytes: Uint8Array } => ({
+    path,
+    bytes: new Uint8Array(0),
+  });
+
+  it("strips a single common parent folder", () => {
+    const r = autoFlattenCommonPrefix([
+      f("mysite/index.html"),
+      f("mysite/css/main.css"),
+      f("mysite/img/logo.png"),
+    ]);
+    expect(r.strippedPrefix).toBe("mysite");
+    expect(r.files.map((x) => x.path).sort()).toEqual([
+      "css/main.css",
+      "img/logo.png",
+      "index.html",
+    ]);
+  });
+
+  it("does NOT strip when a root-level file exists alongside a folder", () => {
+    const r = autoFlattenCommonPrefix([
+      f("robots.txt"),
+      f("mysite/index.html"),
+      f("mysite/css/main.css"),
+    ]);
+    expect(r.strippedPrefix).toBeNull();
+    expect(r.files.map((x) => x.path)).toEqual([
+      "robots.txt",
+      "mysite/index.html",
+      "mysite/css/main.css",
+    ]);
+  });
+
+  it("does NOT strip when there are multiple top-level folders", () => {
+    const r = autoFlattenCommonPrefix([f("siteA/index.html"), f("siteB/index.html")]);
+    expect(r.strippedPrefix).toBeNull();
+  });
+
+  it("returns input unchanged for a single-file bundle", () => {
+    const r = autoFlattenCommonPrefix([f("index.html")]);
+    expect(r.strippedPrefix).toBeNull();
+    expect(r.files[0]?.path).toBe("index.html");
+  });
+
+  it("returns input unchanged for an empty bundle", () => {
+    const r = autoFlattenCommonPrefix([]);
+    expect(r.strippedPrefix).toBeNull();
+    expect(r.files).toEqual([]);
   });
 });
 
