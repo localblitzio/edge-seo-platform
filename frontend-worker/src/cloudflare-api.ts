@@ -156,3 +156,22 @@ export async function createWorkersRoute(
     body: args,
   });
 }
+
+/**
+ * Purge Cloudflare's HTTP cache for a specific hostname on a zone.
+ * Affects only the named host(s), not the whole zone — safe to use
+ * on a shared wildcard zone like `localpage.us.com` because we name
+ * the per-client subdomain rather than the apex.
+ *
+ * Available on Free tier and up.
+ */
+export async function purgeCacheByHosts(
+  token: string,
+  zoneId: string,
+  hosts: string[],
+): Promise<{ id: string }> {
+  return await callCf<{ id: string }>(token, `/zones/${zoneId}/purge_cache`, {
+    method: "POST",
+    body: { hosts },
+  });
+}
