@@ -41,6 +41,10 @@ import {
   handleNewCustomPagePost,
   handleNewStaticSiteGet,
   handleNewStaticSitePost,
+  handleSiteFileDeletePost,
+  handleSiteFileEditGet,
+  handleSiteFileEditPost,
+  handleSiteFilesGet,
   handleStatusPost,
   literalPathFromMatch,
   loadVisibleClient,
@@ -56,6 +60,8 @@ import {
   renderNewStaticSiteForm,
   renderOverview,
   renderPerPageEditor,
+  renderSiteFileEditForm,
+  renderSiteFilesPage,
   summarizeEditedPages,
 } from "./app.js";
 import {
@@ -1211,6 +1217,92 @@ export default {
           }),
           { status: 400 },
         );
+      }
+
+      // /app/clients/:id/custom-page/files?match=... — file browser
+      if (sub === "custom-page/files" && method === "GET") {
+        const matchParam = url.searchParams.get("match") ?? "";
+        if (!matchParam) {
+          return new Response(null, {
+            status: 303,
+            headers: { location: `/app/clients/${encodeURIComponent(id)}` },
+          });
+        }
+        const r = await handleSiteFilesGet(env, user, id, matchParam);
+        if (r instanceof Response) return r;
+        return htmlResponse(
+          htmlPage({
+            title: `Files — ${id} ${r.basePath}`,
+            body: appLayout({
+              title: `Files — ${id}`,
+              content: renderSiteFilesPage(r),
+              activeNav: `client:${id}`,
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+
+      // /app/clients/:id/custom-page/file/edit?match=...&path=... — single-file edit form
+      if (sub === "custom-page/file/edit" && method === "GET") {
+        const matchParam = url.searchParams.get("match") ?? "";
+        const pathParam = url.searchParams.get("path") ?? "";
+        if (!matchParam || !pathParam) {
+          return new Response(null, {
+            status: 303,
+            headers: { location: `/app/clients/${encodeURIComponent(id)}` },
+          });
+        }
+        const r = await handleSiteFileEditGet(env, user, id, matchParam, pathParam);
+        if (r instanceof Response) return r;
+        return htmlResponse(
+          htmlPage({
+            title: `Edit ${r.relPath} — ${id}`,
+            body: appLayout({
+              title: `Edit ${r.relPath} — ${id}`,
+              content: renderSiteFileEditForm({ ...r, error: null }),
+              activeNav: `client:${id}`,
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+
+      // /app/clients/:id/custom-page/file/edit — handle save
+      if (sub === "custom-page/file/edit" && method === "POST") {
+        const result = await handleSiteFileEditPost(request, env, url, user, id);
+        if (result.response) return result.response;
+        const re = result.rerenderError;
+        if (!re) return new Response("Internal error", { status: 500 });
+        return htmlResponse(
+          htmlPage({
+            title: `Edit ${re.relPath} — ${id}`,
+            body: appLayout({
+              title: `Edit ${re.relPath} — ${id}`,
+              content: renderSiteFileEditForm({ ...re, error: re.error }),
+              activeNav: `client:${id}`,
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+          { status: 400 },
+        );
+      }
+
+      // /app/clients/:id/custom-page/file/delete — remove a single file
+      if (sub === "custom-page/file/delete" && method === "POST") {
+        return handleSiteFileDeletePost(request, env, url, user, id);
       }
 
       // /app/clients/:id/inspect/fetch — JSON endpoint for the
