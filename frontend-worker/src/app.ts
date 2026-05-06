@@ -28,7 +28,12 @@ import { ConfigValidationError } from "../../src/lib/errors.js";
 import type { User } from "./auth.js";
 import { BUILD_VERSION } from "./build-version.js";
 import { LIST_EDITOR_JS } from "./list-editor-js.js";
-import { ZIP_MAX_BYTES, contentTypeForPath, extractZip } from "./zip-extractor.js";
+import {
+  ZIP_MAX_BYTES,
+  autoFlattenCommonPrefix,
+  contentTypeForPath,
+  extractZip,
+} from "./zip-extractor.js";
 
 /* ─── Types ─── */
 
@@ -1984,13 +1989,19 @@ export async function handleNewStaticSitePost(
     };
   }
 
+  // Auto-flatten a single common parent folder. Many website-builder
+  // exports wrap content (e.g. `mysite/index.html`); without this the
+  // operator's `<base>/index.html` lookup misses and they hit 404s.
+  const { files: filesToWrite, strippedPrefix } = autoFlattenCommonPrefix(extracted.files);
+
   // Write each file to R2 with the right content-type. Bundle path
   // shape: `<client_id><basePath>/<entry-path>` — matches what
   // renderCustomPage will look up for an inbound URL of
   // `<basePath>/<entry-path>`.
   const beforeHash = fnvHash(client.config_json);
   const r2 = env.CONTENT_R2;
-  for (const entry of extracted.files) {
+  const storedPaths: string[] = [];
+  for (const entry of filesToWrite) {
     const ct = contentTypeForPath(entry.path) ?? "application/octet-stream";
     const key = `${clientId}${basePath}/${entry.path}`;
     await r2.put(key, entry.bytes, {
@@ -2000,7 +2011,9 @@ export async function handleNewStaticSitePost(
         uploaded_at: new Date().toISOString(),
       },
     });
+    storedPaths.push(entry.path);
   }
+  const hasIndex = storedPaths.some((p) => p === "index.html" || p.endsWith("/index.html"));
 
   // Add the routing entry.
   const routing = Array.isArray(cfg.routing) ? (cfg.routing as Array<unknown>) : [];
@@ -2030,13 +2043,23 @@ export async function handleNewStaticSitePost(
     after_hash: afterHash,
     previous_status: client.status,
     new_status: client.status,
-    notes: `uploaded static site ${basePath} (${extracted.files.length} files, ${extracted.totalBytes} bytes uncompressed)`,
+    notes: `uploaded static site ${basePath} (${storedPaths.length} files, ${extracted.totalBytes} bytes uncompressed${strippedPrefix ? `, auto-flattened "${strippedPrefix}/"` : ""})`,
   });
 
+  // Build a concise success message that exposes what was actually
+  // stored. If the bundle has an index.html the operator gets a
+  // direct live link. If it doesn't, surface a warning so they don't
+  // wonder why <base>/ 404s.
+  const samplePaths = storedPaths.slice(0, 5).join(", ");
+  const moreSuffix = storedPaths.length > 5 ? ` … +${storedPaths.length - 5} more` : "";
+  const flattenedNote = strippedPrefix ? ` (auto-flattened "${strippedPrefix}/")` : "";
+  const flashText = hasIndex
+    ? `Site uploaded at ${basePath}${flattenedNote}: ${storedPaths.length} files (${samplePaths}${moreSuffix}). View at https://${client.proxy_domain}${basePath}/`
+    : `Site uploaded at ${basePath}${flattenedNote}: ${storedPaths.length} files (${samplePaths}${moreSuffix}). NOTE: no index.html found — visiting ${basePath}/ will 404 unless you add one.`;
   return {
     response: flashRedirect(`/app/clients/${clientId}`, {
-      text: `Site uploaded at ${basePath} (${extracted.files.length} files). View at https://${client.proxy_domain}${basePath}/`,
-      kind: "ok",
+      text: flashText,
+      kind: hasIndex ? "ok" : "warn",
     }),
   };
 }
