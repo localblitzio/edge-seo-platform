@@ -1275,12 +1275,15 @@ function renderCustomPagesPanel(client: ClientRow, cfg: Record<string, unknown>)
         ? `<a href="${esc(liveHref)}" target="_blank" rel="noopener" title="Open on proxy">↗</a>`
         : "";
       // Edit only for single-page entries with a literal path. Static
-      // sites are delete + reupload (zip semantics make incremental
-      // edit a separate, larger feature).
+      // Single-page routes get an Edit button (one R2 object replace).
+      // Static-site routes get a Files button that opens a file
+      // browser — list, replace contents per-file, delete per-file.
       const editLink =
         e.kind === "page" && e.literalPath
           ? `<a href="/app/clients/${esc(client.client_id)}/custom-page/edit?match=${encodeURIComponent(e.match)}" class="btn-link">Edit →</a>`
-          : "";
+          : e.kind === "site" && e.literalPath
+            ? `<a href="/app/clients/${esc(client.client_id)}/custom-page/files?match=${encodeURIComponent(e.match)}" class="btn-link">Files →</a>`
+            : "";
       const confirmMsg =
         e.kind === "site"
           ? "Delete this static site? All R2 objects under the prefix are removed along with the routing rule."
@@ -2062,6 +2065,407 @@ export async function handleNewStaticSitePost(
       kind: hasIndex ? "ok" : "warn",
     }),
   };
+}
+
+/* ─── Static-site file browser ─── */
+
+/**
+ * Whether a content-type can be safely round-tripped through a textarea.
+ * Pulling a binary into a textarea would mangle the bytes; for those
+ * file types the operator can only delete + re-upload via a new zip.
+ */
+function isEditableContentType(ct: string | undefined): boolean {
+  if (!ct) return false;
+  const lower = ct.toLowerCase();
+  if (lower.startsWith("text/")) return true;
+  return (
+    lower.startsWith("application/javascript") ||
+    lower.startsWith("application/json") ||
+    lower.startsWith("application/xml") ||
+    lower.startsWith("image/svg+xml")
+  );
+}
+
+interface SiteFile {
+  /** R2 key relative to the bundle prefix (e.g. `css/main.css`). */
+  relPath: string;
+  /** Full R2 key (`<client_id><base>/<relPath>`). */
+  fullKey: string;
+  size: number;
+  contentType: string | undefined;
+  uploaded: Date | undefined;
+}
+
+/**
+ * List all R2 objects under the bundle's prefix. Pagination handled by
+ * the truncated/cursor loop — typical bundles fit in one page (1000
+ * objects) but the loop is correct for arbitrary size.
+ */
+async function listSiteFiles(env: AppEnv, clientId: string, basePath: string): Promise<SiteFile[]> {
+  if (!env.CONTENT_R2) return [];
+  const prefix = `${clientId}${basePath}/`;
+  const files: SiteFile[] = [];
+  let cursor: string | undefined;
+  for (;;) {
+    const listed = await env.CONTENT_R2.list({ prefix, cursor });
+    for (const obj of listed.objects) {
+      files.push({
+        relPath: obj.key.slice(prefix.length),
+        fullKey: obj.key,
+        size: obj.size,
+        contentType: obj.httpMetadata?.contentType,
+        uploaded: obj.uploaded,
+      });
+    }
+    if (!listed.truncated) break;
+    cursor = listed.cursor;
+  }
+  files.sort((a, b) => a.relPath.localeCompare(b.relPath));
+  return files;
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+/**
+ * Render the file browser for a static-site upload. Shows every R2
+ * object under the bundle's prefix with size, content-type, and
+ * per-file actions (View, Edit, Delete).
+ */
+export function renderSiteFilesPage(opts: {
+  client: ClientRow;
+  match: string;
+  basePath: string;
+  files: SiteFile[];
+}): string {
+  const { client, match, basePath, files } = opts;
+  const totalBytes = files.reduce((acc, f) => acc + f.size, 0);
+  const liveBaseUrl = `https://${client.proxy_domain}${basePath}/`;
+  const rows = files
+    .map((f) => {
+      const ct = f.contentType ?? "—";
+      const editable = isEditableContentType(f.contentType);
+      const editLink = editable
+        ? `<a href="/app/clients/${esc(client.client_id)}/custom-page/file/edit?match=${encodeURIComponent(match)}&path=${encodeURIComponent(f.relPath)}" class="btn-link">Edit</a>`
+        : '<span style="color:var(--fg-muted);font-size:.8rem">binary</span>';
+      const liveLink = `<a href="https://${esc(client.proxy_domain)}${esc(basePath)}/${esc(f.relPath)}" target="_blank" rel="noopener" title="Open on proxy">↗</a>`;
+      const deleteForm = `<form method="POST" action="/app/clients/${esc(client.client_id)}/custom-page/file/delete" style="display:inline" onsubmit="return confirm('Delete ${esc(f.relPath)}? Internal references in other files (HTML, CSS) may break.');">
+          <input type="hidden" name="match" value="${esc(match)}">
+          <input type="hidden" name="path" value="${esc(f.relPath)}">
+          <button type="submit" class="btn-link" style="color:var(--red);background:none;border:none;cursor:pointer;font:inherit;padding:0">Delete</button>
+        </form>`;
+      return `<tr>
+        <td class="mono" style="word-break:break-all">${esc(f.relPath)}</td>
+        <td style="color:var(--fg-muted);font-size:.85rem;white-space:nowrap">${esc(formatBytes(f.size))}</td>
+        <td class="mono" style="color:var(--fg-muted);font-size:.78rem;word-break:break-all">${esc(ct)}</td>
+        <td style="text-align:center;width:1.5rem">${liveLink}</td>
+        <td>${editLink}</td>
+        <td>${deleteForm}</td>
+      </tr>`;
+    })
+    .join("");
+  const body = files.length
+    ? `<table class="data"><thead><tr><th>file</th><th>size</th><th>type</th><th></th><th></th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+    : '<div class="empty">no files in this bundle</div>';
+  return `<div class="crumbs"><a href="/app/clients/${esc(client.client_id)}">← ${esc(client.client_id)}</a></div>
+    <h1>Files <code style="font-size:.7em">${esc(basePath)}/</code> <a href="${esc(liveBaseUrl)}" target="_blank" rel="noopener" style="font-size:.55em;font-weight:400;margin-left:.5rem;text-decoration:none">↗ open live</a></h1>
+    <p class="subtitle">${files.length} file${files.length === 1 ? "" : "s"} · ${esc(formatBytes(totalBytes))} total · stored under R2 prefix <code>${esc(client.client_id)}${esc(basePath)}/</code>. Edit replaces a single file in place; binary files (images, fonts) are delete + re-upload via a new zip.</p>
+    ${body}`;
+}
+
+/**
+ * Form for editing a single file inside a static-site bundle. Same
+ * shape as renderEditCustomPageForm but the path is *within* the
+ * bundle and posts to a different handler.
+ */
+export function renderSiteFileEditForm(opts: {
+  client: ClientRow;
+  match: string;
+  basePath: string;
+  relPath: string;
+  contentType: string;
+  body: string;
+  error: string | null;
+}): string {
+  const liveUrl = `https://${opts.client.proxy_domain}${opts.basePath}/${opts.relPath}`;
+  const filesHref = `/app/clients/${esc(opts.client.client_id)}/custom-page/files?match=${encodeURIComponent(opts.match)}`;
+  return `<div class="crumbs"><a href="/app/clients/${esc(opts.client.client_id)}">← ${esc(opts.client.client_id)}</a> &nbsp;·&nbsp; <a href="${filesHref}">files in ${esc(opts.basePath)}/</a></div>
+    <h1>Edit file <code style="font-size:.7em">${esc(opts.relPath)}</code> <a href="${esc(liveUrl)}" target="_blank" rel="noopener" style="font-size:.55em;font-weight:400;margin-left:.5rem;text-decoration:none">↗ open live</a></h1>
+    <p class="subtitle">File inside <span class="mono">${esc(opts.basePath)}/</span> on <strong>${esc(opts.client.client_id)}</strong>. Content-type: <code>${esc(opts.contentType)}</code> (preserved on save).</p>
+    ${opts.error ? `<div class="error-box">${esc(opts.error)}</div>` : ""}
+    <form class="editor" method="POST" action="/app/clients/${esc(opts.client.client_id)}/custom-page/file/edit">
+      <input type="hidden" name="match" value="${esc(opts.match)}">
+      <input type="hidden" name="path" value="${esc(opts.relPath)}">
+      <label for="path_display">Path (read-only)</label>
+      <input id="path_display" type="text" value="${esc(opts.basePath)}/${esc(opts.relPath)}" disabled>
+      <div class="hint">To rename, delete the file and re-upload the bundle. (Renaming alone breaks internal references — see the design note in the docs.)</div>
+      <label for="body">Contents</label>
+      <textarea id="body" name="body" rows="24" required style="font-family:var(--mono);font-size:.85rem">${esc(opts.body)}</textarea>
+      <div class="hint">On save: R2 object overwritten with the same content-type, KV invalidated, audit_log entry written. The routing rule and other files in the bundle are untouched.</div>
+      <div class="form-actions">
+        <button class="btn btn-primary" type="submit">Save</button>
+        <a class="btn" href="${filesHref}">Cancel</a>
+      </div>
+    </form>`;
+}
+
+/* ─── Static-site file-browser handlers ─── */
+
+/**
+ * Look up the static-site route, list its R2 contents, return data for
+ * the file-browser page render.
+ */
+export async function handleSiteFilesGet(
+  env: AppEnv,
+  user: User,
+  clientId: string,
+  matchParam: string,
+): Promise<Response | { client: ClientRow; match: string; basePath: string; files: SiteFile[] }> {
+  const client = await loadVisibleClient(env, user, clientId);
+  if (!client) return new Response("Not found", { status: 404 });
+  if (!env.CONTENT_R2) {
+    return new Response("CONTENT_R2 binding not configured", { status: 500 });
+  }
+  const cfg = JSON.parse(client.config_json) as Record<string, unknown>;
+  const entry = listCustomPages(cfg).find((e) => e.kind === "site" && e.match === matchParam);
+  if (!entry || !entry.literalPath) {
+    return new Response("Static-site route not found", { status: 404 });
+  }
+  const files = await listSiteFiles(env, clientId, entry.literalPath);
+  return { client, match: entry.match, basePath: entry.literalPath, files };
+}
+
+/**
+ * Load a single file's body from R2 for the edit-form GET. Refuses
+ * binary content-types so we never try to dump a PNG into a textarea.
+ */
+export async function handleSiteFileEditGet(
+  env: AppEnv,
+  user: User,
+  clientId: string,
+  matchParam: string,
+  relPath: string,
+): Promise<
+  | Response
+  | {
+      client: ClientRow;
+      match: string;
+      basePath: string;
+      relPath: string;
+      contentType: string;
+      body: string;
+    }
+> {
+  const client = await loadVisibleClient(env, user, clientId);
+  if (!client) return new Response("Not found", { status: 404 });
+  if (!env.CONTENT_R2) {
+    return new Response("CONTENT_R2 binding not configured", { status: 500 });
+  }
+  if (!relPath || relPath.includes("..") || relPath.startsWith("/")) {
+    return new Response("Invalid file path", { status: 400 });
+  }
+  const cfg = JSON.parse(client.config_json) as Record<string, unknown>;
+  const entry = listCustomPages(cfg).find((e) => e.kind === "site" && e.match === matchParam);
+  if (!entry || !entry.literalPath) {
+    return new Response("Static-site route not found", { status: 404 });
+  }
+  const fullKey = `${clientId}${entry.literalPath}/${relPath}`;
+  const obj = await env.CONTENT_R2.get(fullKey);
+  if (!obj) return new Response("File not found", { status: 404 });
+  const ct = obj.httpMetadata?.contentType ?? "application/octet-stream";
+  if (!isEditableContentType(ct)) {
+    return new Response(
+      `File content-type "${ct}" is not editable as text — delete and re-upload to change.`,
+      { status: 400 },
+    );
+  }
+  const body = await obj.text();
+  return {
+    client,
+    match: entry.match,
+    basePath: entry.literalPath,
+    relPath,
+    contentType: ct,
+    body,
+  };
+}
+
+/**
+ * Save a single file's new contents back to R2 at the same key,
+ * preserving the original content-type.
+ */
+export async function handleSiteFileEditPost(
+  request: Request,
+  env: AppEnv,
+  url: URL,
+  user: User,
+  clientId: string,
+): Promise<{
+  response?: Response;
+  rerenderError?: {
+    client: ClientRow;
+    match: string;
+    basePath: string;
+    relPath: string;
+    contentType: string;
+    body: string;
+    error: string;
+  };
+}> {
+  const csrf = checkCsrf(request, url);
+  if (csrf) return { response: csrf };
+  const client = await loadVisibleClient(env, user, clientId);
+  if (!client) return { response: new Response("Not found", { status: 404 }) };
+  if (!env.CONTENT_R2) {
+    return { response: new Response("CONTENT_R2 binding not configured", { status: 500 }) };
+  }
+  const form = await request.formData();
+  const matchValue = String(form.get("match") ?? "");
+  const relPath = String(form.get("path") ?? "");
+  const body = String(form.get("body") ?? "");
+
+  if (!relPath || relPath.includes("..") || relPath.startsWith("/")) {
+    return {
+      response: flashRedirect(`/app/clients/${clientId}`, {
+        text: "Invalid file path.",
+        kind: "err",
+      }),
+    };
+  }
+  const cfg = JSON.parse(client.config_json) as Record<string, unknown>;
+  const entry = listCustomPages(cfg).find((e) => e.kind === "site" && e.match === matchValue);
+  if (!entry || !entry.literalPath) {
+    return {
+      response: flashRedirect(`/app/clients/${clientId}`, {
+        text: `No static-site route found for match=${matchValue}`,
+        kind: "err",
+      }),
+    };
+  }
+  const fullKey = `${clientId}${entry.literalPath}/${relPath}`;
+  const existing = await env.CONTENT_R2.get(fullKey);
+  if (!existing) {
+    return {
+      response: flashRedirect(`/app/clients/${clientId}`, {
+        text: `File ${relPath} not found in bundle ${entry.literalPath}`,
+        kind: "err",
+      }),
+    };
+  }
+  const ct = existing.httpMetadata?.contentType ?? "application/octet-stream";
+  if (!isEditableContentType(ct)) {
+    return {
+      response: flashRedirect(`/app/clients/${clientId}`, {
+        text: `File content-type "${ct}" is not editable as text.`,
+        kind: "err",
+      }),
+    };
+  }
+  if (new TextEncoder().encode(body).byteLength > CUSTOM_PAGE_MAX_HTML_BYTES) {
+    return {
+      rerenderError: {
+        client,
+        match: entry.match,
+        basePath: entry.literalPath,
+        relPath,
+        contentType: ct,
+        body,
+        error: `Body exceeds ${CUSTOM_PAGE_MAX_HTML_BYTES} bytes.`,
+      },
+    };
+  }
+
+  await env.CONTENT_R2.put(fullKey, body, {
+    httpMetadata: { contentType: ct },
+    customMetadata: {
+      uploaded_by: user.email,
+      uploaded_at: new Date().toISOString(),
+    },
+  });
+  await invalidateKv(env, clientId, client.proxy_domain);
+  const actor = actorOf(user, request);
+  await writeAudit(env, {
+    client_id: clientId,
+    actor_email: actor.user.email,
+    actor_ip: actor.ip,
+    event_type: "config_update",
+    before_hash: null,
+    after_hash: null,
+    previous_status: client.status,
+    new_status: client.status,
+    notes: `updated site file ${entry.literalPath}/${relPath} (R2 key ${fullKey})`,
+  });
+
+  return {
+    response: flashRedirect(
+      `/app/clients/${clientId}/custom-page/files?match=${encodeURIComponent(entry.match)}`,
+      { text: `Saved ${entry.literalPath}/${relPath}.`, kind: "ok" },
+    ),
+  };
+}
+
+/**
+ * Delete a single file from a static-site bundle. The route entry is
+ * untouched — only the R2 object is removed. Caller-side confirm
+ * dialog warns about broken internal references.
+ */
+export async function handleSiteFileDeletePost(
+  request: Request,
+  env: AppEnv,
+  url: URL,
+  user: User,
+  clientId: string,
+): Promise<Response> {
+  const csrf = checkCsrf(request, url);
+  if (csrf) return csrf;
+  const client = await loadVisibleClient(env, user, clientId);
+  if (!client) return new Response("Not found", { status: 404 });
+  if (!env.CONTENT_R2) {
+    return new Response("CONTENT_R2 binding not configured", { status: 500 });
+  }
+  const form = await request.formData();
+  const matchValue = String(form.get("match") ?? "");
+  const relPath = String(form.get("path") ?? "");
+  if (!relPath || relPath.includes("..") || relPath.startsWith("/")) {
+    return flashRedirect(`/app/clients/${clientId}`, {
+      text: "Invalid file path.",
+      kind: "err",
+    });
+  }
+  const cfg = JSON.parse(client.config_json) as Record<string, unknown>;
+  const entry = listCustomPages(cfg).find((e) => e.kind === "site" && e.match === matchValue);
+  if (!entry || !entry.literalPath) {
+    return flashRedirect(`/app/clients/${clientId}`, {
+      text: `No static-site route found for match=${matchValue}`,
+      kind: "err",
+    });
+  }
+  const fullKey = `${clientId}${entry.literalPath}/${relPath}`;
+  try {
+    await env.CONTENT_R2.delete(fullKey);
+  } catch {
+    /* best-effort */
+  }
+  await invalidateKv(env, clientId, client.proxy_domain);
+  const actor = actorOf(user, request);
+  await writeAudit(env, {
+    client_id: clientId,
+    actor_email: actor.user.email,
+    actor_ip: actor.ip,
+    event_type: "config_update",
+    before_hash: null,
+    after_hash: null,
+    previous_status: client.status,
+    new_status: client.status,
+    notes: `deleted site file ${entry.literalPath}/${relPath}`,
+  });
+  return flashRedirect(
+    `/app/clients/${clientId}/custom-page/files?match=${encodeURIComponent(entry.match)}`,
+    { text: `Deleted ${entry.literalPath}/${relPath}.`, kind: "ok" },
+  );
 }
 
 /**
