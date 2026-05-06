@@ -421,3 +421,46 @@ describe("assertConfigInvariants — in_place mode", () => {
     expect(() => assertConfigInvariants(parsed)).not.toThrow();
   });
 });
+
+describe("assertConfigInvariants — in_place mode with resolve_override", () => {
+  it("accepts origin host == proxy_domain when resolve_override is set", () => {
+    // Managed-WP-host case: the WP server has a cert + vhost bound to
+    // the customer's domain. We fetch via the public hostname (so
+    // SNI + Host match) and override DNS resolution to a separate
+    // record (so we don't loop through our own Workers Route).
+    const parsed = parseFixture((cfg) => {
+      cfg.mode = "in_place";
+      cfg.proxy_domain = "acme.com";
+      cfg.source_domain = "acme.com";
+      (cfg.routing as Array<Record<string, unknown>>) = [
+        {
+          match: "^/.*",
+          type: "proxy",
+          origin: "https://acme.com",
+          origin_auth: { type: "none" },
+          resolve_override: "origin.acme.com",
+        },
+      ];
+    });
+    expect(() => assertConfigInvariants(parsed)).not.toThrow();
+  });
+
+  it("rejects when resolve_override equals proxy_domain (loop guard)", () => {
+    const parsed = parseFixture((cfg) => {
+      cfg.mode = "in_place";
+      cfg.proxy_domain = "acme.com";
+      cfg.source_domain = "acme.com";
+      (cfg.routing as Array<Record<string, unknown>>) = [
+        {
+          match: "^/.*",
+          type: "proxy",
+          origin: "https://acme.com",
+          origin_auth: { type: "none" },
+          resolve_override: "acme.com",
+        },
+      ];
+    });
+    expect(() => assertConfigInvariants(parsed)).toThrow(/resolve_override .* equals proxy_domain/);
+  });
+
+});
