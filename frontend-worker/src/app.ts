@@ -193,7 +193,7 @@ function statusPill(status: string): string {
 /* ─── App layout (sidebar nav) ─── */
 
 export const APP_STYLE = `
-.app-layout{display:grid;grid-template-columns:220px 1fr;min-height:calc(100vh - 56px - 80px)}
+.app-layout{display:grid;grid-template-columns:220px 1fr;min-height:calc(100vh - 80px - 80px)}
 .app-sidebar{background:var(--bg-sidebar,#f4f4f5);border-right:1px solid var(--border);padding:1.25rem .75rem;display:flex;flex-direction:column}
 @media (prefers-color-scheme:dark){.app-sidebar{background:#0d0d10}}
 .app-sidebar a{display:block;padding:.45rem .75rem;border-radius:var(--radius);color:var(--fg);text-decoration:none}
