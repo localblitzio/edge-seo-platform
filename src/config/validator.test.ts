@@ -324,3 +324,98 @@ describe("assertConfigInvariants — reserved subdomain on default zone", () => 
     expect(() => assertConfigInvariants(parsed)).not.toThrow();
   });
 });
+
+describe("assertConfigInvariants — in_place mode", () => {
+  it("accepts in_place with an explicit non-overlapping origin", () => {
+    const parsed = parseFixture((cfg) => {
+      cfg.mode = "in_place";
+      cfg.proxy_domain = "www.acme.com";
+      cfg.source_domain = "www.acme.com";
+      (cfg.routing as Array<Record<string, unknown>>) = [
+        {
+          match: "^/.*",
+          type: "proxy",
+          origin: "https://origin.acme.com",
+          origin_auth: { type: "none" },
+        },
+      ];
+    });
+    expect(() => assertConfigInvariants(parsed)).not.toThrow();
+  });
+
+  it("rejects in_place when a proxy route has no origin", () => {
+    const parsed = parseFixture((cfg) => {
+      cfg.mode = "in_place";
+      cfg.proxy_domain = "www.acme.com";
+      cfg.source_domain = "www.acme.com";
+      (cfg.routing as Array<Record<string, unknown>>) = [
+        { match: "^/.*", type: "proxy", origin_auth: { type: "none" } },
+      ];
+    });
+    expect(() => assertConfigInvariants(parsed)).toThrow(/origin is required when mode="in_place"/);
+  });
+
+  it("rejects in_place when origin host equals proxy_domain (loop guard)", () => {
+    const parsed = parseFixture((cfg) => {
+      cfg.mode = "in_place";
+      cfg.proxy_domain = "www.acme.com";
+      cfg.source_domain = "www.acme.com";
+      (cfg.routing as Array<Record<string, unknown>>) = [
+        {
+          match: "^/.*",
+          type: "proxy",
+          origin: "https://www.acme.com",
+          origin_auth: { type: "none" },
+        },
+      ];
+    });
+    expect(() => assertConfigInvariants(parsed)).toThrow(/in_place mode would loop/);
+  });
+
+  it("matches the loop-guard case-insensitively", () => {
+    const parsed = parseFixture((cfg) => {
+      cfg.mode = "in_place";
+      cfg.proxy_domain = "WWW.Acme.COM";
+      cfg.source_domain = "WWW.Acme.COM";
+      (cfg.routing as Array<Record<string, unknown>>) = [
+        {
+          match: "^/.*",
+          type: "proxy",
+          origin: "https://www.acme.com/",
+          origin_auth: { type: "none" },
+        },
+      ];
+    });
+    expect(() => assertConfigInvariants(parsed)).toThrow(/in_place mode would loop/);
+  });
+
+  it("rejects an invalid origin URL in in_place mode", () => {
+    const parsed = parseFixture((cfg) => {
+      cfg.mode = "in_place";
+      cfg.proxy_domain = "www.acme.com";
+      cfg.source_domain = "www.acme.com";
+      (cfg.routing as Array<Record<string, unknown>>) = [
+        {
+          match: "^/.*",
+          type: "proxy",
+          origin: "not a url",
+          origin_auth: { type: "none" },
+        },
+      ];
+    });
+    expect(() => assertConfigInvariants(parsed)).toThrow(/not a valid URL/);
+  });
+
+  it("does NOT apply the in_place checks when mode is subdomain_proxy", () => {
+    // Subdomain-proxy can fall through to the implicit origin derived
+    // from source_domain — origin field is optional, no loop possible
+    // since proxy_domain != source_domain by design.
+    const parsed = parseFixture((cfg) => {
+      cfg.mode = "subdomain_proxy";
+      (cfg.routing as Array<Record<string, unknown>>) = [
+        { match: "^/.*", type: "proxy", origin_auth: { type: "none" } },
+      ];
+    });
+    expect(() => assertConfigInvariants(parsed)).not.toThrow();
+  });
+});

@@ -35,7 +35,47 @@ export function assertConfigInvariants(config: ClientConfig): ClientConfig {
   assertRegexInvariants(config);
   assertJsonLdSerializability(config);
   assertReservedSubdomain(config);
+  assertInPlaceModeInvariants(config);
   return config;
+}
+
+/**
+ * In-place mode requires:
+ *   1. Every proxy route MUST set an explicit `origin` (we can't derive
+ *      one from `source_domain`, because in this mode `source_domain`
+ *      is the customer's own host — fetching it would loop the worker).
+ *   2. Each `origin` host MUST differ from the customer's domain. If
+ *      `origin` resolves to the same host the worker is intercepting,
+ *      every request triggers another route hit on the same worker —
+ *      infinite recursion until the runtime aborts the subrequest
+ *      chain. Reject at config-write time.
+ *
+ * `subdomain_proxy` (the default) skips both checks: routes can fall
+ * through to `https://${source_domain}` and the host always differs
+ * from `proxy_domain`.
+ */
+function assertInPlaceModeInvariants(config: ClientConfig): void {
+  if (config.mode !== "in_place") return;
+  const proxyHostLower = config.proxy_domain.toLowerCase();
+  config.routing.forEach((rule, i) => {
+    if (rule.type !== "proxy") return;
+    if (!rule.origin) {
+      throw new ConfigValidationError(
+        `routing[${i}].origin is required when mode="in_place" — there's no implicit origin in this mode`,
+      );
+    }
+    let originHost: string;
+    try {
+      originHost = new URL(rule.origin).hostname.toLowerCase();
+    } catch {
+      throw new ConfigValidationError(`routing[${i}].origin is not a valid URL: ${rule.origin}`);
+    }
+    if (originHost === proxyHostLower) {
+      throw new ConfigValidationError(
+        `routing[${i}].origin host (${originHost}) equals proxy_domain (${proxyHostLower}); in_place mode would loop. Use a separate origin host like origin.${proxyHostLower}.`,
+      );
+    }
+  });
 }
 
 /**

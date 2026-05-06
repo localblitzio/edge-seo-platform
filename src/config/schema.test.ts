@@ -104,6 +104,26 @@ describe("ClientConfig schema", () => {
     expect(result.text_rewrites).toEqual([]);
   });
 
+  it("mode: defaults to 'subdomain_proxy' when omitted (back-compat)", () => {
+    // Existing configs in production don't carry `mode`. Loading must
+    // not blow up — they should default to subdomain_proxy.
+    const { mode: _m, ...cfg } = validLanternCrestConfig() as Record<string, unknown>;
+    const result = ClientConfig.parse(cfg);
+    expect(result.mode).toBe("subdomain_proxy");
+  });
+
+  it("mode: accepts 'in_place'", () => {
+    const cfg = validLanternCrestConfig() as Record<string, unknown>;
+    cfg.mode = "in_place";
+    expect(ClientConfig.safeParse(cfg).success).toBe(true);
+  });
+
+  it("mode: rejects unknown values", () => {
+    const cfg = validLanternCrestConfig() as Record<string, unknown>;
+    cfg.mode = "passthrough";
+    expect(ClientConfig.safeParse(cfg).success).toBe(false);
+  });
+
   it("rejects an unknown schema_version", () => {
     const cfg = validLanternCrestConfig() as Record<string, unknown>;
     cfg.schema_version = 2;

@@ -199,8 +199,17 @@ async function runPipeline(
         headers: { "content-type": "text/plain; charset=utf-8" },
       });
     } else {
-      response = rewriteResponseCookies(upstream, matched.rule, config);
-      response = rewriteResponseLocation(response, matched.rule, config);
+      // In-place mode: customer's public host == origin host, so no
+      // cookie-domain or Location-host rewriting is needed (or correct
+      // — rewriting would be a no-op at best, a corruption at worst).
+      // Subdomain-proxy mode: rewrite both so cookies stay on the proxy
+      // domain and origin-issued absolute redirects stay sticky.
+      if (config.mode === "in_place") {
+        response = upstream;
+      } else {
+        response = rewriteResponseCookies(upstream, matched.rule, config);
+        response = rewriteResponseLocation(response, matched.rule, config);
+      }
     }
   } else {
     rctx.pipeline_stage = "custom_page";
