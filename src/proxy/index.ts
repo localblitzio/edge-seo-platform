@@ -23,11 +23,29 @@ export interface FetchFromOriginArgs {
   env: Env;
 }
 
-/** Init for both global fetch and the mTLS binding's fetch. */
-const FETCH_INIT = {
+/** Base init for both global fetch and the mTLS binding's fetch. */
+const BASE_FETCH_INIT = {
   // Subrequest cache disabled — caching happens at the response layer (§9).
   cf: { cacheTtl: 0, cacheEverything: false },
 } as const;
+
+/**
+ * Build per-request fetch init. When the route specifies
+ * `resolve_override`, layer it into `cf` so the runtime resolves IPs
+ * via the override hostname while keeping the URL's host for SNI +
+ * Host header. See route.resolve_override schema docs for the use case.
+ */
+function fetchInitFor(route: RouteRule): RequestInit {
+  if (route.type !== "proxy" || !route.resolve_override) {
+    return BASE_FETCH_INIT;
+  }
+  return {
+    cf: {
+      ...BASE_FETCH_INIT.cf,
+      resolveOverride: route.resolve_override,
+    },
+  } as unknown as RequestInit;
+}
 
 /**
  * Fetch the upstream response for a proxied route.
@@ -55,19 +73,21 @@ export async function fetchFromOrigin(args: FetchFromOriginArgs): Promise<Respon
     env,
   });
 
+  const fetchInit = fetchInitFor(route);
+
   // mTLS routes use the Workers mTLS binding's fetch (§6.5 step 7).
   // The binding is keyed in `env` by the rule's `cert_secret_name`.
   if (route.origin_auth.type === "mtls") {
     const binding = resolveMtlsBinding(env, route.origin_auth.cert_secret_name);
     try {
-      return await binding.fetch(upstream, FETCH_INIT);
+      return await binding.fetch(upstream, fetchInit);
     } catch (e) {
       throw new OriginFetchError(origin, e);
     }
   }
 
   try {
-    return await fetch(upstream, FETCH_INIT);
+    return await fetch(upstream, fetchInit);
   } catch (e) {
     throw new OriginFetchError(origin, e);
   }
