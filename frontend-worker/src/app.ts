@@ -43,6 +43,22 @@ export interface AppEnv {
   /** Custom-page HTML uploads. Only present on workers configured for
    *  the write surface (admin/frontend), not on read-only auth flows. */
   CONTENT_R2?: R2Bucket;
+  /**
+   * Scoped Cloudflare API token used to automate in_place onboarding —
+   * creates the `origin.<domain>` DNS record and registers the
+   * Workers Route on the customer's zone. Must have Zone:DNS:Edit +
+   * Zone:Workers Routes:Edit on the customer's zone (or "All zones"
+   * for the account). Set via `wrangler secret put CF_API_TOKEN`.
+   * When absent, the auto-onboard endpoint returns a clear error and
+   * the operator falls back to the manual flow.
+   */
+  CF_API_TOKEN?: string;
+  /**
+   * Worker script name to bind new Workers Routes to during
+   * in_place onboarding. Defaults to the staging script when unset.
+   * Override via `wrangler.toml` `[vars]` to switch environments.
+   */
+  PROXY_WORKER_SCRIPT?: string;
 }
 
 export interface ClientRow {
@@ -1009,15 +1025,63 @@ function renderInPlaceSetupCard(client: ClientRow): string {
   // assume that — the operator confirms the zone in their dashboard.
   const zoneGuess = domain.replace(/^www\./i, "");
   const wranglerSnippet = `[[routes]]\npattern = "${domain}/*"\nzone_name = "${zoneGuess}"`;
+  // Pull the resolve_override hostname (typically `origin.<domain>`)
+  // and origin URL out of the routing array so the auto-onboard form
+  // can default sensibly. The form lets the operator override.
+  let cfg: Record<string, unknown>;
+  try {
+    cfg = JSON.parse(client.config_json) as Record<string, unknown>;
+  } catch {
+    cfg = {};
+  }
+  const routing = (cfg.routing as Array<Record<string, unknown>> | undefined) ?? [];
+  const firstProxy = routing.find((r) => r.type === "proxy");
+  const resolveOverride =
+    typeof firstProxy?.resolve_override === "string"
+      ? firstProxy.resolve_override
+      : `origin.${zoneGuess}`;
   return `<div class="card" style="margin-bottom:1rem;border-left:3px solid var(--cat-routes,var(--accent))">
     <h2 style="margin:0 0 .6rem;font-size:1.05rem;font-weight:600">Workers Route setup</h2>
-    <p style="margin:0 0 .85rem;color:var(--fg-muted);font-size:.9rem">This client is in <strong>in-place mode</strong>. For traffic on <code>${esc(domain)}</code> to reach this worker, a Workers Route must be registered on the same Cloudflare account that owns this worker. Two options:</p>
-    <ol style="margin:0 0 1rem;padding-left:1.4rem;font-size:.9rem;line-height:1.55">
-      <li><strong>Wrangler config:</strong> add the route below to <code>wrangler.toml</code> (under the env that runs this worker), commit, redeploy.</li>
-      <li><strong>Cloudflare dashboard:</strong> Workers &amp; Pages → this worker → Settings → Triggers → Add Custom Domain or Route, with pattern <code>${esc(domain)}/*</code>.</li>
-    </ol>
-    <pre class="json-block" style="margin:0">${esc(wranglerSnippet)}</pre>
-    <p class="field-hint" style="margin:.6rem 0 0">If <code>${esc(zoneGuess)}</code> isn't the actual zone name on your account, edit the snippet — the dashboard's zone-name dropdown will show what's available. The customer's origin server must be reachable at the routing rule's <code>origin</code> URL (typically a <em>DNS-only / grey-cloud</em> record like <code>origin.${esc(zoneGuess)}</code>) so the proxy fetch doesn't loop back through this worker.</p>
+    <p style="margin:0 0 .85rem;color:var(--fg-muted);font-size:.9rem">This client is in <strong>in-place mode</strong>. For traffic on <code>${esc(domain)}</code> to reach this worker, two Cloudflare resources must exist on the customer's zone: a DNS-only record at <code>${esc(resolveOverride)}</code> (so the worker can fetch origin without looping) and a Workers Route on <code>${esc(domain)}/*</code>.</p>
+    <div class="form-section" style="margin:0 0 1rem;background:var(--bg);border:1px dashed var(--border-strong)">
+      <h2 style="margin:0 0 .6rem;font-size:.95rem;font-weight:600">Auto-register on Cloudflare</h2>
+      <p class="field-hint" style="margin:0 0 .85rem">Provide the customer's origin server IP. We'll create the DNS record (DNS-only / grey-cloud) and register the Workers Route via Cloudflare's API in one shot. Idempotent: re-running with the same inputs is safe — existing records are detected and skipped.</p>
+      <form method="POST" action="/app/clients/${esc(client.client_id)}/cf-install" style="display:flex;flex-direction:column;gap:.6rem">
+        <div class="form-grid">
+          <div>
+            <label for="cf_origin_ip" style="font-weight:600;font-size:.78rem;display:block;margin-bottom:.2rem">Origin server IP</label>
+            <input id="cf_origin_ip" name="origin_ip" type="text" required placeholder="144.202.74.213" pattern="^[0-9]{1,3}(\\.[0-9]{1,3}){3}$">
+            <div class="field-hint">IPv4 address of the customer's actual server (behind today's CF proxy).</div>
+          </div>
+          <div>
+            <label for="cf_resolve_override" style="font-weight:600;font-size:.78rem;display:block;margin-bottom:.2rem">DNS hostname</label>
+            <input id="cf_resolve_override" name="resolve_override" type="text" required value="${esc(resolveOverride)}" pattern="^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$">
+            <div class="field-hint">Bare hostname for the new DNS record. Default <code>origin.&lt;domain&gt;</code>; matches the route's <code>resolve_override</code> field.</div>
+          </div>
+          <div>
+            <label for="cf_zone_name" style="font-weight:600;font-size:.78rem;display:block;margin-bottom:.2rem">Cloudflare zone name</label>
+            <input id="cf_zone_name" name="zone_name" type="text" required value="${esc(zoneGuess)}">
+            <div class="field-hint">Zone the records get attached to. Default <code>&lt;domain without leading www.&gt;</code>.</div>
+          </div>
+          <div>
+            <label for="cf_route_pattern" style="font-weight:600;font-size:.78rem;display:block;margin-bottom:.2rem">Route pattern</label>
+            <input id="cf_route_pattern" name="route_pattern" type="text" required value="${esc(domain)}/*">
+            <div class="field-hint">Default <code>&lt;domain&gt;/*</code>. WordPress's www→apex redirect handles www.</div>
+          </div>
+        </div>
+        <div class="form-actions" style="margin:0">
+          <button class="btn btn-primary" type="submit">Register on Cloudflare</button>
+        </div>
+      </form>
+    </div>
+    <details class="section" style="margin:0 0 0;background:var(--bg);border:1px solid var(--border)">
+      <summary style="font-size:.85rem">Manual setup snippets <span class="count">fallback</span></summary>
+      <div class="body">
+        <p style="margin:0 0 .6rem;font-size:.85rem;color:var(--fg-muted)">Use these if auto-register fails or if your token doesn't have the necessary scopes:</p>
+        <pre class="json-block" style="margin:0">${esc(wranglerSnippet)}</pre>
+        <p class="field-hint" style="margin:.6rem 0 0">Plus add a DNS-only A record <code>${esc(resolveOverride)}</code> pointing at the origin IP via the Cloudflare dashboard.</p>
+      </div>
+    </details>
   </div>`;
 }
 
@@ -1731,6 +1795,170 @@ export async function handleEditClientPost(
       kind: "ok",
     }),
   };
+}
+
+/**
+ * Auto-register a customer's domain on Cloudflare during in_place
+ * onboarding. Idempotent: pre-checks for existing DNS record + route
+ * and skips creation if found, returning a "<n> created, <m> existed"
+ * summary. Falls back to a clear error if `CF_API_TOKEN` isn't set.
+ */
+export async function handleCloudflareInstallPost(
+  request: Request,
+  env: AppEnv,
+  url: URL,
+  user: User,
+  clientId: string,
+): Promise<Response> {
+  const csrf = checkCsrf(request, url);
+  if (csrf) return csrf;
+  const client = await loadVisibleClient(env, user, clientId);
+  if (!client) return new Response("Not found", { status: 404 });
+  if (!env.CF_API_TOKEN) {
+    return flashRedirect(`/app/clients/${clientId}`, {
+      text: "CF_API_TOKEN secret not set on this worker. Use the manual snippets below to register, or set the secret with `wrangler secret put CF_API_TOKEN`.",
+      kind: "err",
+    });
+  }
+  const cfg = JSON.parse(client.config_json) as Record<string, unknown>;
+  if (cfg.mode !== "in_place") {
+    return flashRedirect(`/app/clients/${clientId}`, {
+      text: "Auto-register only applies to in_place clients.",
+      kind: "err",
+    });
+  }
+  const form = await request.formData();
+  const originIp = String(form.get("origin_ip") ?? "").trim();
+  const resolveOverride = String(form.get("resolve_override") ?? "").trim();
+  const zoneName = String(form.get("zone_name") ?? "").trim();
+  const routePattern = String(form.get("route_pattern") ?? "").trim();
+
+  // Validate inputs.
+  if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(originIp)) {
+    return flashRedirect(`/app/clients/${clientId}`, {
+      text: `Origin IP must be a valid IPv4 address (got: ${originIp}).`,
+      kind: "err",
+    });
+  }
+  if (!/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(resolveOverride)) {
+    return flashRedirect(`/app/clients/${clientId}`, {
+      text: `DNS hostname is malformed: ${resolveOverride}`,
+      kind: "err",
+    });
+  }
+  if (!zoneName || !routePattern) {
+    return flashRedirect(`/app/clients/${clientId}`, {
+      text: "Zone name and route pattern are required.",
+      kind: "err",
+    });
+  }
+  // The DNS hostname must end in `.<zone>` so the record actually
+  // belongs to the zone we're touching. Cloudflare would reject the
+  // creation with code 1004 otherwise — this is just a friendlier
+  // error.
+  if (!resolveOverride.endsWith(`.${zoneName}`) && resolveOverride !== zoneName) {
+    return flashRedirect(`/app/clients/${clientId}`, {
+      text: `DNS hostname "${resolveOverride}" doesn't belong to zone "${zoneName}".`,
+      kind: "err",
+    });
+  }
+
+  const token = env.CF_API_TOKEN;
+  const scriptName = env.PROXY_WORKER_SCRIPT ?? "edge-seo-platform-staging";
+
+  // Lazy-import to keep the module graph minimal — these helpers only
+  // run on this rare endpoint.
+  const cf = await import("./cloudflare-api.js");
+
+  let created = 0;
+  let existed = 0;
+  const notes: string[] = [];
+
+  try {
+    const zone = await cf.findZoneByName(token, zoneName);
+    if (!zone) {
+      return flashRedirect(`/app/clients/${clientId}`, {
+        text: `Zone "${zoneName}" not found on this Cloudflare account (or token can't see it). Check Zone Resources scope on the API token.`,
+        kind: "err",
+      });
+    }
+
+    // DNS record (idempotent).
+    const fqdn = resolveOverride;
+    const existingDns = await cf.findDnsRecord(token, zone.id, fqdn);
+    if (existingDns) {
+      existed += 1;
+      notes.push(`DNS ${fqdn} already exists (id ${existingDns.id})`);
+      if (existingDns.content !== originIp || existingDns.proxied) {
+        notes.push(
+          `WARNING: existing DNS points at ${existingDns.content} (proxied=${existingDns.proxied}); expected ${originIp} DNS-only. Did NOT modify.`,
+        );
+      }
+    } else {
+      const newDns = await cf.createDnsRecord(token, zone.id, {
+        type: "A",
+        name: fqdn,
+        content: originIp,
+        proxied: false,
+        comment: `auto-onboarded for client ${clientId}`,
+      });
+      created += 1;
+      notes.push(`DNS ${fqdn} → ${originIp} created (id ${newDns.id})`);
+    }
+
+    // Workers Route (idempotent).
+    const routes = await cf.listWorkersRoutes(token, zone.id);
+    const existingRoute = routes.find((r) => r.pattern === routePattern);
+    if (existingRoute) {
+      existed += 1;
+      notes.push(`Route ${routePattern} → ${existingRoute.script} already exists`);
+      if (existingRoute.script !== scriptName) {
+        notes.push(
+          `WARNING: existing route points at ${existingRoute.script}; expected ${scriptName}. Did NOT modify.`,
+        );
+      }
+    } else {
+      const newRoute = await cf.createWorkersRoute(token, zone.id, {
+        pattern: routePattern,
+        script: scriptName,
+      });
+      created += 1;
+      notes.push(`Route ${routePattern} → ${scriptName} created (id ${newRoute.id})`);
+    }
+  } catch (e) {
+    if (e instanceof cf.CloudflareApiError) {
+      return flashRedirect(`/app/clients/${clientId}`, {
+        text: `Cloudflare API error: ${e.message}`,
+        kind: "err",
+      });
+    }
+    return flashRedirect(`/app/clients/${clientId}`, {
+      text: `Unexpected error: ${(e as Error).message}`,
+      kind: "err",
+    });
+  }
+
+  // Audit + cache invalidate so the worker reloads config (the route
+  // change doesn't affect the config, but the operator may have made
+  // adjacent edits and a fresh load avoids a stale-cache footgun).
+  await invalidateKv(env, clientId, client.proxy_domain);
+  const actor = actorOf(user, request);
+  await writeAudit(env, {
+    client_id: clientId,
+    actor_email: actor.user.email,
+    actor_ip: actor.ip,
+    event_type: "config_update",
+    before_hash: null,
+    after_hash: null,
+    previous_status: client.status,
+    new_status: client.status,
+    notes: `cf auto-onboard: ${created} created, ${existed} existed; ${notes.join("; ")}`,
+  });
+
+  return flashRedirect(`/app/clients/${clientId}`, {
+    text: `Cloudflare resources: ${created} created, ${existed} already existed. ${notes.join(" · ")}`,
+    kind: "ok",
+  });
 }
 
 export async function handleStatusPost(
