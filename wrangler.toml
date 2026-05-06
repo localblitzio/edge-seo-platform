@@ -53,6 +53,14 @@ workers_dev = true
 pattern = "*.localpage.us.com/*"
 zone_name = "localpage.us.com"
 
+# Second wildcard zone — *.site.localblitz.io. Same model as
+# localpage.us.com: every subdomain matched by the wildcard DNS
+# record is dispatched to this worker. Clients are addressed as
+# <client_id>.site.localblitz.io.
+[[env.staging.routes]]
+pattern = "*.site.localblitz.io/*"
+zone_name = "localblitz.io"
+
 # In-place mode: 404-media.com client. Apex only — WordPress's
 # built-in www → apex redirect handles www traffic before it would
 # reach our worker (since the loader looks up config by Host header
@@ -62,6 +70,15 @@ zone_name = "localpage.us.com"
 [[env.staging.routes]]
 pattern = "404-media.com/*"
 zone_name = "404-media.com"
+
+# In-place mode: seoinencinitas.com client. Pages-hosted (origin
+# fetched from seoinencinitas.pages.dev — no resolve_override
+# needed). Routes registered out-of-band via the admin auto-onboard
+# form get clobbered by `wrangler deploy` route reconciliation, so
+# every in_place client must also be listed here for persistence.
+[[env.staging.routes]]
+pattern = "seoinencinitas.com/*"
+zone_name = "seoinencinitas.com"
 
 [[env.staging.kv_namespaces]]
 binding = "CONFIG_KV"
