@@ -240,8 +240,32 @@ export const ClientConfig = z.object({
    *     skipped because the customer-facing host equals the source.
    */
   mode: z.enum(["subdomain_proxy", "in_place"]).default("subdomain_proxy"),
-  proxy_domain: z.string(),
-  source_domain: z.string(),
+  /**
+   * Bare DNS hostname — `acme.com`, `www.acme.com`, `lp.acme.co.uk`. NO
+   * scheme (`https://`), NO trailing path (`/`), NO port. The schema
+   * regex below catches the most common operator mistake (pasting a
+   * full URL into the field) so the loop guard in validator.ts can do
+   * a simple host-equality check.
+   *
+   * Allowed: lowercase letters, digits, hyphens, dots. Each label
+   * 1–63 chars. Total length ≤ 253 chars (DNS limit).
+   */
+  proxy_domain: z
+    .string()
+    .min(1)
+    .max(253)
+    .regex(
+      /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/,
+      "must be a bare hostname (no scheme, port, or path) — e.g. www.acme.com",
+    ),
+  source_domain: z
+    .string()
+    .min(1)
+    .max(253)
+    .regex(
+      /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/,
+      "must be a bare hostname (no scheme, port, or path) — e.g. www.acme.com",
+    ),
   authorization: Authorization,
   status: z.enum(["active", "paused", "terminated"]),
   routing: z.array(RouteRule),
