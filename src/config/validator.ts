@@ -40,19 +40,24 @@ export function assertConfigInvariants(config: ClientConfig): ClientConfig {
 }
 
 /**
- * In-place mode requires:
- *   1. Every proxy route MUST set an explicit `origin` (we can't derive
- *      one from `source_domain`, because in this mode `source_domain`
- *      is the customer's own host — fetching it would loop the worker).
- *   2. Each `origin` host MUST differ from the customer's domain. If
- *      `origin` resolves to the same host the worker is intercepting,
- *      every request triggers another route hit on the same worker —
- *      infinite recursion until the runtime aborts the subrequest
- *      chain. Reject at config-write time.
+ * In-place mode loop-guard. Two cases:
  *
- * `subdomain_proxy` (the default) skips both checks: routes can fall
- * through to `https://${source_domain}` and the host always differs
- * from `proxy_domain`.
+ *   1. **No `resolve_override`** (simple): the proxy fetch goes to
+ *      `route.origin` URL directly. That URL's host MUST NOT equal
+ *      `proxy_domain` — otherwise every fetch hits this same Workers
+ *      Route, infinite recursion until the runtime aborts.
+ *
+ *   2. **With `resolve_override`** (managed-host case): the worker
+ *      fetches `route.origin` URL but resolves IPs via the override
+ *      hostname. This is the right pattern when the origin server's
+ *      TLS cert + vhost are bound to the customer's public domain
+ *      (typical with managed WP hosts on a single IP). In this case
+ *      `origin` host CAN equal `proxy_domain` (in fact it usually
+ *      will), but the override hostname MUST differ from
+ *      `proxy_domain` — otherwise the override resolves to the
+ *      Workers Route's IP and we still loop.
+ *
+ * Subdomain-proxy mode skips both checks.
  */
 function assertInPlaceModeInvariants(config: ClientConfig): void {
   if (config.mode !== "in_place") return;
@@ -70,9 +75,19 @@ function assertInPlaceModeInvariants(config: ClientConfig): void {
     } catch {
       throw new ConfigValidationError(`routing[${i}].origin is not a valid URL: ${rule.origin}`);
     }
+    if (rule.resolve_override) {
+      // Override path: origin URL host can equal proxy_domain, but the
+      // override hostname must not.
+      if (rule.resolve_override.toLowerCase() === proxyHostLower) {
+        throw new ConfigValidationError(
+          `routing[${i}].resolve_override (${rule.resolve_override}) equals proxy_domain (${proxyHostLower}); in_place mode would loop. Use a separate hostname like origin.${proxyHostLower}.`,
+        );
+      }
+      return;
+    }
     if (originHost === proxyHostLower) {
       throw new ConfigValidationError(
-        `routing[${i}].origin host (${originHost}) equals proxy_domain (${proxyHostLower}); in_place mode would loop. Use a separate origin host like origin.${proxyHostLower}.`,
+        `routing[${i}].origin host (${originHost}) equals proxy_domain (${proxyHostLower}); in_place mode would loop. Either use a separate origin URL, or set routing[${i}].resolve_override to a non-overlapping hostname like origin.${proxyHostLower}.`,
       );
     }
   });

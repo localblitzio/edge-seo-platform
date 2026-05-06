@@ -187,6 +187,28 @@ export const RouteRule = z.object({
   strip_prefix: z.string().optional(),
   /** KV/R2 key prefix for custom_page */
   custom_page_key: z.string().optional(),
+  /**
+   * Override DNS resolution for the proxy fetch without changing the
+   * URL host. When set, the worker resolves this hostname's IP but
+   * keeps the URL's hostname (`origin`) for SNI + Host. Required when
+   * the origin server's TLS cert + vhost are bound to the customer's
+   * public domain (the common case with managed WP hosts on a single
+   * public IP) and we want to fetch via a separate DNS-only record
+   * like `origin.acme.com` without breaking cert/vhost matching.
+   *
+   * The override hostname MUST be on the same Cloudflare zone as the
+   * URL host (Cloudflare requirement). Bare hostname only — no
+   * scheme, port, or path.
+   *
+   * Implementation: passes through to fetch's `cf.resolveOverride`.
+   */
+  resolve_override: z
+    .string()
+    .regex(
+      /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/,
+      "must be a bare hostname (no scheme, port, or path)",
+    )
+    .optional(),
 });
 
 export const CacheRule = z.object({
