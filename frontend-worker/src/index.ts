@@ -84,6 +84,7 @@ import {
 } from "./auth.js";
 import { type EmailBinding, resetPasswordMessage, sendEmail } from "./email.js";
 import { inspectSourcePage } from "./inspector.js";
+import { LOGO_DATA_URL } from "./logo-data-url.js";
 
 interface Env {
   CONFIG_KV: KVNamespace;
@@ -109,9 +110,11 @@ const STYLE = `
 *{box-sizing:border-box}html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
 a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
 code,.mono{font-family:var(--mono);font-size:.92em}
-.topbar{display:flex;align-items:center;justify-content:space-between;padding:1rem 2rem;background:var(--bg-elevated);border-bottom:1px solid var(--border)}
-.topbar .brand{display:flex;align-items:center;gap:.6rem;font-size:1rem;font-weight:600}
-.topbar .logo{display:inline-block;width:1rem;height:1rem;border-radius:9999px;background:linear-gradient(135deg,#2563eb,#7c3aed)}
+.topbar{display:flex;align-items:center;justify-content:space-between;padding:.85rem 2rem;background:var(--bg-elevated);border-bottom:1px solid var(--border)}
+.topbar .brand{display:flex;align-items:center;gap:.7rem;font-size:1rem;font-weight:600;color:var(--fg)}
+.topbar .brand:hover{text-decoration:none}
+.topbar .logo{display:inline-block;width:3rem;height:3rem;background-image:url("${LOGO_DATA_URL}");background-size:contain;background-position:center;background-repeat:no-repeat}
+.auth-card .logo{display:block;margin:0 auto 1rem;width:4.5rem;height:4.5rem;background-image:url("${LOGO_DATA_URL}");background-size:contain;background-position:center;background-repeat:no-repeat}
 .topbar nav{display:flex;gap:1.25rem;font-size:.9rem;align-items:center}
 .topbar nav .who{color:var(--fg-muted);font-size:.82rem}
 .topbar nav form{display:inline}
@@ -283,7 +286,7 @@ function renderLanding(user: User | null): string {
 }
 
 function renderLoginForm(opts: { email: string; error: string | null; next: string }): string {
-  return `<div class="auth-card">
+  return `<div class="auth-card"><span class="logo" aria-hidden="true"></span>
     <h1>Sign in</h1>
     <p class="subtitle">Welcome back to Edge SEO Platform.</p>
     ${opts.error ? `<div class="flash flash-err">${esc(opts.error)}</div>` : ""}
@@ -306,14 +309,14 @@ function renderLoginForm(opts: { email: string; error: string | null; next: stri
 
 function renderForgotForm(opts: { email: string; submitted: boolean }): string {
   if (opts.submitted) {
-    return `<div class="auth-card">
+    return `<div class="auth-card"><span class="logo" aria-hidden="true"></span>
       <h1>Check your inbox</h1>
       <p class="subtitle">If an account exists for <code>${esc(opts.email)}</code>, we've sent a password reset link. The link expires in 1 hour.</p>
       <p style="font-size:.85rem;color:var(--fg-muted);margin-top:1rem;">If you don't see it, check spam — emails come from <code>noreply@edgeseo.app</code>. Replies route to <a href="mailto:simon@localblitzmarketing.com">simon@localblitzmarketing.com</a>.</p>
       <div class="alt"><a href="/login">← Back to sign in</a></div>
     </div>`;
   }
-  return `<div class="auth-card">
+  return `<div class="auth-card"><span class="logo" aria-hidden="true"></span>
     <h1>Reset password</h1>
     <p class="subtitle">Enter your email and we'll send a reset link.</p>
     <form method="POST" action="/forgot">
@@ -330,7 +333,7 @@ function renderForgotForm(opts: { email: string; submitted: boolean }): string {
 }
 
 function renderResetForm(opts: { token: string; error: string | null }): string {
-  return `<div class="auth-card">
+  return `<div class="auth-card"><span class="logo" aria-hidden="true"></span>
     <h1>Set new password</h1>
     <p class="subtitle">Choose a strong password. Once set, you'll be signed in.</p>
     ${opts.error ? `<div class="flash flash-err">${esc(opts.error)}</div>` : ""}
@@ -351,7 +354,7 @@ function renderResetForm(opts: { token: string; error: string | null }): string 
 }
 
 function renderTokenError(opts: { title: string; message: string }): string {
-  return `<div class="auth-card">
+  return `<div class="auth-card"><span class="logo" aria-hidden="true"></span>
     <h1>${esc(opts.title)}</h1>
     <p class="subtitle">${esc(opts.message)}</p>
     <div class="alt"><a href="/forgot">Request a new link</a> · <a href="/login">Back to sign in</a></div>
@@ -718,7 +721,7 @@ export default {
       return htmlResponse(
         htmlPage({
           title: "Sign out — Edge SEO Platform",
-          body: `<div class="auth-card"><h1>Sign out?</h1><form method="POST" action="/logout"><button class="btn btn-primary" type="submit">Yes, sign out</button></form></div>`,
+          body: `<div class="auth-card"><span class="logo" aria-hidden="true"></span><h1>Sign out?</h1><form method="POST" action="/logout"><button class="btn btn-primary" type="submit">Yes, sign out</button></form></div>`,
           user,
         }),
       );
