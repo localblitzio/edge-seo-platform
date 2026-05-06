@@ -1040,15 +1040,32 @@ function renderInPlaceSetupCard(client: ClientRow): string {
     typeof firstProxy?.resolve_override === "string"
       ? firstProxy.resolve_override
       : `origin.${zoneGuess}`;
+  // Detect whether this client uses resolve_override (managed-host
+  // case — needs origin DNS record) or fetches a separate hostname
+  // directly (CF Pages / Vercel / Netlify / Ghost — origin is already
+  // a separate hostname, no DNS record needed). Drives whether the
+  // form asks for an Origin IP and whether we register a DNS record
+  // on submit.
+  const usesResolveOverride =
+    typeof firstProxy?.resolve_override === "string" && firstProxy.resolve_override.length > 0;
+  const introCopy = usesResolveOverride
+    ? `For traffic on <code>${esc(domain)}</code> to reach this worker, two Cloudflare resources must exist on the customer's zone: a DNS-only record at <code>${esc(resolveOverride)}</code> (so the worker can fetch origin without looping) and a Workers Route on <code>${esc(domain)}/*</code>.`
+    : `Origin is hosted on a separate hostname (e.g. <code>*.pages.dev</code>, <code>*.vercel.app</code>) — no extra DNS record needed. Just register a Workers Route on <code>${esc(domain)}/*</code>.`;
   return `<div class="card" style="margin-bottom:1rem;border-left:3px solid var(--cat-routes,var(--accent))">
     <h2 style="margin:0 0 .6rem;font-size:1.05rem;font-weight:600">Workers Route setup</h2>
-    <p style="margin:0 0 .85rem;color:var(--fg-muted);font-size:.9rem">This client is in <strong>in-place mode</strong>. For traffic on <code>${esc(domain)}</code> to reach this worker, two Cloudflare resources must exist on the customer's zone: a DNS-only record at <code>${esc(resolveOverride)}</code> (so the worker can fetch origin without looping) and a Workers Route on <code>${esc(domain)}/*</code>.</p>
+    <p style="margin:0 0 .85rem;color:var(--fg-muted);font-size:.9rem">This client is in <strong>in-place mode</strong>. ${introCopy}</p>
     <div class="form-section" style="margin:0 0 1rem;background:var(--bg);border:1px dashed var(--border-strong)">
       <h2 style="margin:0 0 .6rem;font-size:.95rem;font-weight:600">Auto-register on Cloudflare</h2>
-      <p class="field-hint" style="margin:0 0 .85rem">Provide the customer's origin server IP. We'll create the DNS record (DNS-only / grey-cloud) and register the Workers Route via Cloudflare's API in one shot. Idempotent: re-running with the same inputs is safe — existing records are detected and skipped.</p>
+      <p class="field-hint" style="margin:0 0 .85rem">${
+        usesResolveOverride
+          ? "Provide the customer's origin server IP. We'll create the DNS record (DNS-only / grey-cloud) and register the Workers Route via Cloudflare's API in one shot."
+          : "We'll register the Workers Route via Cloudflare's API. No DNS record is created (the route's origin is already a separate hostname)."
+      } Idempotent: re-running with the same inputs is safe — existing records are detected and skipped.</p>
       <form method="POST" action="/app/clients/${esc(client.client_id)}/cf-install" style="display:flex;flex-direction:column;gap:.6rem">
         <div class="form-grid">
-          <div>
+          ${
+            usesResolveOverride
+              ? `<div>
             <label for="cf_origin_ip" style="font-weight:600;font-size:.78rem;display:block;margin-bottom:.2rem">Origin server IP</label>
             <input id="cf_origin_ip" name="origin_ip" type="text" required placeholder="144.202.74.213" pattern="^[0-9]{1,3}(\\.[0-9]{1,3}){3}$">
             <div class="field-hint">IPv4 address of the customer's actual server (behind today's CF proxy).</div>
@@ -1057,7 +1074,9 @@ function renderInPlaceSetupCard(client: ClientRow): string {
             <label for="cf_resolve_override" style="font-weight:600;font-size:.78rem;display:block;margin-bottom:.2rem">DNS hostname</label>
             <input id="cf_resolve_override" name="resolve_override" type="text" required value="${esc(resolveOverride)}" pattern="^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$">
             <div class="field-hint">Bare hostname for the new DNS record. Default <code>origin.&lt;domain&gt;</code>; matches the route's <code>resolve_override</code> field.</div>
-          </div>
+          </div>`
+              : ""
+          }
           <div>
             <label for="cf_zone_name" style="font-weight:600;font-size:.78rem;display:block;margin-bottom:.2rem">Cloudflare zone name</label>
             <input id="cf_zone_name" name="zone_name" type="text" required value="${esc(zoneGuess)}">
@@ -1840,33 +1859,39 @@ export async function handleCloudflareInstallPost(
   const resolveOverride = String(form.get("resolve_override") ?? "").trim();
   const zoneName = String(form.get("zone_name") ?? "").trim();
   const routePattern = String(form.get("route_pattern") ?? "").trim();
+  // No-DNS path: client doesn't use resolve_override (origin is on a
+  // separate hostname like *.pages.dev or *.vercel.app already). The
+  // form omits the IP / DNS hostname fields entirely; we just register
+  // the Workers Route. The form's hidden state is `resolveOverride === ""`.
+  const skipDns = resolveOverride === "";
 
-  // Validate inputs.
-  if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(originIp)) {
-    return flashRedirect(`/app/clients/${clientId}`, {
-      text: `Origin IP must be a valid IPv4 address (got: ${originIp}).`,
-      kind: "err",
-    });
-  }
-  if (!/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(resolveOverride)) {
-    return flashRedirect(`/app/clients/${clientId}`, {
-      text: `DNS hostname is malformed: ${resolveOverride}`,
-      kind: "err",
-    });
+  if (!skipDns) {
+    if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(originIp)) {
+      return flashRedirect(`/app/clients/${clientId}`, {
+        text: `Origin IP must be a valid IPv4 address (got: ${originIp}).`,
+        kind: "err",
+      });
+    }
+    if (!/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(resolveOverride)) {
+      return flashRedirect(`/app/clients/${clientId}`, {
+        text: `DNS hostname is malformed: ${resolveOverride}`,
+        kind: "err",
+      });
+    }
+    // The DNS hostname must end in `.<zone>` so the record actually
+    // belongs to the zone we're touching. Cloudflare would reject the
+    // creation with code 1004 otherwise — this is just a friendlier
+    // error.
+    if (!resolveOverride.endsWith(`.${zoneName}`) && resolveOverride !== zoneName) {
+      return flashRedirect(`/app/clients/${clientId}`, {
+        text: `DNS hostname "${resolveOverride}" doesn't belong to zone "${zoneName}".`,
+        kind: "err",
+      });
+    }
   }
   if (!zoneName || !routePattern) {
     return flashRedirect(`/app/clients/${clientId}`, {
       text: "Zone name and route pattern are required.",
-      kind: "err",
-    });
-  }
-  // The DNS hostname must end in `.<zone>` so the record actually
-  // belongs to the zone we're touching. Cloudflare would reject the
-  // creation with code 1004 otherwise — this is just a friendlier
-  // error.
-  if (!resolveOverride.endsWith(`.${zoneName}`) && resolveOverride !== zoneName) {
-    return flashRedirect(`/app/clients/${clientId}`, {
-      text: `DNS hostname "${resolveOverride}" doesn't belong to zone "${zoneName}".`,
       kind: "err",
     });
   }
@@ -1891,27 +1916,30 @@ export async function handleCloudflareInstallPost(
       });
     }
 
-    // DNS record (idempotent).
-    const fqdn = resolveOverride;
-    const existingDns = await cf.findDnsRecord(token, zone.id, fqdn);
-    if (existingDns) {
-      existed += 1;
-      notes.push(`DNS ${fqdn} already exists (id ${existingDns.id})`);
-      if (existingDns.content !== originIp || existingDns.proxied) {
-        notes.push(
-          `WARNING: existing DNS points at ${existingDns.content} (proxied=${existingDns.proxied}); expected ${originIp} DNS-only. Did NOT modify.`,
-        );
+    // DNS record (idempotent) — skipped entirely when the client has
+    // no resolve_override (origin is already on a separate hostname).
+    if (!skipDns) {
+      const fqdn = resolveOverride;
+      const existingDns = await cf.findDnsRecord(token, zone.id, fqdn);
+      if (existingDns) {
+        existed += 1;
+        notes.push(`DNS ${fqdn} already exists (id ${existingDns.id})`);
+        if (existingDns.content !== originIp || existingDns.proxied) {
+          notes.push(
+            `WARNING: existing DNS points at ${existingDns.content} (proxied=${existingDns.proxied}); expected ${originIp} DNS-only. Did NOT modify.`,
+          );
+        }
+      } else {
+        const newDns = await cf.createDnsRecord(token, zone.id, {
+          type: "A",
+          name: fqdn,
+          content: originIp,
+          proxied: false,
+          comment: `auto-onboarded for client ${clientId}`,
+        });
+        created += 1;
+        notes.push(`DNS ${fqdn} → ${originIp} created (id ${newDns.id})`);
       }
-    } else {
-      const newDns = await cf.createDnsRecord(token, zone.id, {
-        type: "A",
-        name: fqdn,
-        content: originIp,
-        proxied: false,
-        comment: `auto-onboarded for client ${clientId}`,
-      });
-      created += 1;
-      notes.push(`DNS ${fqdn} → ${originIp} created (id ${newDns.id})`);
     }
 
     // Workers Route (idempotent).
