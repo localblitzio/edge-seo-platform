@@ -1991,8 +1991,17 @@ export async function handleCloudflareInstallPost(
     notes: `cf auto-onboard: ${created} created, ${existed} existed; ${notes.join("; ")}`,
   });
 
+  // Reminder: wrangler deploy reconciles Workers Routes against
+  // wrangler.toml — any API-registered route not also in the toml will
+  // be silently REMOVED on the next deploy. Surface this so operators
+  // know to commit the snippet before the next time they deploy. Run
+  // `npm run check:routes` (predeploy hook) to detect drift.
+  const reminder =
+    created > 0
+      ? ` ⚠ ADD TO wrangler.toml under [env.staging] before next deploy: [[env.staging.routes]] pattern="${routePattern}" zone_name="${zoneName}"`
+      : "";
   return flashRedirect(`/app/clients/${clientId}`, {
-    text: `Cloudflare resources: ${created} created, ${existed} already existed. ${notes.join(" · ")}`,
+    text: `Cloudflare resources: ${created} created, ${existed} already existed. ${notes.join(" · ")}${reminder}`,
     kind: "ok",
   });
 }

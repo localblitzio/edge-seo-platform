@@ -85,6 +85,19 @@ describe("applySecurityHeaders", () => {
     expect(out.status).toBe(418);
     expect(out.statusText).toBe("I'm a teapot");
   });
+
+  it("sets the worker fingerprint header on every response", () => {
+    const out = applySecurityHeaders(new Response("hi"));
+    expect(out.headers.get("x-edge-seo-platform")).toBe("active");
+  });
+
+  it("overwrites any upstream x-edge-seo-platform header (anti-spoofing)", () => {
+    const upstream = new Response("hi", {
+      headers: { "X-Edge-Seo-Platform": "spoofed-by-origin" },
+    });
+    const out = applySecurityHeaders(upstream);
+    expect(out.headers.get("x-edge-seo-platform")).toBe("active");
+  });
 });
 
 describe("rewriteCookieDomain", () => {

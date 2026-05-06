@@ -16,7 +16,10 @@
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
     "format": "biome format --write .",
+    "check:routes": "node scripts/check-route-drift.mjs",
+    "predeploy:staging": "node scripts/check-route-drift.mjs --env staging",
     "deploy:staging": "wrangler deploy --env staging",
+    "predeploy:production": "node scripts/check-route-drift.mjs --env production",
     "deploy:production": "wrangler deploy --env production",
     "db:migrate:staging": "wrangler d1 migrations apply CONFIG_DB --env staging --remote",
     "db:migrate:production": "wrangler d1 migrations apply CONFIG_DB --env production --remote",
@@ -44,6 +47,6 @@
     "tsx": "^4.21.0",
     "typescript": "^5.7.3",
     "vitest": "^2.1.9",
-    "wrangler": "^3.101.0"
+    "wrangler": "^3.114.17"
   }
 }
