@@ -32,6 +32,7 @@ import {
   appLayout,
   handleAttestPost,
   handleCachePurgePost,
+  handleCloudflareInstallPost,
   handleDeleteCustomPagePost,
   handleEditClientPost,
   handleEditCustomPageGet,
@@ -916,6 +917,12 @@ export default {
       // Cache purge (POST only)
       if (sub === "cache-purge" && method === "POST") {
         return handleCachePurgePost(request, env, url, user, id);
+      }
+
+      // Cloudflare auto-onboard (in_place mode only) — creates DNS
+      // record + Workers Route on the customer's zone via API.
+      if (sub === "cf-install" && method === "POST") {
+        return handleCloudflareInstallPost(request, env, url, user, id);
       }
 
       // Attestation form + handler
