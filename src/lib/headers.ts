@@ -17,6 +17,21 @@ export const STRIP_RESPONSE_HEADERS: readonly string[] = [
   "x-aspnetmvc-version",
 ];
 
+/**
+ * Unambiguous fingerprint header set on every response. Lets ops tell
+ * at a glance whether traffic is flowing through this worker — pages-
+ * default headers like `referrer-policy` and `x-content-type-options`
+ * also get set by Cloudflare Pages and various WAFs, so they're not
+ * reliable signals.
+ *
+ * Value is a fixed string + the worker script name (which differs per
+ * env). We don't bake in a build SHA because that would require a
+ * stamp step on the proxy worker; for "is the worker running?" the
+ * fixed signal is enough.
+ */
+export const WORKER_FINGERPRINT_HEADER = "x-edge-seo-platform";
+export const WORKER_FINGERPRINT_VALUE = "active";
+
 /** Headers that must be added (not overridden) on any response (§10). */
 export const SECURITY_HEADERS_ADD_IF_MISSING: ReadonlyArray<readonly [string, string]> = [
   ["x-content-type-options", "nosniff"],
@@ -54,6 +69,12 @@ export function applySecurityHeaders(response: Response): Response {
       headers.set(name, value);
     }
   }
+
+  // Worker fingerprint — unconditional, overwrites any upstream value.
+  // Used by ops as a positive signal that traffic flowed through this
+  // worker (versus going direct to origin / hitting CF Pages default
+  // headers).
+  headers.set(WORKER_FINGERPRINT_HEADER, WORKER_FINGERPRINT_VALUE);
 
   return new Response(response.body, {
     status: response.status,
