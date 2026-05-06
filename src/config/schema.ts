@@ -224,6 +224,22 @@ export const ClientConfig = z.object({
     .string()
     .regex(/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/)
     .max(63),
+  /**
+   * Deployment mode for this client.
+   *   - `subdomain_proxy` (default, back-compat): the worker runs on a
+   *     controlled zone like `*.localpage.us.com`. `proxy_domain` is
+   *     the public-facing host, `source_domain` is the upstream.
+   *     Cookie domains and absolute Location headers are rewritten
+   *     from source → proxy on the way out.
+   *   - `in_place`: the worker runs on the customer's own domain via
+   *     a Workers Route on the same Cloudflare account. `proxy_domain`
+   *     and `source_domain` are typically identical (the customer's
+   *     domain). Origin-pull goes to `routing[].origin` (which MUST
+   *     differ from the customer's domain, e.g. `origin.customer.com`,
+   *     to avoid an infinite loop). Cookie/Location host rewrites are
+   *     skipped because the customer-facing host equals the source.
+   */
+  mode: z.enum(["subdomain_proxy", "in_place"]).default("subdomain_proxy"),
   proxy_domain: z.string(),
   source_domain: z.string(),
   authorization: Authorization,

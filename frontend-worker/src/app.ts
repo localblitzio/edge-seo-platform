@@ -826,11 +826,21 @@ export async function renderClientDetail(env: AppEnv, user: User, id: string): P
       `<tr><td>${i}</td><td class="mono">${esc(rr.match)}</td><td class="mono">${esc(rr.ttl_seconds)}</td></tr>`,
   );
 
+  const mode = (cfg.mode as string | undefined) ?? "subdomain_proxy";
+  const modePill =
+    mode === "in_place"
+      ? '<span class="pill pill-neutral" title="Worker runs on the customer\'s own domain via a Workers Route on the same Cloudflare account.">in-place</span>'
+      : '<span class="pill pill-neutral" title="Worker runs on a controlled zone (e.g. *.localpage.us.com); customer\'s site is fetched as upstream.">subdomain proxy</span>';
+  const subtitle =
+    mode === "in_place"
+      ? `<a class="mono" href="https://${esc(client.proxy_domain)}/" target="_blank" rel="noopener">${esc(client.proxy_domain)}</a> &nbsp;→&nbsp; origin pulled from <span class="mono">${esc(routeOriginSummary(cfg))}</span>`
+      : `<a class="mono" href="https://${esc(client.proxy_domain)}/" target="_blank" rel="noopener">${esc(client.proxy_domain)}</a> &nbsp;→&nbsp; <span class="mono">${esc(client.source_domain)}</span>`;
   return `<div class="crumbs"><a href="/app/clients">← Clients</a></div>
-    <h1>${esc(client.client_id)} ${statusPill(client.status)}</h1>
-    <p class="subtitle"><a class="mono" href="https://${esc(client.proxy_domain)}/" target="_blank" rel="noopener">${esc(client.proxy_domain)}</a> &nbsp;→&nbsp; <span class="mono">${esc(client.source_domain)}</span></p>
+    <h1>${esc(client.client_id)} ${statusPill(client.status)} ${modePill}</h1>
+    <p class="subtitle">${subtitle}</p>
     ${renderActionsRow(client)}
     ${parseError ? `<div class="empty">⚠ Config JSON parse error: ${esc(parseError)}</div>` : ""}
+    ${mode === "in_place" ? renderInPlaceSetupCard(client) : ""}
     ${renderPagesWithEditsPanel(client.client_id, client.proxy_domain, cfg)}
     ${renderCustomPagesPanel(client, cfg)}
     <div class="card"><h2 style="margin-top:0">Authorization</h2><dl class="kv">
@@ -971,6 +981,46 @@ export function validateConfigJson(
   return { ok: true, config: result.data };
 }
 
+/* ─── In-place mode helpers ─── */
+
+/** Summarize origin endpoints across the routing[] array for the subtitle. */
+function routeOriginSummary(cfg: Record<string, unknown>): string {
+  const routing = (cfg.routing as Array<Record<string, unknown>> | undefined) ?? [];
+  const origins = routing
+    .filter((r) => r.type === "proxy" && typeof r.origin === "string")
+    .map((r) => r.origin as string);
+  if (origins.length === 0) return "—";
+  // Show distinct origin URLs, comma-joined.
+  const distinct = Array.from(new Set(origins));
+  return distinct.join(", ");
+}
+
+/**
+ * "Workers Route setup" card — shown only on in-place clients.
+ * Provides the exact wrangler.toml route snippet the operator needs to
+ * add (or paste into the Cloudflare dashboard) so traffic for the
+ * customer's domain reaches this worker. The customer's zone must be
+ * on the same Cloudflare account as the worker.
+ */
+function renderInPlaceSetupCard(client: ClientRow): string {
+  const domain = client.proxy_domain;
+  // Strip any leading "www." for the zone-name guess; the worker can
+  // serve www.acme.com via a route on zone "acme.com" but we don't
+  // assume that — the operator confirms the zone in their dashboard.
+  const zoneGuess = domain.replace(/^www\./i, "");
+  const wranglerSnippet = `[[routes]]\npattern = "${domain}/*"\nzone_name = "${zoneGuess}"`;
+  return `<div class="card" style="margin-bottom:1rem;border-left:3px solid var(--cat-routes,var(--accent))">
+    <h2 style="margin:0 0 .6rem;font-size:1.05rem;font-weight:600">Workers Route setup</h2>
+    <p style="margin:0 0 .85rem;color:var(--fg-muted);font-size:.9rem">This client is in <strong>in-place mode</strong>. For traffic on <code>${esc(domain)}</code> to reach this worker, a Workers Route must be registered on the same Cloudflare account that owns this worker. Two options:</p>
+    <ol style="margin:0 0 1rem;padding-left:1.4rem;font-size:.9rem;line-height:1.55">
+      <li><strong>Wrangler config:</strong> add the route below to <code>wrangler.toml</code> (under the env that runs this worker), commit, redeploy.</li>
+      <li><strong>Cloudflare dashboard:</strong> Workers &amp; Pages → this worker → Settings → Triggers → Add Custom Domain or Route, with pattern <code>${esc(domain)}/*</code>.</li>
+    </ol>
+    <pre class="json-block" style="margin:0">${esc(wranglerSnippet)}</pre>
+    <p class="field-hint" style="margin:.6rem 0 0">If <code>${esc(zoneGuess)}</code> isn't the actual zone name on your account, edit the snippet — the dashboard's zone-name dropdown will show what's available. The customer's origin server must be reachable at the routing rule's <code>origin</code> URL (typically a <em>DNS-only / grey-cloud</em> record like <code>origin.${esc(zoneGuess)}</code>) so the proxy fetch doesn't loop back through this worker.</p>
+  </div>`;
+}
+
 /* ─── Actions row ─── */
 
 function renderActionsRow(client: ClientRow): string {
@@ -1006,6 +1056,9 @@ function renderStructuredFormBody(opts: {
     `<input id="f_client_id" type="text" ${idAttrs}>`,
     `<div class="field-hint">${opts.isEdit ? "cannot be changed via edit" : "lowercase letters, digits, or hyphens (DNS-safe)"}</div></div>`,
     '<div><label for="f_status">status</label><select id="f_status"><option value="active">active</option><option value="paused">paused</option><option value="terminated">terminated</option></select></div>',
+    '<div class="full-width"><label for="f_mode">mode</label>',
+    '<select id="f_mode"><option value="subdomain_proxy">subdomain_proxy — worker runs on a controlled zone (default)</option><option value="in_place">in_place — worker runs on the customer\'s own domain</option></select>',
+    "<div class=\"field-hint\"><strong>subdomain_proxy:</strong> proxy_domain is on a zone you control (e.g. <code>*.localpage.us.com</code>). source_domain is the customer's site, fetched as upstream. Cookie + Location host rewrites apply.<br><strong>in_place:</strong> set proxy_domain = source_domain = the customer's own domain. routing[0].origin must point at a separate origin host (e.g. <code>origin.acme.com</code>) so the proxy fetch doesn't loop. Requires a Workers Route on the same Cloudflare account.</div></div>",
     '<div class="full-width"><label>proxy_domain</label><div class="proxy-mode">',
     '<label class="proxy-radio"><input type="radio" name="proxy_mode" value="default" id="f_proxy_mode_default" checked>',
     '<span>Default zone:</span><input id="f_proxy_subdomain" type="text" placeholder="client-id" style="width:14rem">',
@@ -1068,7 +1121,7 @@ function renderStructuredFormBody(opts: {
     "(function(){",
     `var ZONE=${JSON.stringify(DEFAULT_PROXY_ZONE)};var ZONE_SUFFIX='.'+ZONE;`,
     "var ta=document.getElementById('config_json');if(!ta)return;",
-    "var scalarFields={f_client_id:['client_id'],f_source_domain:['source_domain'],f_status:['status'],f_attested_by_email:['authorization','attested_by_email'],f_attested_ip:['authorization','attested_ip'],f_scope:['authorization','scope']};",
+    "var scalarFields={f_client_id:['client_id'],f_source_domain:['source_domain'],f_status:['status'],f_mode:['mode'],f_attested_by_email:['authorization','attested_by_email'],f_attested_ip:['authorization','attested_ip'],f_scope:['authorization','scope']};",
     "function get(o,p){for(var i=0;i<p.length;i++){if(o==null)return undefined;o=o[p[i]];}return o;}",
     "function setPath(o,p,v){for(var i=0;i<p.length-1;i++){var k=p[i];if(o[k]==null||typeof o[k]!=='object')o[k]={};o=o[k];}o[p[p.length-1]]=v;}",
     "function safeParse(){try{return JSON.parse(ta.value);}catch(e){return null;}}",
