@@ -1383,6 +1383,74 @@ export default {
       );
     }
 
+    // /app/debug/cf-token — super-admin-only diagnostic. Reports
+    // whether `env.CF_API_TOKEN` is bound, its byte length + first
+    // 8 chars (NEVER the full value), and what Cloudflare's
+    // /user/tokens/verify says when called with it. Used to spot
+    // mismatches between the secret stored on the worker and the
+    // operator's local token.
+    if (path === "/app/debug/cf-token") {
+      if (!user) return redirectToLogin(url);
+      if (user.role !== "super_admin") {
+        return new Response("forbidden", { status: 403 });
+      }
+      const token = env.CF_API_TOKEN;
+      const out: Record<string, unknown> = {
+        bound: !!token,
+        length: token?.length ?? 0,
+        prefix: token ? token.slice(0, 8) : null,
+        // Trim-detect: if the value has trailing whitespace, the
+        // length-mismatch will out them. Spot-check by reporting the
+        // length BEFORE and AFTER trim().
+        trimmed_length: token ? token.trim().length : 0,
+      };
+      if (token) {
+        try {
+          const verifyResp = await fetch(
+            "https://api.cloudflare.com/client/v4/user/tokens/verify",
+            { headers: { Authorization: `Bearer ${token}` } },
+          );
+          out.verify_status = verifyResp.status;
+          out.verify_body = await verifyResp.json();
+        } catch (e) {
+          out.verify_error = (e as Error).message;
+        }
+        // Run the SAME call the auto-onboard form makes, so we see if
+        // there's something specific about the zone-list endpoint.
+        // Try the debug zone (404-media.com) and report verbatim.
+        try {
+          const zoneResp = await fetch(
+            "https://api.cloudflare.com/client/v4/zones?name=404-media.com",
+            { headers: { Authorization: `Bearer ${token}` } },
+          );
+          out.zones_status = zoneResp.status;
+          out.zones_body = await zoneResp.json();
+        } catch (e) {
+          out.zones_error = (e as Error).message;
+        }
+        // And the same call BUT with Content-Type set (matching what
+        // the form's callCf does) — see if that's the differentiator.
+        try {
+          const zoneCtResp = await fetch(
+            "https://api.cloudflare.com/client/v4/zones?name=404-media.com",
+            {
+              headers: {
+                Authorization: `Bearer ${token}`,
+                "Content-Type": "application/json",
+              },
+            },
+          );
+          out.zones_ct_status = zoneCtResp.status;
+          out.zones_ct_body = await zoneCtResp.json();
+        } catch (e) {
+          out.zones_ct_error = (e as Error).message;
+        }
+      }
+      return new Response(JSON.stringify(out, null, 2), {
+        headers: { "content-type": "application/json; charset=utf-8" },
+      });
+    }
+
     /* ─── Super-admin (Phase F fills these in) ─── */
 
     if (path === "/admin" || path.startsWith("/admin/")) {
