@@ -53,6 +53,16 @@ workers_dev = true
 pattern = "*.localpage.us.com/*"
 zone_name = "localpage.us.com"
 
+# In-place mode: 404-media.com client. Apex only — WordPress's
+# built-in www → apex redirect handles www traffic before it would
+# reach our worker (since the loader looks up config by Host header
+# and we only have a config row keyed to the apex). If we ever need
+# the worker to intercept www directly, add a separate config row
+# with proxy_domain = www.404-media.com.
+[[env.staging.routes]]
+pattern = "404-media.com/*"
+zone_name = "404-media.com"
+
 [[env.staging.kv_namespaces]]
 binding = "CONFIG_KV"
 id = "dc95f90063cd4493bb3ea462759f4002"
