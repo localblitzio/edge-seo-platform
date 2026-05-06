@@ -20,7 +20,7 @@ describe("resolveCanonical — first-match-wins", () => {
     const out = resolveCanonical(new URL("https://lanterncrest.com/blog/post-1?ref=x"), config);
     expect(out).toEqual({
       strategy: "self",
-      url: "https://lanterncrest.com/blog/post-1?ref=x",
+      url: "https://lanterncrest.com/blog/post-1",
       sync_og: true,
       sync_twitter: true,
       sync_jsonld: true,
@@ -35,7 +35,7 @@ describe("resolveCanonical — first-match-wins", () => {
     });
     const out = resolveCanonical(new URL("https://lanterncrest.com/blog/post-1?ref=x"), config);
     expect(out.strategy).toBe("origin");
-    expect(out.url).toBe("https://blog.lanterncrest.com/blog/post-1?ref=x");
+    expect(out.url).toBe("https://blog.lanterncrest.com/blog/post-1");
   });
 
   it("returns custom canonical with the configured URL", () => {
