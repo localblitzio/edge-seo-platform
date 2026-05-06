@@ -104,6 +104,45 @@ describe("ClientConfig schema", () => {
     expect(result.text_rewrites).toEqual([]);
   });
 
+  it("rejects proxy_domain with a scheme prefix", () => {
+    // Common operator mistake: pasting a full URL into the hostname
+    // field. Caught by the schema regex.
+    const cfg = validLanternCrestConfig() as Record<string, unknown>;
+    cfg.proxy_domain = "https://lantern-crest.localpage.us.com";
+    const r = ClientConfig.safeParse(cfg);
+    expect(r.success).toBe(false);
+  });
+
+  it("rejects proxy_domain with a trailing slash", () => {
+    const cfg = validLanternCrestConfig() as Record<string, unknown>;
+    cfg.proxy_domain = "lantern-crest.localpage.us.com/";
+    expect(ClientConfig.safeParse(cfg).success).toBe(false);
+  });
+
+  it("rejects proxy_domain with a port", () => {
+    const cfg = validLanternCrestConfig() as Record<string, unknown>;
+    cfg.proxy_domain = "lantern-crest.localpage.us.com:443";
+    expect(ClientConfig.safeParse(cfg).success).toBe(false);
+  });
+
+  it("rejects proxy_domain with uppercase letters (DNS hostnames are lowercase)", () => {
+    const cfg = validLanternCrestConfig() as Record<string, unknown>;
+    cfg.proxy_domain = "Lantern-Crest.Localpage.US.com";
+    expect(ClientConfig.safeParse(cfg).success).toBe(false);
+  });
+
+  it("accepts a multi-label hostname like www.acme.co.uk", () => {
+    const cfg = validLanternCrestConfig() as Record<string, unknown>;
+    cfg.proxy_domain = "www.acme.co.uk";
+    expect(ClientConfig.safeParse(cfg).success).toBe(true);
+  });
+
+  it("rejects source_domain with the same URL-shaped mistake", () => {
+    const cfg = validLanternCrestConfig() as Record<string, unknown>;
+    cfg.source_domain = "https://acme.com/";
+    expect(ClientConfig.safeParse(cfg).success).toBe(false);
+  });
+
   it("mode: defaults to 'subdomain_proxy' when omitted (back-compat)", () => {
     // Existing configs in production don't carry `mode`. Loading must
     // not blow up — they should default to subdomain_proxy.

@@ -372,16 +372,18 @@ describe("assertConfigInvariants — in_place mode", () => {
     expect(() => assertConfigInvariants(parsed)).toThrow(/in_place mode would loop/);
   });
 
-  it("matches the loop-guard case-insensitively", () => {
+  it("matches the loop-guard case-insensitively (origin URL host casing varies)", () => {
+    // proxy_domain is lowercase by schema rule, but URL hostnames can
+    // mix case in the wild. The loop guard must still catch.
     const parsed = parseFixture((cfg) => {
       cfg.mode = "in_place";
-      cfg.proxy_domain = "WWW.Acme.COM";
-      cfg.source_domain = "WWW.Acme.COM";
+      cfg.proxy_domain = "www.acme.com";
+      cfg.source_domain = "www.acme.com";
       (cfg.routing as Array<Record<string, unknown>>) = [
         {
           match: "^/.*",
           type: "proxy",
-          origin: "https://www.acme.com/",
+          origin: "https://WWW.ACME.COM/",
           origin_auth: { type: "none" },
         },
       ];
