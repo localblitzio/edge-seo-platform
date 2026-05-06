@@ -462,5 +462,4 @@ describe("assertConfigInvariants — in_place mode with resolve_override", () =>
     });
     expect(() => assertConfigInvariants(parsed)).toThrow(/resolve_override .* equals proxy_domain/);
   });
-
 });
