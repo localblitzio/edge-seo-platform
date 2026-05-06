@@ -69,6 +69,25 @@ describe("checkRegexSafety", () => {
     expect(checkRegexSafety("(?:a+|b)+")).toMatch(/nested quantifier/i);
   });
 
+  it("accepts (/.*)? — bounded outer quantifier (static-site shape)", () => {
+    // The static-site upload emits `^<base>(/.*)?$`. The outer `?` is
+    // bounded (0 or 1 reps) so there's no catastrophic backtracking,
+    // even though the inner `*` matches arbitrary length.
+    expect(checkRegexSafety("^/site1(/.*)?$")).toBeNull();
+    expect(checkRegexSafety("^/lp/austin(/.*)?$")).toBeNull();
+  });
+
+  it("accepts a bounded {0,5} outer quantifier", () => {
+    // Bounded ranges like {0,5} max out at 5 reps — not unbounded.
+    expect(checkRegexSafety("(a+){0,5}")).toBeNull();
+  });
+
+  it("rejects an unbounded {n,} outer quantifier", () => {
+    // {3,} has no upper bound — equivalent to `+` modulo the floor —
+    // and IS a ReDoS vector when paired with an inner quantifier.
+    expect(checkRegexSafety("(a+){3,}")).toMatch(/nested quantifier/i);
+  });
+
   it("rejects patterns longer than 512 chars", () => {
     expect(checkRegexSafety("a".repeat(513))).toMatch(/512-character limit/);
   });
