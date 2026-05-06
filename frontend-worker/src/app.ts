@@ -2080,7 +2080,44 @@ export async function handleCachePurgePost(
   const client = await loadVisibleClient(env, user, clientId);
   if (!client) return new Response("Not found", { status: 404 });
 
+  // Purge two layers:
+  //   1. KV config cache — forces the worker to re-load config from D1
+  //      on the next request (picks up rule edits made via admin).
+  //   2. Cloudflare HTTP cache — flushes the rendered response cache
+  //      for the customer's hostname so the next request actually
+  //      runs through the worker pipeline (instead of serving a
+  //      stale rendered HTML from CF's edge cache).
   await invalidateKv(env, clientId, client.proxy_domain);
+
+  // CF cache purge by hostname. Skipped if CF_API_TOKEN isn't bound
+  // (operator falls back to "wait for TTL" or hard-refresh).
+  let cfPurgeResult = "skipped (no CF_API_TOKEN)";
+  if (env.CF_API_TOKEN) {
+    try {
+      const cf = await import("./cloudflare-api.js");
+      // Derive zone name: strip "www." prefix; for *.localpage.us.com
+      // subdomains the zone IS localpage.us.com (everything after the
+      // leftmost label).
+      const proxy = client.proxy_domain;
+      const zoneName = proxy.endsWith(".localpage.us.com")
+        ? "localpage.us.com"
+        : proxy.replace(/^www\./i, "");
+      const zone = await cf.findZoneByName(env.CF_API_TOKEN, zoneName);
+      if (!zone) {
+        cfPurgeResult = `zone "${zoneName}" not found via CF API (token can't see it?)`;
+      } else {
+        await cf.purgeCacheByHosts(env.CF_API_TOKEN, zone.id, [proxy]);
+        cfPurgeResult = `purged ${proxy} on zone ${zoneName}`;
+      }
+    } catch (e) {
+      if (e instanceof Error) {
+        cfPurgeResult = `CF cache purge failed: ${e.message}`;
+      } else {
+        cfPurgeResult = "CF cache purge failed (unknown error)";
+      }
+    }
+  }
+
   const actor = actorOf(user, request);
   await writeAudit(env, {
     client_id: clientId,
@@ -2091,10 +2128,10 @@ export async function handleCachePurgePost(
     after_hash: null,
     previous_status: client.status,
     new_status: client.status,
-    notes: "manual cache purge (KV invalidate)",
+    notes: `manual cache purge: KV invalidated; CF: ${cfPurgeResult}`,
   });
   return flashRedirect(`/app/clients/${clientId}`, {
-    text: `Purged config:${clientId} and domain:${client.proxy_domain} from KV.`,
+    text: `Purged config:${clientId} and domain:${client.proxy_domain} from KV. CF cache: ${cfPurgeResult}`,
     kind: "ok",
   });
 }
