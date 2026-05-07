@@ -104,6 +104,8 @@ import {
   renderNewClusterForm,
 } from "./clusters.js";
 import { type EmailBinding, resetPasswordMessage, sendEmail } from "./email.js";
+import { FAVICON_DATA_URL } from "./favicon-data-url.js";
+import { handleIndexingSubmit, loadIndexingPageData, renderIndexingPage } from "./indexing.js";
 import { inspectSourcePage } from "./inspector.js";
 import {
   handleBulkPlacementPost,
@@ -153,8 +155,8 @@ code,.mono{font-family:var(--mono);font-size:.92em}
 .topbar{display:flex;align-items:center;justify-content:space-between;padding:.85rem 2rem;background:var(--bg-elevated);border-bottom:1px solid var(--border)}
 .topbar .brand{display:flex;align-items:center;gap:.7rem;font-size:1rem;font-weight:600;color:var(--fg)}
 .topbar .brand:hover{text-decoration:none}
-.topbar .logo{display:inline-block;width:3rem;height:3rem;background-image:url("${LOGO_DATA_URL}");background-size:contain;background-position:center;background-repeat:no-repeat}
-.auth-card .logo{display:block;margin:0 auto 1rem;width:4.5rem;height:4.5rem;background-image:url("${LOGO_DATA_URL}");background-size:contain;background-position:center;background-repeat:no-repeat}
+.topbar .logo{display:inline-block;height:4.9rem;aspect-ratio:4/1;background-image:url("${LOGO_DATA_URL}");background-size:contain;background-position:left center;background-repeat:no-repeat}
+.auth-card .logo{display:block;margin:0 auto 1rem;width:4.5rem;height:4.5rem;background-image:url("${FAVICON_DATA_URL}");background-size:contain;background-position:center;background-repeat:no-repeat}
 .topbar nav{display:flex;gap:1.25rem;font-size:.9rem;align-items:center}
 .topbar nav .who{color:var(--fg-muted);font-size:.82rem}
 .topbar nav form{display:inline}
@@ -206,7 +208,7 @@ function topbar(user: User | null): string {
         <form method="POST" action="/logout"><button type="submit" class="linklike">Sign out</button></form>`
     : `<a href="/login">Sign in</a>`;
   return `<header class="topbar">
-    <a class="brand" href="/"><span class="logo"></span>Edge SEO Platform</a>
+    <a class="brand" href="/" aria-label="Edge SEO Platform — home"><span class="logo"></span></a>
     <nav>${right}</nav>
   </header>`;
 }
@@ -222,7 +224,7 @@ function htmlPage(opts: {
   user: User | null;
   flash?: FlashMessage | null;
 }): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(opts.title)}</title><style>${STYLE}</style></head><body>${topbar(opts.user)}<main>${flashBanner(opts.flash ?? null)}${opts.body}</main><footer class="footer">© ${new Date().getFullYear()} Edge SEO Platform</footer></body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(opts.title)}</title><link rel="icon" type="image/png" href="${FAVICON_DATA_URL}"><style>${STYLE}</style></head><body>${topbar(opts.user)}<main>${flashBanner(opts.flash ?? null)}${opts.body}</main><footer class="footer">© ${new Date().getFullYear()} Edge SEO Platform</footer></body></html>`;
 }
 
 const htmlHeadersBase: Record<string, string> = {
@@ -296,7 +298,7 @@ function safeNext(raw: string | null): string {
 /* ─── Pages ─── */
 
 function renderLanding(user: User | null): string {
-  const cta = user
+  const ctaPrimary = user
     ? `<div class="cta">
         <a class="btn btn-primary" href="/app">Go to dashboard</a>
       </div>`
@@ -304,25 +306,75 @@ function renderLanding(user: User | null): string {
         <a class="btn btn-primary" href="/login">Sign in</a>
         <a class="btn" href="mailto:simon@localblitzmarketing.com?subject=Request%20access%20to%20Edge%20SEO%20Platform">Request access</a>
       </div>`;
-  return `<section class="hero">
-    <h1>Host any site under your domain — at the edge.</h1>
-    <p class="lead">Edge SEO Platform proxies, transforms, and serves websites under controlled domains using Cloudflare Workers. Add a client with one config row; serve traffic immediately on a wildcard subdomain or your custom domain.</p>
-    ${cta}
-  </section>
+  return `<style>
+.stakes{max-width:920px;margin:1.5rem auto 0;padding:0 2rem;text-align:center}
+.stakes p{color:var(--fg-muted);max-width:640px;margin:0 auto;font-size:.95rem;line-height:1.6}
+.stakes p strong{color:var(--fg)}
+.plan{max-width:920px;margin:4rem auto 0;padding:0 2rem}
+.plan h2,.outcome h2{font-size:1.5rem;letter-spacing:-.01em;margin:0 0 .5rem;text-align:center}
+.plan p.intro,.outcome p.intro{color:var(--fg-muted);text-align:center;margin:0 auto 1.75rem;max-width:640px}
+.plan-steps{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1.25rem;counter-reset:step}
+.plan-step{background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius);padding:1.25rem 1.5rem;box-shadow:var(--shadow);position:relative}
+.plan-step::before{counter-increment:step;content:counter(step);position:absolute;top:-.7rem;left:1.25rem;width:1.6rem;height:1.6rem;border-radius:50%;background:var(--accent);color:var(--accent-fg);font-weight:700;font-size:.85rem;display:flex;align-items:center;justify-content:center;box-shadow:var(--shadow)}
+.plan-step h3{margin:.25rem 0 .5rem;font-size:1rem;font-weight:600}
+.plan-step p{margin:0;color:var(--fg-muted);font-size:.9rem;line-height:1.5}
+.outcome{max-width:920px;margin:4rem auto 5rem;padding:0 2rem;text-align:center}
+.outcome .cta{display:inline-flex;gap:.6rem;flex-wrap:wrap;justify-content:center;margin-top:1.5rem}
+.features h2{font-size:1.5rem;letter-spacing:-.01em;text-align:center;margin:0 0 1.5rem}
+.features-wrap{max-width:920px;margin:4rem auto 0;padding:0 2rem}
+</style>
+
+<section class="hero">
+  <h1>Your campaigns deserve to compound — not scatter.</h1>
+  <p class="lead">Every PPC lander on a one-off domain, every Webflow page on a subdomain, every HubSpot blog on a separate property — that's SEO equity you don't get back. Edge SEO Platform consolidates it under your primary domain, at the edge, in seconds.</p>
+  ${ctaPrimary}
+</section>
+
+<section class="stakes">
+  <p><strong>The cost of doing nothing:</strong> authority leaks across subdomains, every CMS plugin is a deploy risk, and the experiment your strategist proposed last quarter is still waiting on engineering.</p>
+</section>
+
+<section class="plan">
+  <h2>A clear path to consolidated authority</h2>
+  <p class="intro">Three steps. No new CMS. No engineering tickets per page.</p>
+  <div class="plan-steps">
+    <div class="plan-step">
+      <h3>Configure your domain</h3>
+      <p>Add a client in the dashboard. One row in the config — no new repo, no DNS reshuffle on the proxy side.</p>
+    </div>
+    <div class="plan-step">
+      <h3>Map your content</h3>
+      <p>Point paths at SaaS origins (Webflow, HubSpot, Shopify) or upload custom landers. Set canonicals, redirects, and schema as rules.</p>
+    </div>
+    <div class="plan-step">
+      <h3>Ship at the edge</h3>
+      <p>Cloudflare Workers serve every request, every region, in milliseconds. Edits propagate from one source of truth — no per-page deploys.</p>
+    </div>
+  </div>
+</section>
+
+<div class="features-wrap">
   <section class="features">
     <div class="feature">
       <h3>Subfolder authority consolidation</h3>
-      <p>Host SaaS content (Webflow, HubSpot, Shopify) under a client's primary domain as a subfolder. Keep canonical authority on the main brand.</p>
+      <p>Webflow, HubSpot, Shopify content under your primary domain as a subfolder. Authority concentrates where you've earned it.</p>
     </div>
     <div class="feature">
       <h3>Performance domain</h3>
-      <p>A controlled secondary domain for PPC landers, programmatic SEO, and AEO experiments — the same edge runtime, separate SEO surface area.</p>
+      <p>A controlled secondary domain for PPC landers, programmatic SEO, and AEO experiments. Same runtime, separate SEO surface area.</p>
     </div>
     <div class="feature">
       <h3>Edge SEO control plane</h3>
-      <p>Canonical, redirect, schema, indexation, and meta control at the edge. No CMS plugins, no per-page deploys — config rows in D1.</p>
+      <p>Canonical, redirect, schema, indexation, and meta rules — edited in the dashboard, applied at the edge. No CMS plugins.</p>
     </div>
-  </section>`;
+  </section>
+</div>
+
+<section class="outcome">
+  <h2>What changes after you consolidate</h2>
+  <p class="intro">Your campaigns live under one domain. Authority compounds across every page. Edits go live in seconds, not sprints. Your team stops fighting CMS plugins and starts running experiments.</p>
+  ${ctaPrimary}
+</section>`;
 }
 
 function renderLoginForm(opts: { email: string; error: string | null; next: string }): string {
@@ -1082,6 +1134,35 @@ export default {
         return handleCachePurgePost(request, env, url, user, id);
       }
 
+      // Per-site Indexing page: GET renders the diagnostic table +
+      // submit form; POST submits selected paths to one indexer.
+      if (sub === "indexing") {
+        if (method === "POST") {
+          const csrf = checkCsrf(request, url);
+          if (csrf) return csrf;
+          return handleIndexingSubmit(request, env, user, id);
+        }
+        const data = await loadIndexingPageData(env, user, id);
+        if (!data) {
+          return new Response("Not found", { status: 404 });
+        }
+        return htmlResponse(
+          htmlPage({
+            title: `Indexing ${id} — Edge SEO Platform`,
+            body: appLayout({
+              title: `Indexing ${id}`,
+              content: renderIndexingPage(data),
+              activeNav: `client:${id}`,
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+
       // Cloudflare auto-onboard (in_place mode only) — creates DNS
       // record + Workers Route on the customer's zone via API.
       if (sub === "cf-install" && method === "POST") {
@@ -1737,10 +1818,13 @@ export default {
       if (user.role !== "super_admin") {
         return new Response("Forbidden — super-admin only.", { status: 403 });
       }
+      let testResults: Awaited<ReturnType<typeof handleSettingsApiKeysPost>>["testResults"];
       if (method === "POST") {
         const csrf = checkCsrf(request, url);
         if (csrf) return csrf;
-        return handleSettingsApiKeysPost(request, env, user);
+        const outcome = await handleSettingsApiKeysPost(request, env, user);
+        if (outcome.redirect) return outcome.redirect;
+        testResults = outcome.testResults;
       }
       const clients = await loadVisibleClients(env, user);
       return htmlResponse(
@@ -1748,7 +1832,7 @@ export default {
           title: "API keys — Edge SEO Platform",
           body: appLayout({
             title: "API keys",
-            content: await renderSettingsApiKeysPage(env),
+            content: await renderSettingsApiKeysPage(env, testResults),
             activeNav: "settings:api-keys",
             user,
             flash,

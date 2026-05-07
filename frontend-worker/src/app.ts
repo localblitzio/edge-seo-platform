@@ -25,9 +25,9 @@ import { DEFAULT_PROXY_ZONE, PROXY_ZONES, matchProxyZone } from "../../src/confi
 import { ClientConfig } from "../../src/config/schema.js";
 import { assertConfigInvariants } from "../../src/config/validator.js";
 import { ConfigValidationError } from "../../src/lib/errors.js";
+import { ACTIVE_INDEXERS } from "../../src/secrets/indexer-registry.js";
 import { getSecret } from "../../src/secrets/store.js";
 import { collectSitemapUrls } from "../../src/sitemap/generator.js";
-import { pingIndexNow } from "../../src/sitemap/indexnow.js";
 import type { User } from "./auth.js";
 import { BUILD_VERSION } from "./build-version.js";
 import { LIST_EDITOR_JS } from "./list-editor-js.js";
@@ -1278,6 +1278,7 @@ function renderActionsRow(client: ClientRow): string {
   };
   return `<div class="actions-row">
     <a class="btn btn-primary" href="/app/clients/${esc(client.client_id)}/edit">Edit config</a>
+    <a class="btn" href="/app/clients/${esc(client.client_id)}/indexing">Indexing</a>
     <a class="btn" href="/app/clients/${esc(client.client_id)}/attest">Capture attestation</a>
     <form method="POST" action="/app/clients/${esc(client.client_id)}/cache-purge"><button class="btn" type="submit">Purge cache</button></form>
     ${statusBtn("active", "Activate", "btn-success", null)}
@@ -1920,7 +1921,7 @@ export async function handleNewClientPost(
     new_status: cfg.status,
     notes: null,
   });
-  await maybePingIndexNow(env, cfg);
+  await maybePingIndexers(env, cfg);
   return {
     response: flashRedirect(`/app/clients/${cfg.client_id}`, {
       text: `Created ${cfg.client_id}.`,
@@ -1930,25 +1931,41 @@ export async function handleNewClientPost(
 }
 
 /**
- * Ping IndexNow for every sitemap-eligible URL on this client.
+ * Notify all configured indexing services for a client save.
  *
- * Best-effort: no-op when `INDEXNOW_KEY` isn't bound, swallows network
- * errors. Search engines don't need a "diff" — pinging the full URL
- * list says "these are the canonical URLs on this site, please
- * refresh." A no-op when the config has no sitemap-eligible URLs (no
- * literal-path rules, or everything is filtered out by canonical /
- * indexation rules).
+ * Currently fans out to:
+ *   - IndexNow (Bing/Yandex/Seznam) — INDEXNOW_KEY
+ *   - Prime Indexer — PRIME_INDEXER_KEY (creates one project per save,
+ *     named `${proxy_domain} ${ISO timestamp}` so chunks group in the
+ *     operator's dashboard)
+ *
+ * Best-effort: each service is independent, no-op when its key is
+ * unbound, swallows network errors. A failed ping doesn't block the
+ * admin save. URL list comes from `collectSitemapUrls(cfg)` — same
+ * source as the per-domain `/sitemap.xml`.
+ *
+ * Future slots (Omega Indexer, Sinbyte) will plug in here once their
+ * API contracts are confirmed.
  */
-async function maybePingIndexNow(env: AppEnv, cfg: ClientConfig): Promise<void> {
-  const key = await getSecret(env as unknown as Parameters<typeof getSecret>[0], "INDEXNOW_KEY");
-  if (!key) return;
+async function maybePingIndexers(env: AppEnv, cfg: ClientConfig): Promise<void> {
   const urls = collectSitemapUrls(cfg);
   if (urls.length === 0) return;
-  try {
-    await pingIndexNow(cfg.proxy_domain, key, urls);
-  } catch (e) {
-    console.warn("indexnow ping failed", e);
+  const sharedEnv = env as unknown as Parameters<typeof getSecret>[0];
+  // Look up every registered indexer's secret in parallel so slow
+  // KV/D1 reads don't serialize the rest.
+  const keys = await Promise.all(ACTIVE_INDEXERS.map((i) => getSecret(sharedEnv, i.slotKey)));
+  const tasks: Promise<unknown>[] = [];
+  for (let i = 0; i < ACTIVE_INDEXERS.length; i++) {
+    const indexer = ACTIVE_INDEXERS[i];
+    const key = keys[i];
+    if (!indexer || !key) continue;
+    tasks.push(
+      indexer
+        .submit(key, urls, { proxyDomain: cfg.proxy_domain })
+        .catch((e) => console.warn(`${indexer.slotKey} ping failed`, e)),
+    );
   }
+  await Promise.all(tasks);
 }
 
 export async function handleEditClientPost(
@@ -2010,7 +2027,7 @@ export async function handleEditClientPost(
     new_status: cfg.status,
     notes: null,
   });
-  await maybePingIndexNow(env, cfg);
+  await maybePingIndexers(env, cfg);
   return {
     response: flashRedirect(`/app/clients/${clientId}`, {
       text: `Saved. before=${beforeHash} → after=${afterHash}`,

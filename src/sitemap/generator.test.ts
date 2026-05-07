@@ -201,6 +201,52 @@ describe("collectSitemapUrls", () => {
     });
     expect(collectSitemapUrls(config)).toEqual(["https://lanterncrest.com/"]);
   });
+
+  it("includes operator seed_paths even when no canonical rule matches (bypasses default-origin filter)", () => {
+    const config = configWith((cfg) => {
+      // Wildcard-only routing — default canonical for proxy routes is `origin`.
+      // Without seed_paths, sitemap would be empty.
+      cfg.seed_paths = ["/about", "/services/seo", "/contact"];
+    });
+    expect(collectSitemapUrls(config)).toEqual([
+      "https://lanterncrest.com/about",
+      "https://lanterncrest.com/contact",
+      "https://lanterncrest.com/services/seo",
+    ]);
+  });
+
+  it("dedupes seed_paths against literal-rule paths", () => {
+    const config = configWith((cfg) => {
+      (cfg.routing as Array<Record<string, unknown>>) = [
+        { match: "^/about$", type: "custom_page", custom_page_key: "" },
+      ];
+      cfg.seed_paths = ["/about", "/extra"];
+    });
+    expect(collectSitemapUrls(config)).toEqual([
+      "https://lanterncrest.com/about",
+      "https://lanterncrest.com/extra",
+    ]);
+  });
+
+  it("respects noindex on seed_paths (active blocker overrides operator declaration)", () => {
+    const config = configWith((cfg) => {
+      cfg.seed_paths = ["/keep", "/private"];
+      (cfg.indexation as Array<Record<string, unknown>>) = [
+        { match: "^/private$", robots: "noindex,follow", additional_directives: [] },
+      ];
+    });
+    expect(collectSitemapUrls(config)).toEqual(["https://lanterncrest.com/keep"]);
+  });
+
+  it("respects redirect-source on seed_paths (the path redirects away)", () => {
+    const config = configWith((cfg) => {
+      cfg.seed_paths = ["/old", "/new"];
+      (cfg.redirects as Record<string, Array<Record<string, unknown>>>).static = [
+        { from: "/old", to: "/new", status: "301" },
+      ];
+    });
+    expect(collectSitemapUrls(config)).toEqual(["https://lanterncrest.com/new"]);
+  });
 });
 
 describe("generateSitemapXml", () => {

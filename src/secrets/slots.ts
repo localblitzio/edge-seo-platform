@@ -43,6 +43,27 @@ export const SECRET_SLOTS: readonly SecretSlot[] = [
     multiline: true,
     docs_url: "https://developers.google.com/webmaster-tools/v1/how-tos/authorizing",
   },
+  {
+    key: "OMEGA_INDEXER_KEY",
+    label: "Omega Indexer API key",
+    description:
+      "Submits URLs to Omega Indexer for accelerated discovery (Google + others). Triggered alongside IndexNow on every config save. API integration pending — slot reserved.",
+    docs_url: "https://omegaindexer.com/",
+  },
+  {
+    key: "SINBYTE_API_KEY",
+    label: "Sinbyte API key",
+    description:
+      "Submits URLs to Sinbyte's indexing service. Triggered alongside IndexNow on every config save. API integration pending — slot reserved.",
+    docs_url: "https://sinbyte.com/",
+  },
+  {
+    key: "PRIME_INDEXER_KEY",
+    label: "Prime Indexer API key",
+    description:
+      "Submits URLs to Prime Indexer's bulk-submission service. Triggered alongside IndexNow on every config save. API integration pending — slot reserved.",
+    docs_url: "https://www.theprimeindexer.com/",
+  },
 ] as const;
 
 /** Lookup by key. Returns undefined when the key isn't a known slot. */

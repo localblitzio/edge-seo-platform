@@ -148,8 +148,18 @@ export function maskSecret(value: string | null): string {
  * `updated_by_email` metadata alongside slot values.
  */
 export async function listSecretRows(env: Env): Promise<SecretRow[]> {
-  const r = await env.CONFIG_DB.prepare(
-    "SELECT key, value, updated_at, updated_by_email FROM secrets ORDER BY key",
-  ).all<SecretRow>();
-  return r.results ?? [];
+  // Wrapped in try/catch to survive the deploy-then-migrate window
+  // (table missing) and any transient D1 failure. The Settings page
+  // uses this only for displaying updated_at/updated_by metadata —
+  // returning [] degrades gracefully to "no metadata" rather than
+  // breaking the page.
+  try {
+    const r = await env.CONFIG_DB.prepare(
+      "SELECT key, value, updated_at, updated_by_email FROM secrets ORDER BY key",
+    ).all<SecretRow>();
+    return r.results ?? [];
+  } catch (e) {
+    console.warn("secrets: listSecretRows failed, returning []", e);
+    return [];
+  }
 }

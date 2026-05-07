@@ -164,7 +164,14 @@
       "Bash(curl -sS -o .scratch/sitemap.xml -w \"HTTP %{http_code} bytes:%{size_download}\\\\n\" https://rfengineer.localpage.us.com/sitemap.xml)",
       "Bash(git credential *)",
       "Bash(python -c \"import sys, json; d=json.load\\(sys.stdin\\); [print\\(r['name'], '|', r['status'], '|', r['conclusion']\\) for r in d['check_runs']]\")",
-      "Bash(grep -n \"import.*sitemap\\\\|import.*secret\\\\|from.*\\\\\\\\.\\\\\\\\./src\" frontend-worker/src/app.ts)"
+      "Bash(grep -n \"import.*sitemap\\\\|import.*secret\\\\|from.*\\\\\\\\.\\\\\\\\./src\" frontend-worker/src/app.ts)",
+      "Bash(python -c \"import json, sys; d=json.load\\(sys.stdin\\); print\\('count:', d.get\\('total_count', 0\\)\\); [print\\(r['name'], '|', r['status'], '|', r.get\\('conclusion'\\), '|', r['head_sha'][:7]\\) for r in d.get\\('workflow_runs', []\\)]\")",
+      "Bash(python -c \"from PIL import Image; print\\('pil ok'\\)\")",
+      "Bash(python -c \"import json, sys; d=json.load\\(sys.stdin\\); print\\('state:', d['state'], 'mergeable:', d.get\\('mergeable'\\), 'mergeable_state:', d.get\\('mergeable_state'\\), 'head_sha:', d['head']['sha'][:7]\\)\")",
+      "Bash(python -c \"import json, sys; d=json.load\\(sys.stdin\\); [print\\(r['name'], '|', r['status'], '|', r.get\\('conclusion'\\), '|', r['event'], '|', r['head_branch'], '|', r['head_sha'][:7]\\) for r in d.get\\('workflow_runs', []\\)]\")",
+      "Bash(python -c \"import json, sys; d=json.load\\(sys.stdin\\); [print\\(j['name'], '|', j['conclusion']\\) for j in d['jobs']]\")",
+      "Bash(python -c \"import json, sys; d=json.load\\(sys.stdin\\); print\\('count:', d['total_count']\\); [print\\(s['app']['slug'], '|', s['status'], '|', s.get\\('conclusion'\\)\\) for s in d.get\\('check_suites', []\\)]\")",
+      "Bash(git rebase *)"
     ]
   }
 }
