@@ -122,6 +122,26 @@ describe("canWriteToCache (§9.1 invariants)", () => {
       expect(canWriteToCache(req, new Response("ok"), rule())).toBe(false);
     }
   });
+
+  it("rejects 200 responses with content-length: 0 (cache poisoning guard)", () => {
+    // Empty 200 bodies are almost always an aborted upstream stream or
+    // a misbehaving origin. Caching them poisons the URL for the rule's
+    // TTL and CF still reports HIT, hiding the bug from operators.
+    const req = makeRequest();
+    const res = new Response(null, { status: 200, headers: { "content-length": "0" } });
+    expect(canWriteToCache(req, res, rule())).toBe(false);
+  });
+
+  it("still caches 200 with no content-length header (streaming/chunked)", () => {
+    // Normal HTML responses from the transform pipeline often arrive
+    // without an explicit content-length (HTMLRewriter streams). The
+    // 0-byte guard must not block these — only when the header is
+    // explicitly "0".
+    const req = makeRequest();
+    const res = new Response("ok", { status: 200 });
+    res.headers.delete("content-length");
+    expect(canWriteToCache(req, res, rule())).toBe(true);
+  });
 });
 
 describe("computeCacheTtl (§9 status defaults)", () => {
