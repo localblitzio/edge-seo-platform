@@ -532,6 +532,7 @@ export function renderClusterDetail(
     <p class="subtitle">${typePill(row.type)} ${statusPill(row.status)} <span style="color:var(--fg-muted);margin-left:.5rem">id ${row.id} · ${members.length} of ${MAX_CLUSTER_MEMBERS} sites · created ${esc(row.created_at)} · updated ${esc(row.updated_at)}</span></p>
     <div class="actions-row">
       <a class="btn btn-primary" href="/app/clusters/${row.id}/edit">Edit</a>
+      <a class="btn" href="/app/clients/bulk-new?cluster_id=${row.id}" title="Open the bulk-create form with this cluster pre-selected — every site you create joins this cluster">+ Bulk-create sites for this cluster</a>
       ${statusActions}
     </div>
     ${
