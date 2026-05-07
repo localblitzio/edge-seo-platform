@@ -356,6 +356,8 @@ const NAV_ICONS: Record<string, string> = {
   audit: `<svg ${NAV_SVG_ATTRS}><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="16" y2="17"/></svg>`,
   // link (Link projects)
   "link-projects": `<svg ${NAV_SVG_ATTRS}><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`,
+  // grid (Clusters — group of related sites)
+  clusters: `<svg ${NAV_SVG_ATTRS}><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>`,
   // shield-user (Super-admin Users)
   admin: `<svg ${NAV_SVG_ATTRS}><path d="M12 2l8 4v6c0 5-3.5 9-8 10-4.5-1-8-5-8-10V6z"/><circle cx="12" cy="10" r="2.5"/><path d="M8 16c1-1.5 2.5-2.5 4-2.5s3 1 4 2.5"/></svg>`,
   // globe (per-client row)
@@ -380,6 +382,12 @@ export function appSidebar(opts: { activeNav: string; clients: ClientRow[]; user
       id: "link-projects",
       label: "Link projects",
       icon: NAV_ICONS["link-projects"] ?? "",
+    },
+    {
+      href: "/app/clusters",
+      id: "clusters",
+      label: "Clusters",
+      icon: NAV_ICONS.clusters ?? "",
     },
     { href: "/app/audit", id: "audit", label: "Audit log", icon: NAV_ICONS.audit ?? "" },
   ];
