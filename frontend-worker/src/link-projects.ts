@@ -1063,12 +1063,12 @@ function renderPlacementForm(opts: {
         <h2 style="margin-top:0">${opts.isEdit ? "Edit placement" : "New placement"}</h2>
         <div class="form-grid">
           <div>
-            <label for="lpp_client_id">client</label>
+            <label for="lpp_client_id">site</label>
             <select id="lpp_client_id" name="client_id" required>
-              <option value="">— pick a client —</option>
+              <option value="">— pick a site —</option>
               ${clientOptions}
             </select>
-            <div class="field-hint">Which proxied client site this placement runs on. Only clients you own are listed.</div>
+            <div class="field-hint">Which proxied site this placement runs on. Only sites you own are listed.</div>
           </div>
           <div>
             <label for="lpp_status">status</label>
@@ -1252,7 +1252,7 @@ function renderPlacementsSection(
       ? "" // single-client owner — no point offering bulk
       : `<details style="margin-top:1.25rem;background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius);padding:.75rem 1rem">
           <summary style="cursor:pointer;font-weight:600">Bulk apply — create placements on multiple clients at once</summary>
-          <p class="field-hint" style="margin:.6rem 0 .8rem">Same defaults are applied to every selected client. Clients that already have a placement on this project are listed but unchecked by default — you can still re-add (each becomes its own row, useful for different page_matches).</p>
+          <p class="field-hint" style="margin:.6rem 0 .8rem">Same defaults are applied to every selected site. Sites that already have a placement on this project are listed but unchecked by default — you can still re-add (each becomes its own row, useful for different page_matches).</p>
           <form class="editor" method="POST" action="/app/link-projects/${project.id}/placements/bulk-new">
             <div class="form-section">
               <h2 style="margin-top:0">Clients</h2>
@@ -1362,7 +1362,7 @@ function renderPlacementsSection(
         </details>`;
   return `<div class="card">
     <h2 style="margin-top:0">Placements</h2>
-    <p class="field-hint" style="margin:.2rem 0 .8rem">Each placement says "inject a link to <code>${esc(project.target_url)}</code> on this client's pages matching the regex." ${anchorBlurb}</p>
+    <p class="field-hint" style="margin:.2rem 0 .8rem">Each placement says "inject a link to <code>${esc(project.target_url)}</code> on this site's pages matching the regex." ${anchorBlurb}</p>
     ${tableOrEmpty}
     ${renderPlacementForm({
       action: `/app/link-projects/${project.id}/placements/new`,
@@ -1655,7 +1655,7 @@ export async function handleBulkPlacementPost(
   const toCreate = validation.value.client_ids.filter((c) => !skipSet.has(c));
   if (toCreate.length === 0) {
     return flashRedirect(`/app/link-projects/${linkProjectId}`, {
-      text: `No new placements created — every selected client already has a placement on this project for page_match "${validation.value.page_match}".`,
+      text: `No new placements created — every selected site already has a placement on this project for page_match "${validation.value.page_match}".`,
       kind: "warn",
     });
   }
