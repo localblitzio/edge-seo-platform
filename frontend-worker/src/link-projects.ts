@@ -1379,24 +1379,24 @@ async function bestEffortHttpCachePurge(env: AppEnv, clientId: string): Promise<
       .bind(clientId)
       .first<{ proxy_domain: string }>();
     if (!row) return;
+    const proxy = row.proxy_domain;
+    // Derive zone name: for clients on a registered proxy zone (e.g.
+    // `acme.localpage.us.com`), the zone IS that registered zone. For
+    // in_place clients on their own apex (e.g. `404-media.com`), the
+    // zone IS the apex itself (modulo a leading "www."). This mirrors
+    // the logic in handleCachePurgePost which is known to work.
+    const { matchProxyZone } = await import("../../src/config/proxy-zone.js");
+    const knownZone = matchProxyZone(proxy);
+    const zoneName = knownZone ?? proxy.replace(/^www\./i, "");
     const { findZoneByName, purgeCacheByHosts } = await import("./cloudflare-api.js");
-    // Walk up parent labels so `foo.bar.example.com` matches a zone
-    // named `bar.example.com` or `example.com`.
-    const candidateZones = [row.proxy_domain];
-    const labels = row.proxy_domain.split(".");
-    for (let i = 1; i < labels.length - 1; i++) {
-      candidateZones.push(labels.slice(i).join("."));
+    const zone = await findZoneByName(env.CF_API_TOKEN, zoneName);
+    if (!zone) {
+      console.warn(
+        `link-projects: zone "${zoneName}" not found via CF API for client ${clientId}`,
+      );
+      return;
     }
-    let zoneId: string | null = null;
-    for (const candidate of candidateZones) {
-      const zone = await findZoneByName(env.CF_API_TOKEN, candidate);
-      if (zone) {
-        zoneId = zone.id;
-        break;
-      }
-    }
-    if (!zoneId) return;
-    await purgeCacheByHosts(env.CF_API_TOKEN, zoneId, [row.proxy_domain]);
+    await purgeCacheByHosts(env.CF_API_TOKEN, zone.id, [proxy]);
   } catch (e) {
     console.warn("link-projects: HTTP cache purge failed", e);
   }
