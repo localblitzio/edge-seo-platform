@@ -23,7 +23,7 @@
  * the parent link_project (a placement is visible iff its project is).
  */
 import type { AppEnv, ClientRow, FlashMessage } from "./app.js";
-import { canSeeAllClients, esc, loadVisibleClients } from "./app.js";
+import { canSeeAllClients, esc, loadVisibleClients, writeAudit } from "./app.js";
 import type { User } from "./auth.js";
 
 export type LinkProjectStatus = "draft" | "active" | "paused" | "archived";
@@ -289,6 +289,46 @@ function checkCsrf(request: Request, url: URL): Response | null {
     }
   }
   return new Response("CSRF: missing Origin and Referer", { status: 403 });
+}
+
+function actorIp(request: Request): string {
+  return request.headers.get("cf-connecting-ip") ?? "0.0.0.0";
+}
+
+/**
+ * Write a `config_update` audit entry for a link-project placement event.
+ *
+ * We piggy-back on the existing `audit_log` table rather than introduce
+ * a new one (or a migration to widen its event_type CHECK) — placements
+ * materially affect what the worker injects on the client's pages, so
+ * "config_update" is a fair conceptual fit. The `notes` column carries
+ * the link-project-specific context (project id, page_match, action).
+ *
+ * Best-effort: any DB error is swallowed so an audit failure can't take
+ * down a placement edit.
+ */
+async function writeLinkProjectAudit(
+  env: AppEnv,
+  user: User,
+  request: Request,
+  clientId: string,
+  notes: string,
+): Promise<void> {
+  try {
+    await writeAudit(env, {
+      client_id: clientId,
+      actor_email: user.email,
+      actor_ip: actorIp(request),
+      event_type: "config_update",
+      before_hash: null,
+      after_hash: null,
+      previous_status: null,
+      new_status: null,
+      notes,
+    });
+  } catch (e) {
+    console.warn("link-projects: audit write failed", e);
+  }
 }
 
 function flashRedirect(location: string, flash: FlashMessage): Response {
@@ -1300,6 +1340,13 @@ export async function handleNewPlacementPost(
   }
   await insertPlacement(env, linkProjectId, validation.value);
   await invalidateAfterPlacementChange(env, [validation.value.client_id]);
+  await writeLinkProjectAudit(
+    env,
+    user,
+    request,
+    validation.value.client_id,
+    `link_project_placement_create: project=${linkProjectId} match=${validation.value.page_match} strategy=${validation.value.strategy} status=${validation.value.status}`,
+  );
   return flashRedirect(`/app/link-projects/${linkProjectId}`, {
     text: `Added placement on ${validation.value.client_id}.`,
     kind: "ok",
@@ -1354,6 +1401,33 @@ export async function handleEditPlacementPost(
   // Dedupe in case it didn't change.
   const affected = Array.from(new Set([placement.client_id, validation.value.client_id]));
   await invalidateAfterPlacementChange(env, affected);
+  // Audit on each affected client. Two entries when the placement
+  // moved between clients (one "left" the source, one "arrived" on
+  // the target) — distinct enough that the audit log shows both halves.
+  if (placement.client_id === validation.value.client_id) {
+    await writeLinkProjectAudit(
+      env,
+      user,
+      request,
+      validation.value.client_id,
+      `link_project_placement_update: project=${linkProjectId} placement=${placementId} match=${validation.value.page_match} strategy=${validation.value.strategy} status=${validation.value.status}`,
+    );
+  } else {
+    await writeLinkProjectAudit(
+      env,
+      user,
+      request,
+      placement.client_id,
+      `link_project_placement_moved_out: placement=${placementId} → client=${validation.value.client_id}`,
+    );
+    await writeLinkProjectAudit(
+      env,
+      user,
+      request,
+      validation.value.client_id,
+      `link_project_placement_moved_in: project=${linkProjectId} placement=${placementId} from=${placement.client_id} match=${validation.value.page_match}`,
+    );
+  }
   return {
     response: flashRedirect(`/app/link-projects/${linkProjectId}`, {
       text: `Saved placement ${placementId}.`,
@@ -1383,6 +1457,13 @@ export async function handleDeletePlacementPost(
   }
   await deletePlacement(env, linkProjectId, placementId);
   await invalidateAfterPlacementChange(env, [placement.client_id]);
+  await writeLinkProjectAudit(
+    env,
+    user,
+    request,
+    placement.client_id,
+    `link_project_placement_delete: project=${linkProjectId} placement=${placementId} match=${placement.page_match}`,
+  );
   return flashRedirect(`/app/link-projects/${linkProjectId}`, {
     text: `Deleted placement on ${placement.client_id}.`,
     kind: "ok",
@@ -1506,6 +1587,18 @@ export async function handleBulkPlacementPost(
     });
   }
   await invalidateAfterPlacementChange(env, toCreate);
+  // One audit entry per client created — useful when scanning the audit
+  // log for "what changed on client X". The bulk-apply origin is encoded
+  // in the notes prefix so they're searchable.
+  for (const clientId of toCreate) {
+    await writeLinkProjectAudit(
+      env,
+      user,
+      request,
+      clientId,
+      `link_project_placement_bulk_create: project=${linkProjectId} match=${validation.value.page_match} strategy=${validation.value.strategy} batch_size=${toCreate.length}`,
+    );
+  }
   const skippedNote =
     skipSet.size > 0
       ? ` (skipped ${skipSet.size} clients that already had a placement for that page_match)`
