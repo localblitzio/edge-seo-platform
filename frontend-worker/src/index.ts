@@ -86,12 +86,17 @@ import {
 import { type EmailBinding, resetPasswordMessage, sendEmail } from "./email.js";
 import { inspectSourcePage } from "./inspector.js";
 import {
+  handleDeletePlacementPost,
   handleEditLinkProjectPost,
+  handleEditPlacementPost,
   handleLinkProjectStatusPost,
   handleNewLinkProjectPost,
+  handleNewPlacementPost,
+  loadProjectPageData,
   loadVisibleLinkProject,
   loadVisibleLinkProjects,
   renderEditLinkProjectForm,
+  renderEditPlacementPage,
   renderLinkProjectDetail,
   renderLinkProjectsList,
   renderNewLinkProjectForm,
@@ -1496,12 +1501,25 @@ export default {
       }
 
       if (sub === "" && method === "GET") {
+        // Detail page bundles project + placements + visible clients
+        // so the "add placement" form can render with a populated
+        // <select>. loadProjectPageData runs the placement and client
+        // queries in parallel.
+        const data = await loadProjectPageData(env, user, id);
+        if (!data) {
+          // Project disappeared between the visibility check above and
+          // here — treat as not found.
+          return new Response(null, {
+            status: 303,
+            headers: { location: "/app/link-projects" },
+          });
+        }
         return htmlResponse(
           htmlPage({
             title: `${row.label} — Edge SEO Platform`,
             body: appLayout({
               title: row.label,
-              content: renderLinkProjectDetail(row),
+              content: renderLinkProjectDetail(data.project, data.placements, data.visibleClients),
               activeNav: "link-projects",
               user,
               flash,
@@ -1511,6 +1529,102 @@ export default {
             flash: null,
           }),
         );
+      }
+
+      if (sub === "placements/new" && method === "POST") {
+        return handleNewPlacementPost(request, env, url, user, id);
+      }
+
+      // /app/link-projects/:id/placements/:pid/edit and /delete
+      if (sub.startsWith("placements/") && (method === "POST" || method === "GET")) {
+        const placementRest = sub.slice("placements/".length);
+        const slash2 = placementRest.indexOf("/");
+        if (slash2 === -1) {
+          return new Response(null, {
+            status: 303,
+            headers: { location: `/app/link-projects/${id}` },
+          });
+        }
+        const placementIdStr = placementRest.slice(0, slash2);
+        const placementSub = placementRest.slice(slash2 + 1);
+        const placementId = Number.parseInt(placementIdStr, 10);
+        if (!Number.isFinite(placementId) || placementId <= 0) {
+          return new Response(null, {
+            status: 303,
+            headers: { location: `/app/link-projects/${id}` },
+          });
+        }
+
+        if (placementSub === "edit" && method === "GET") {
+          const data = await loadProjectPageData(env, user, id);
+          if (!data) {
+            return new Response(null, {
+              status: 303,
+              headers: { location: "/app/link-projects" },
+            });
+          }
+          const placement = data.placements.find((p) => p.id === placementId);
+          if (!placement) {
+            return new Response(null, {
+              status: 303,
+              headers: { location: `/app/link-projects/${id}` },
+            });
+          }
+          return htmlResponse(
+            htmlPage({
+              title: `Edit placement — ${row.label}`,
+              body: appLayout({
+                title: `Edit placement — ${row.label}`,
+                content: renderEditPlacementPage(
+                  data.project,
+                  placement,
+                  data.visibleClients,
+                  null,
+                  [],
+                ),
+                activeNav: "link-projects",
+                user,
+                flash,
+                clients,
+              }),
+              user,
+              flash: null,
+            }),
+          );
+        }
+
+        if (placementSub === "edit" && method === "POST") {
+          const result = await handleEditPlacementPost(request, env, url, user, id, placementId);
+          if (result.response) return result.response;
+          const re = result.rerenderError;
+          if (!re) return new Response("Internal error", { status: 500 });
+          return htmlResponse(
+            htmlPage({
+              title: `Edit placement — ${row.label}`,
+              body: appLayout({
+                title: `Edit placement — ${row.label}`,
+                content: renderEditPlacementPage(
+                  re.project,
+                  re.placement,
+                  re.visibleClients,
+                  re.prefill,
+                  re.errors,
+                ),
+                activeNav: "link-projects",
+                user,
+                flash,
+                clients,
+              }),
+              user,
+              flash: null,
+            }),
+            { status: 400 },
+          );
+        }
+
+        if (placementSub === "delete" && method === "POST") {
+          return handleDeletePlacementPost(request, env, url, user, id, placementId);
+        }
       }
 
       if (sub === "edit" && method === "GET") {

@@ -1,21 +1,29 @@
 /**
- * Link Projects — Slice 1: read-only registry.
+ * Link Projects — Slices 1 + 2A.
  *
- * Operator-defined "push this target URL" groupings. Each row is the
- * planning surface for a backlink campaign:
+ * A link project is the planning surface for a backlink campaign:
  *   - target_url: the money URL (https://xyz.com/services)
  *   - anchor_options: JSON array of anchor variations
  *   - status: draft / active / paused / archived
  *
- * Slice 1 (this file) covers CRUD + multi-tenant visibility only —
- * no placements, no worker pipeline integration. Slice 2 adds a
- * link_project_placements table and integrates with HTMLRewriter.
+ * Slice 1 (read-only registry, migration 0003) is the CRUD on
+ * link_projects rows.
+ *
+ * Slice 2A (placements registry, migration 0004) adds
+ * link_project_placements: per-(project × client) rows that say
+ * "inject a link to this target on these pages of this client."
+ * Phase A covers data + admin UI only.
+ *
+ * Slice 2B (worker integration, future) compiles active placements to
+ * KV at admin-write time and synthesizes content_injections at
+ * request time so the proxy worker injects the link into HTML.
  *
  * Multi-tenancy is identical to the clients module: rows scoped by
- * owner_id; super-admin sees all.
+ * owner_id; super-admin sees all. Placements inherit visibility from
+ * the parent link_project (a placement is visible iff its project is).
  */
-import type { AppEnv, FlashMessage } from "./app.js";
-import { canSeeAllClients, esc } from "./app.js";
+import type { AppEnv, ClientRow, FlashMessage } from "./app.js";
+import { canSeeAllClients, esc, loadVisibleClients } from "./app.js";
 import type { User } from "./auth.js";
 
 export type LinkProjectStatus = "draft" | "active" | "paused" | "archived";
@@ -341,10 +349,14 @@ export function renderLinkProjectsList(rows: LinkProjectRow[], user: User): stri
       <thead><tr><th>Label</th><th>Target URL</th><th>Anchors</th><th>Status</th><th>Updated</th></tr></thead>
       <tbody>${tbody}</tbody>
     </table>
-    <p class="subtitle" style="margin-top:1rem;font-size:.85rem">Slice 1 — registry only. Per-client placement controls land in Slice 2.</p>`;
+    <p class="subtitle" style="margin-top:1rem;font-size:.85rem">Open a project to add placements — per-(client × page-match) rules that the worker uses to inject the link at request time.</p>`;
 }
 
-export function renderLinkProjectDetail(row: LinkProjectRow): string {
+export function renderLinkProjectDetail(
+  row: LinkProjectRow,
+  placements: LinkProjectPlacementRow[],
+  visibleClients: ClientRow[],
+): string {
   const anchors = parseAnchorOptions(row.anchor_options);
   const anchorList =
     anchors.length === 0
@@ -394,7 +406,8 @@ export function renderLinkProjectDetail(row: LinkProjectRow): string {
         ? `<div class="card"><h2 style="margin-top:0">Notes</h2><p style="white-space:pre-wrap;margin:0">${esc(row.notes)}</p></div>`
         : ""
     }
-    <p class="subtitle" style="font-size:.85rem;margin-top:1.5rem">Slice 2 will add per-client placements: pick which proxied sites push this target, on which page-matches, with which anchor.</p>`;
+    ${renderPlacementsSection(row, placements, visibleClients)}
+    <p class="subtitle" style="font-size:.85rem;margin-top:1.5rem">Worker-side link injection lands in Slice 2B — placements created here become metadata until that ships.</p>`;
 }
 
 interface FormPrefill {
@@ -601,4 +614,563 @@ export async function handleLinkProjectStatusPost(
     text: `Status set to ${requested}.`,
     kind: "ok",
   });
+}
+
+/* ─── Placements (Slice 2A) ─── */
+
+export type LinkProjectPlacementStrategy = "footer";
+export const LINK_PROJECT_PLACEMENT_STRATEGIES: readonly LinkProjectPlacementStrategy[] = [
+  "footer",
+];
+
+export type LinkProjectPlacementStatus = "active" | "paused";
+export const LINK_PROJECT_PLACEMENT_STATUSES: readonly LinkProjectPlacementStatus[] = [
+  "active",
+  "paused",
+];
+
+/** Common rel-attribute presets the form offers. Free-form values are
+ *  also accepted via validation (length-capped, whitespace-collapsed). */
+export const REL_PRESETS: readonly string[] = [
+  "noopener",
+  "noopener nofollow",
+  "noopener sponsored",
+  "noopener ugc",
+  "noopener noreferrer",
+];
+
+/** Row shape mirroring the link_project_placements table (migration 0004). */
+export interface LinkProjectPlacementRow {
+  id: number;
+  link_project_id: number;
+  client_id: string;
+  page_match: string;
+  strategy: LinkProjectPlacementStrategy;
+  anchor_override: string | null;
+  rel_attribute: string;
+  status: LinkProjectPlacementStatus;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface LinkProjectPlacementInput {
+  client_id: string;
+  page_match: string;
+  strategy: LinkProjectPlacementStrategy;
+  anchor_override: string | null;
+  rel_attribute: string;
+  status: LinkProjectPlacementStatus;
+}
+
+const MAX_PAGE_MATCH_LENGTH = 512;
+const MAX_ANCHOR_OVERRIDE_LENGTH = 200;
+const MAX_REL_LENGTH = 100;
+const CLIENT_ID_PATTERN = /^[a-z0-9-]+$/;
+
+/**
+ * Validate raw form input for a placement create/edit. Returns parsed
+ * input on success, list of field-level error strings on failure.
+ *
+ * `validClientIds` is the set of client_ids the operator can see —
+ * used to enforce that placements only target clients the user owns
+ * (super-admins still constrained to existing client_ids since the
+ * FK doesn't cascade on client_id).
+ */
+export function validateLinkProjectPlacementInput(
+  raw: Record<string, string>,
+  validClientIds: ReadonlySet<string>,
+): { ok: true; value: LinkProjectPlacementInput } | { ok: false; errors: string[] } {
+  const errors: string[] = [];
+
+  const clientId = (raw.client_id ?? "").trim();
+  if (clientId.length === 0) {
+    errors.push("client_id is required");
+  } else if (!CLIENT_ID_PATTERN.test(clientId)) {
+    errors.push("client_id must be lowercase letters, digits, or hyphens");
+  } else if (!validClientIds.has(clientId)) {
+    errors.push(`client_id "${clientId}" not found or not visible to you`);
+  }
+
+  // page_match — default to "all pages" if blank. Compile-check the
+  // regex so we surface invalid patterns at admin-time, not request-time.
+  let pageMatch = (raw.page_match ?? "").trim();
+  if (pageMatch.length === 0) pageMatch = "^/.*";
+  if (pageMatch.length > MAX_PAGE_MATCH_LENGTH) {
+    errors.push(`page_match must be ${MAX_PAGE_MATCH_LENGTH} characters or fewer`);
+  } else {
+    try {
+      new RegExp(pageMatch);
+    } catch (e) {
+      errors.push(`page_match is not a valid regex: ${(e as Error).message}`);
+    }
+  }
+
+  const strategyRaw = (raw.strategy ?? "footer").trim();
+  if (!(LINK_PROJECT_PLACEMENT_STRATEGIES as readonly string[]).includes(strategyRaw)) {
+    errors.push(`strategy must be one of: ${LINK_PROJECT_PLACEMENT_STRATEGIES.join(", ")}`);
+  }
+  const strategy = strategyRaw as LinkProjectPlacementStrategy;
+
+  const anchorOverrideRaw = (raw.anchor_override ?? "").trim();
+  let anchorOverride: string | null = null;
+  if (anchorOverrideRaw.length > MAX_ANCHOR_OVERRIDE_LENGTH) {
+    errors.push(`anchor_override must be ${MAX_ANCHOR_OVERRIDE_LENGTH} characters or fewer`);
+  } else if (anchorOverrideRaw.length > 0) {
+    anchorOverride = anchorOverrideRaw;
+  }
+
+  // rel_attribute — collapse whitespace, length-cap. Don't restrict to
+  // a fixed enum (HTML's link types are open-ended and search engines
+  // honour combinations like "nofollow sponsored ugc").
+  const relRaw = (raw.rel_attribute ?? "").trim().replace(/\s+/g, " ");
+  const relAttribute = relRaw.length === 0 ? "noopener" : relRaw;
+  if (relAttribute.length > MAX_REL_LENGTH) {
+    errors.push(`rel_attribute must be ${MAX_REL_LENGTH} characters or fewer`);
+  }
+
+  const statusRaw = (raw.status ?? "active").trim();
+  if (!(LINK_PROJECT_PLACEMENT_STATUSES as readonly string[]).includes(statusRaw)) {
+    errors.push(`status must be one of: ${LINK_PROJECT_PLACEMENT_STATUSES.join(", ")}`);
+  }
+  const status = statusRaw as LinkProjectPlacementStatus;
+
+  if (errors.length > 0) return { ok: false, errors };
+  return {
+    ok: true,
+    value: {
+      client_id: clientId,
+      page_match: pageMatch,
+      strategy,
+      anchor_override: anchorOverride,
+      rel_attribute: relAttribute,
+      status,
+    },
+  };
+}
+
+export async function loadPlacementsForProject(
+  env: AppEnv,
+  linkProjectId: number,
+): Promise<LinkProjectPlacementRow[]> {
+  const r = await env.CONFIG_DB.prepare(
+    "SELECT * FROM link_project_placements WHERE link_project_id = ? ORDER BY id DESC",
+  )
+    .bind(linkProjectId)
+    .all<LinkProjectPlacementRow>();
+  return r.results ?? [];
+}
+
+async function loadPlacement(
+  env: AppEnv,
+  linkProjectId: number,
+  placementId: number,
+): Promise<LinkProjectPlacementRow | null> {
+  return env.CONFIG_DB.prepare(
+    "SELECT * FROM link_project_placements WHERE id = ? AND link_project_id = ? LIMIT 1",
+  )
+    .bind(placementId, linkProjectId)
+    .first<LinkProjectPlacementRow>();
+}
+
+async function insertPlacement(
+  env: AppEnv,
+  linkProjectId: number,
+  input: LinkProjectPlacementInput,
+): Promise<void> {
+  await env.CONFIG_DB.prepare(
+    `INSERT INTO link_project_placements
+       (link_project_id, client_id, page_match, strategy, anchor_override, rel_attribute, status)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      linkProjectId,
+      input.client_id,
+      input.page_match,
+      input.strategy,
+      input.anchor_override,
+      input.rel_attribute,
+      input.status,
+    )
+    .run();
+}
+
+async function updatePlacement(
+  env: AppEnv,
+  linkProjectId: number,
+  placementId: number,
+  input: LinkProjectPlacementInput,
+): Promise<void> {
+  await env.CONFIG_DB.prepare(
+    `UPDATE link_project_placements
+       SET client_id = ?, page_match = ?, strategy = ?, anchor_override = ?,
+           rel_attribute = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+     WHERE id = ? AND link_project_id = ?`,
+  )
+    .bind(
+      input.client_id,
+      input.page_match,
+      input.strategy,
+      input.anchor_override,
+      input.rel_attribute,
+      input.status,
+      placementId,
+      linkProjectId,
+    )
+    .run();
+}
+
+async function deletePlacement(
+  env: AppEnv,
+  linkProjectId: number,
+  placementId: number,
+): Promise<void> {
+  await env.CONFIG_DB.prepare(
+    "DELETE FROM link_project_placements WHERE id = ? AND link_project_id = ?",
+  )
+    .bind(placementId, linkProjectId)
+    .run();
+}
+
+/* ─── Placement renderers ─── */
+
+interface PlacementFormPrefill {
+  client_id: string;
+  page_match: string;
+  strategy: LinkProjectPlacementStrategy;
+  anchor_override: string;
+  rel_attribute: string;
+  status: LinkProjectPlacementStatus;
+}
+
+function emptyPlacementPrefill(): PlacementFormPrefill {
+  return {
+    client_id: "",
+    page_match: "^/.*",
+    strategy: "footer",
+    anchor_override: "",
+    rel_attribute: "noopener",
+    status: "active",
+  };
+}
+
+function placementRowToPrefill(row: LinkProjectPlacementRow): PlacementFormPrefill {
+  return {
+    client_id: row.client_id,
+    page_match: row.page_match,
+    strategy: row.strategy,
+    anchor_override: row.anchor_override ?? "",
+    rel_attribute: row.rel_attribute,
+    status: row.status,
+  };
+}
+
+function rawToPlacementPrefill(raw: Record<string, string>): PlacementFormPrefill {
+  const strategy = (LINK_PROJECT_PLACEMENT_STRATEGIES as readonly string[]).includes(
+    raw.strategy ?? "",
+  )
+    ? (raw.strategy as LinkProjectPlacementStrategy)
+    : "footer";
+  const status = (LINK_PROJECT_PLACEMENT_STATUSES as readonly string[]).includes(raw.status ?? "")
+    ? (raw.status as LinkProjectPlacementStatus)
+    : "active";
+  return {
+    client_id: raw.client_id ?? "",
+    page_match: raw.page_match ?? "^/.*",
+    strategy,
+    anchor_override: raw.anchor_override ?? "",
+    rel_attribute: raw.rel_attribute ?? "noopener",
+    status,
+  };
+}
+
+function placementStatusPill(status: LinkProjectPlacementStatus): string {
+  return `<span class="pill ${status === "active" ? "pill-active" : "pill-paused"}">${esc(status)}</span>`;
+}
+
+function renderPlacementForm(opts: {
+  action: string;
+  submitLabel: string;
+  prefill: PlacementFormPrefill;
+  visibleClients: ClientRow[];
+  errors: string[];
+  isEdit: boolean;
+}): string {
+  const errBox =
+    opts.errors.length > 0 ? `<div class="error-box">${opts.errors.map(esc).join("\n")}</div>` : "";
+  const clientOptions = opts.visibleClients
+    .map(
+      (c) =>
+        `<option value="${esc(c.client_id)}"${c.client_id === opts.prefill.client_id ? " selected" : ""}>${esc(c.client_id)}</option>`,
+    )
+    .join("");
+  const strategyOptions = LINK_PROJECT_PLACEMENT_STRATEGIES.map(
+    (s) =>
+      `<option value="${esc(s)}"${s === opts.prefill.strategy ? " selected" : ""}>${esc(s)}</option>`,
+  ).join("");
+  const statusOptions = LINK_PROJECT_PLACEMENT_STATUSES.map(
+    (s) =>
+      `<option value="${esc(s)}"${s === opts.prefill.status ? " selected" : ""}>${esc(s)}</option>`,
+  ).join("");
+  const relDatalistOptions = REL_PRESETS.map((r) => `<option value="${esc(r)}">`).join("");
+  return `${errBox}
+    <form class="editor" method="POST" action="${esc(opts.action)}">
+      <div class="form-section">
+        <h2 style="margin-top:0">${opts.isEdit ? "Edit placement" : "New placement"}</h2>
+        <div class="form-grid">
+          <div>
+            <label for="lpp_client_id">client</label>
+            <select id="lpp_client_id" name="client_id" required>
+              <option value="">— pick a client —</option>
+              ${clientOptions}
+            </select>
+            <div class="field-hint">Which proxied client site this placement runs on. Only clients you own are listed.</div>
+          </div>
+          <div>
+            <label for="lpp_status">status</label>
+            <select id="lpp_status" name="status">${statusOptions}</select>
+            <div class="field-hint">A placement runs only when its parent project AND the placement itself are active.</div>
+          </div>
+          <div class="full-width">
+            <label for="lpp_page_match">page_match</label>
+            <input id="lpp_page_match" name="page_match" type="text" value="${esc(opts.prefill.page_match)}" placeholder="^/.*">
+            <div class="field-hint">Regex tested against the request path. Default <code>^/.*</code> matches every page. Use <code>^/$</code> for homepage only or <code>^/blog/.*</code> for /blog and below.</div>
+          </div>
+          <div>
+            <label for="lpp_strategy">strategy</label>
+            <select id="lpp_strategy" name="strategy">${strategyOptions}</select>
+            <div class="field-hint">How the link is injected. Slice 2B ships footer (anchor before <code>&lt;/body&gt;</code>); more strategies follow.</div>
+          </div>
+          <div>
+            <label for="lpp_rel_attribute">rel attribute</label>
+            <input id="lpp_rel_attribute" name="rel_attribute" type="text" list="lpp_rel_presets" value="${esc(opts.prefill.rel_attribute)}" maxlength="100">
+            <datalist id="lpp_rel_presets">${relDatalistOptions}</datalist>
+            <div class="field-hint">Space-separated link types. Default <code>noopener</code> for security; add <code>nofollow</code> or <code>sponsored</code> when SEO context calls for it.</div>
+          </div>
+          <div class="full-width">
+            <label for="lpp_anchor_override">anchor_override <span style="color:var(--fg-muted);font-weight:400">(optional)</span></label>
+            <input id="lpp_anchor_override" name="anchor_override" type="text" value="${esc(opts.prefill.anchor_override)}" maxlength="200" placeholder="leave blank to use the project's default anchor">
+            <div class="field-hint">If set, this placement uses this exact anchor text instead of the project's first <code>anchor_options</code> entry.</div>
+          </div>
+        </div>
+      </div>
+      <div class="form-actions">
+        <button class="btn btn-primary" type="submit">${esc(opts.submitLabel)}</button>
+      </div>
+    </form>`;
+}
+
+function renderPlacementsSection(
+  project: LinkProjectRow,
+  placements: LinkProjectPlacementRow[],
+  visibleClients: ClientRow[],
+): string {
+  const visibleIds = new Set(visibleClients.map((c) => c.client_id));
+  const projectAnchors = parseAnchorOptions(project.anchor_options);
+  const defaultAnchor =
+    projectAnchors[0] ?? "(no project anchor — set one or override per placement)";
+  const rows = placements
+    .map((p) => {
+      const orphan = !visibleIds.has(p.client_id);
+      const clientCell = orphan
+        ? `<span class="mono" style="color:var(--fg-muted)" title="client not visible to you">${esc(p.client_id)} ⚠</span>`
+        : `<a class="mono" href="/app/clients/${esc(p.client_id)}">${esc(p.client_id)}</a>`;
+      const anchorCell = p.anchor_override
+        ? `<span class="mono">${esc(p.anchor_override)}</span>`
+        : `<span style="color:var(--fg-muted);font-style:italic">project default</span>`;
+      return `<tr>
+        <td>${clientCell}</td>
+        <td class="mono">${esc(p.page_match)}</td>
+        <td>${esc(p.strategy)}</td>
+        <td>${anchorCell}</td>
+        <td class="mono" style="font-size:.8rem">${esc(p.rel_attribute)}</td>
+        <td>${placementStatusPill(p.status)}</td>
+        <td style="white-space:nowrap">
+          <a class="btn-link" href="/app/link-projects/${project.id}/placements/${p.id}/edit">Edit</a>
+          <form method="POST" action="/app/link-projects/${project.id}/placements/${p.id}/delete" style="display:inline" onclick="return confirm('Delete this placement?')">
+            <button type="submit" class="btn-link" style="color:var(--red);background:none;border:none;cursor:pointer;font:inherit;padding:0;margin-left:.5rem">Delete</button>
+          </form>
+        </td>
+      </tr>`;
+    })
+    .join("");
+  const tableOrEmpty =
+    placements.length === 0
+      ? `<div class="empty">No placements yet. Add one below to start tracking which proxied client sites should push this target.</div>`
+      : `<table class="data" style="margin-bottom:1rem">
+          <thead><tr><th>Client</th><th>page_match</th><th>strategy</th><th>anchor</th><th>rel</th><th>status</th><th></th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>`;
+  if (visibleClients.length === 0) {
+    return `<div class="card">
+      <h2 style="margin-top:0">Placements</h2>
+      <p class="field-hint" style="margin:0">You don't have any clients to attach placements to yet. Create a client first.</p>
+    </div>`;
+  }
+  return `<div class="card">
+    <h2 style="margin-top:0">Placements</h2>
+    <p class="field-hint" style="margin:.2rem 0 .8rem">Each placement says "inject a link to <code>${esc(project.target_url)}</code> on this client's pages matching the regex." Default anchor will be <code>${esc(defaultAnchor)}</code> unless overridden.</p>
+    ${tableOrEmpty}
+    ${renderPlacementForm({
+      action: `/app/link-projects/${project.id}/placements/new`,
+      submitLabel: "Add placement",
+      prefill: emptyPlacementPrefill(),
+      visibleClients,
+      errors: [],
+      isEdit: false,
+    })}
+  </div>`;
+}
+
+export function renderEditPlacementPage(
+  project: LinkProjectRow,
+  placement: LinkProjectPlacementRow,
+  visibleClients: ClientRow[],
+  prefill: PlacementFormPrefill | null,
+  errors: string[] = [],
+): string {
+  return `<div class="crumbs"><a href="/app/link-projects/${project.id}">← ${esc(project.label)}</a></div>
+    <h1>Edit placement</h1>
+    <p class="subtitle">Editing placement ${placement.id} on link project <strong>${esc(project.label)}</strong>.</p>
+    ${renderPlacementForm({
+      action: `/app/link-projects/${project.id}/placements/${placement.id}/edit`,
+      submitLabel: "Save",
+      prefill: prefill ?? placementRowToPrefill(placement),
+      visibleClients,
+      errors,
+      isEdit: true,
+    })}`;
+}
+
+/* ─── Placement POST handlers ─── */
+
+async function visibleClientIdSet(env: AppEnv, user: User): Promise<Set<string>> {
+  const clients = await loadVisibleClients(env, user);
+  return new Set(clients.map((c) => c.client_id));
+}
+
+export async function handleNewPlacementPost(
+  request: Request,
+  env: AppEnv,
+  url: URL,
+  user: User,
+  linkProjectId: number,
+): Promise<Response> {
+  const csrf = checkCsrf(request, url);
+  if (csrf) return csrf;
+  const project = await loadVisibleLinkProject(env, user, linkProjectId);
+  if (!project) return new Response("Not found", { status: 404 });
+  const form = await request.formData();
+  const raw: Record<string, string> = {};
+  for (const [k, v] of form.entries()) {
+    if (typeof v === "string") raw[k] = v;
+  }
+  const validIds = await visibleClientIdSet(env, user);
+  const validation = validateLinkProjectPlacementInput(raw, validIds);
+  if (!validation.ok) {
+    return flashRedirect(`/app/link-projects/${linkProjectId}`, {
+      text: `Could not add placement: ${validation.errors.join("; ")}`,
+      kind: "err",
+    });
+  }
+  await insertPlacement(env, linkProjectId, validation.value);
+  return flashRedirect(`/app/link-projects/${linkProjectId}`, {
+    text: `Added placement on ${validation.value.client_id}.`,
+    kind: "ok",
+  });
+}
+
+export async function handleEditPlacementPost(
+  request: Request,
+  env: AppEnv,
+  url: URL,
+  user: User,
+  linkProjectId: number,
+  placementId: number,
+): Promise<{
+  response?: Response;
+  rerenderError?: {
+    project: LinkProjectRow;
+    placement: LinkProjectPlacementRow;
+    prefill: PlacementFormPrefill;
+    errors: string[];
+    visibleClients: ClientRow[];
+  };
+}> {
+  const csrf = checkCsrf(request, url);
+  if (csrf) return { response: csrf };
+  const project = await loadVisibleLinkProject(env, user, linkProjectId);
+  if (!project) return { response: new Response("Not found", { status: 404 }) };
+  const placement = await loadPlacement(env, linkProjectId, placementId);
+  if (!placement) return { response: new Response("Not found", { status: 404 }) };
+  const form = await request.formData();
+  const raw: Record<string, string> = {};
+  for (const [k, v] of form.entries()) {
+    if (typeof v === "string") raw[k] = v;
+  }
+  const visibleClients = await loadVisibleClients(env, user);
+  const validIds = new Set(visibleClients.map((c) => c.client_id));
+  const validation = validateLinkProjectPlacementInput(raw, validIds);
+  if (!validation.ok) {
+    return {
+      rerenderError: {
+        project,
+        placement,
+        prefill: rawToPlacementPrefill(raw),
+        errors: validation.errors,
+        visibleClients,
+      },
+    };
+  }
+  await updatePlacement(env, linkProjectId, placementId, validation.value);
+  return {
+    response: flashRedirect(`/app/link-projects/${linkProjectId}`, {
+      text: `Saved placement ${placementId}.`,
+      kind: "ok",
+    }),
+  };
+}
+
+export async function handleDeletePlacementPost(
+  request: Request,
+  env: AppEnv,
+  url: URL,
+  user: User,
+  linkProjectId: number,
+  placementId: number,
+): Promise<Response> {
+  const csrf = checkCsrf(request, url);
+  if (csrf) return csrf;
+  const project = await loadVisibleLinkProject(env, user, linkProjectId);
+  if (!project) return new Response("Not found", { status: 404 });
+  const placement = await loadPlacement(env, linkProjectId, placementId);
+  if (!placement) {
+    return flashRedirect(`/app/link-projects/${linkProjectId}`, {
+      text: "Placement not found (already deleted?)",
+      kind: "warn",
+    });
+  }
+  await deletePlacement(env, linkProjectId, placementId);
+  return flashRedirect(`/app/link-projects/${linkProjectId}`, {
+    text: `Deleted placement on ${placement.client_id}.`,
+    kind: "ok",
+  });
+}
+
+/** Loader used by the detail-page route — convenience wrapper. */
+export async function loadProjectPageData(
+  env: AppEnv,
+  user: User,
+  linkProjectId: number,
+): Promise<{
+  project: LinkProjectRow;
+  placements: LinkProjectPlacementRow[];
+  visibleClients: ClientRow[];
+} | null> {
+  const project = await loadVisibleLinkProject(env, user, linkProjectId);
+  if (!project) return null;
+  const [placements, visibleClients] = await Promise.all([
+    loadPlacementsForProject(env, linkProjectId),
+    loadVisibleClients(env, user),
+  ]);
+  return { project, placements, visibleClients };
 }

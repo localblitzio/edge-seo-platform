@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  LINK_PROJECT_PLACEMENT_STATUSES,
+  LINK_PROJECT_PLACEMENT_STRATEGIES,
   LINK_PROJECT_STATUSES,
   parseAnchorOptions,
   validateLinkProjectInput,
+  validateLinkProjectPlacementInput,
 } from "../../../frontend-worker/src/link-projects.js";
 
 describe("parseAnchorOptions", () => {
@@ -160,5 +163,153 @@ describe("validateLinkProjectInput — sad paths", () => {
     });
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.errors.some((e) => /label/.test(e))).toBe(true);
+  });
+});
+
+const VALID_CLIENTS = new Set(["acme", "lantern-crest", "404-media"]);
+
+describe("validateLinkProjectPlacementInput — happy paths", () => {
+  it("accepts a minimal valid submission with sensible defaults", () => {
+    const r = validateLinkProjectPlacementInput({ client_id: "acme" }, VALID_CLIENTS);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.value.client_id).toBe("acme");
+      expect(r.value.page_match).toBe("^/.*"); // default = all pages
+      expect(r.value.strategy).toBe("footer");
+      expect(r.value.anchor_override).toBeNull();
+      expect(r.value.rel_attribute).toBe("noopener");
+      expect(r.value.status).toBe("active");
+    }
+  });
+
+  it("respects custom page_match when provided", () => {
+    const r = validateLinkProjectPlacementInput(
+      { client_id: "acme", page_match: "^/blog/.*" },
+      VALID_CLIENTS,
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.page_match).toBe("^/blog/.*");
+  });
+
+  it("collapses whitespace in rel_attribute", () => {
+    const r = validateLinkProjectPlacementInput(
+      { client_id: "acme", rel_attribute: "  noopener   nofollow  " },
+      VALID_CLIENTS,
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.rel_attribute).toBe("noopener nofollow");
+  });
+
+  it("treats blank anchor_override as null", () => {
+    const r = validateLinkProjectPlacementInput(
+      { client_id: "acme", anchor_override: "   " },
+      VALID_CLIENTS,
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.anchor_override).toBeNull();
+  });
+
+  it("preserves a non-blank anchor_override", () => {
+    const r = validateLinkProjectPlacementInput(
+      { client_id: "acme", anchor_override: "click here" },
+      VALID_CLIENTS,
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.anchor_override).toBe("click here");
+  });
+
+  it("accepts every strategy value defined in LINK_PROJECT_PLACEMENT_STRATEGIES", () => {
+    for (const s of LINK_PROJECT_PLACEMENT_STRATEGIES) {
+      const r = validateLinkProjectPlacementInput(
+        { client_id: "acme", strategy: s },
+        VALID_CLIENTS,
+      );
+      expect(r.ok).toBe(true);
+    }
+  });
+
+  it("accepts every status value defined in LINK_PROJECT_PLACEMENT_STATUSES", () => {
+    for (const s of LINK_PROJECT_PLACEMENT_STATUSES) {
+      const r = validateLinkProjectPlacementInput({ client_id: "acme", status: s }, VALID_CLIENTS);
+      expect(r.ok).toBe(true);
+    }
+  });
+});
+
+describe("validateLinkProjectPlacementInput — sad paths", () => {
+  it("rejects missing client_id", () => {
+    const r = validateLinkProjectPlacementInput({}, VALID_CLIENTS);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors.some((e) => /client_id is required/.test(e))).toBe(true);
+  });
+
+  it("rejects malformed client_id (uppercase)", () => {
+    const r = validateLinkProjectPlacementInput({ client_id: "ACME" }, VALID_CLIENTS);
+    expect(r.ok).toBe(false);
+    if (!r.ok)
+      expect(r.errors.some((e) => /lowercase letters, digits, or hyphens/.test(e))).toBe(true);
+  });
+
+  it("rejects a client_id the user can't see", () => {
+    const r = validateLinkProjectPlacementInput(
+      { client_id: "someone-elses-client" },
+      VALID_CLIENTS,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors.some((e) => /not found or not visible/.test(e))).toBe(true);
+  });
+
+  it("rejects an invalid regex in page_match", () => {
+    const r = validateLinkProjectPlacementInput(
+      { client_id: "acme", page_match: "(unclosed" },
+      VALID_CLIENTS,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors.some((e) => /not a valid regex/.test(e))).toBe(true);
+  });
+
+  it("rejects an unknown strategy", () => {
+    const r = validateLinkProjectPlacementInput(
+      { client_id: "acme", strategy: "header" },
+      VALID_CLIENTS,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors.some((e) => /strategy/.test(e))).toBe(true);
+  });
+
+  it("rejects an unknown status", () => {
+    const r = validateLinkProjectPlacementInput(
+      { client_id: "acme", status: "draft" },
+      VALID_CLIENTS,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors.some((e) => /status/.test(e))).toBe(true);
+  });
+
+  it("rejects an over-long anchor_override", () => {
+    const r = validateLinkProjectPlacementInput(
+      { client_id: "acme", anchor_override: "a".repeat(201) },
+      VALID_CLIENTS,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors.some((e) => /anchor_override/.test(e))).toBe(true);
+  });
+
+  it("rejects an over-long rel_attribute", () => {
+    const r = validateLinkProjectPlacementInput(
+      { client_id: "acme", rel_attribute: "a".repeat(101) },
+      VALID_CLIENTS,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors.some((e) => /rel_attribute/.test(e))).toBe(true);
+  });
+
+  it("rejects an over-long page_match", () => {
+    const r = validateLinkProjectPlacementInput(
+      { client_id: "acme", page_match: `^/${"a".repeat(513)}$` },
+      VALID_CLIENTS,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors.some((e) => /page_match/.test(e))).toBe(true);
   });
 });
