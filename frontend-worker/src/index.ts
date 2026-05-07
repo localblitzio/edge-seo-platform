@@ -94,6 +94,7 @@ import {
   handleClusterStatusPost,
   handleEditClusterPost,
   handleNewClusterPost,
+  loadAllClusterMembersByCluster,
   loadClusterMemberCounts,
   loadClusterPageData,
   loadVisibleClusters,
@@ -789,13 +790,22 @@ export default {
 
     if (path === "/app/clients") {
       if (!user) return redirectToLogin(url);
+      // Load clients + cluster filter data in parallel — the Sites
+      // page filter dropdowns need both, so we orchestrate here
+      // rather than have renderClientsList call into clusters.ts
+      // (which would be a circular import).
       const clients = await loadVisibleClients(env, user);
+      const visibleClusters = await loadVisibleClusters(env, user);
+      const clusterMembers = await loadAllClusterMembersByCluster(
+        env,
+        visibleClusters.map((c) => c.id),
+      );
       return htmlResponse(
         htmlPage({
-          title: "Clients — Edge SEO Platform",
+          title: "Proxied sites — Edge SEO Platform",
           body: appLayout({
-            title: "Clients",
-            content: await renderClientsList(env, user),
+            title: "Proxied sites",
+            content: renderClientsList(clients, visibleClusters, clusterMembers, user),
             activeNav: "clients",
             user,
             flash,
@@ -813,9 +823,9 @@ export default {
       const clients = await loadVisibleClients(env, user);
       return htmlResponse(
         htmlPage({
-          title: "New client — Edge SEO Platform",
+          title: "New proxied site — Edge SEO Platform",
           body: appLayout({
-            title: "New client",
+            title: "New proxied site",
             content: renderNewClientForm(NEW_CLIENT_TEMPLATE, null),
             activeNav: "clients",
             user,
@@ -836,9 +846,9 @@ export default {
       const clients = await loadVisibleClients(env, user);
       return htmlResponse(
         htmlPage({
-          title: "New client — Edge SEO Platform",
+          title: "New proxied site — Edge SEO Platform",
           body: appLayout({
-            title: "New client",
+            title: "New proxied site",
             content: renderNewClientForm(
               result.rerenderError?.raw ?? NEW_CLIENT_TEMPLATE,
               result.rerenderError?.error ?? "Unknown error",

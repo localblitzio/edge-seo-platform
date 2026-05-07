@@ -21,7 +21,7 @@
  *     / `loadVisibleClient`.
  */
 
-import { DEFAULT_PROXY_ZONE, PROXY_ZONES } from "../../src/config/proxy-zone.js";
+import { DEFAULT_PROXY_ZONE, PROXY_ZONES, matchProxyZone } from "../../src/config/proxy-zone.js";
 import { ClientConfig } from "../../src/config/schema.js";
 import { assertConfigInvariants } from "../../src/config/validator.js";
 import { ConfigValidationError } from "../../src/lib/errors.js";
@@ -374,9 +374,21 @@ interface AppLayoutOpts {
 }
 
 export function appSidebar(opts: { activeNav: string; clients: ClientRow[]; user: User }): string {
+  // Sidebar is pure top-level nav. Per-site jump-list was dropped in
+  // the "Clients → Proxied sites" rename — it doesn't scale past ~25
+  // sites and the Sites page now has search + filters that beat
+  // sidebar scrolling for any non-trivial site count. `opts.clients`
+  // stays in the signature so callers don't have to update; we just
+  // don't render it.
+  void opts.clients;
   const navLinks: Array<{ href: string; id: string; label: string; icon: string }> = [
     { href: "/app", id: "home", label: "Overview", icon: NAV_ICONS.home ?? "" },
-    { href: "/app/clients", id: "clients", label: "Clients", icon: NAV_ICONS.clients ?? "" },
+    {
+      href: "/app/clients",
+      id: "clients",
+      label: "Proxied sites",
+      icon: NAV_ICONS.clients ?? "",
+    },
     {
       href: "/app/link-projects",
       id: "link-projects",
@@ -401,22 +413,7 @@ export function appSidebar(opts: { activeNav: string; clients: ClientRow[]; user
     opts.user.role === "super_admin"
       ? `<div class="app-sidebar-section">Super-admin</div><a href="/admin/users"${opts.activeNav === "admin:users" ? ' class="active"' : ""}>${NAV_ICONS.admin}<span>Users</span></a>`
       : "";
-  const clientList =
-    opts.clients.length > 0
-      ? `<div class="app-sidebar-section">Clients</div>${opts.clients
-          .map((c) => {
-            const dotClass =
-              c.status === "active"
-                ? "status-dot-active"
-                : c.status === "paused"
-                  ? "status-dot-paused"
-                  : "status-dot-terminated";
-            return `<a href="/app/clients/${esc(c.client_id)}"${
-              opts.activeNav === `client:${c.client_id}` ? ' class="active"' : ""
-            } style="padding-left:.95rem;font-size:.85rem" title="${esc(c.status)}"><span class="status-dot ${dotClass}"></span><span>${esc(c.client_id)}</span></a>`;
-          })
-          .join("")}`
-      : "";
+  const clientList = ""; // Per-site sub-list dropped — see comment above.
   // Build version pinned at deploy time — operators use this to
   // verify a change actually shipped. Click to reveal full SHA via
   // title attribute.
@@ -470,47 +467,177 @@ export async function renderOverview(env: AppEnv, user: User): Promise<string> {
     .join("");
   const ownership =
     user.role === "super_admin"
-      ? "Showing all clients across the platform (super-admin)."
-      : `Showing ${clients.length} client${clients.length === 1 ? "" : "s"} you own.`;
+      ? "Showing all proxied sites across the platform (super-admin)."
+      : `Showing ${clients.length} proxied site${clients.length === 1 ? "" : "s"} you own.`;
   return `<h1>Overview</h1>
     <p class="subtitle">${ownership}</p>
-    <div class="stats">${stat("clients", "Clients", clients.length)}${stat("routes", "Routes", totalRoutes)}${stat("redirects", "Redirects", totalRedirects)}${stat("canonicals", "Canonicals", totalCanonicals)}${stat("schemas", "Schemas", totalSchema)}</div>
+    <div class="stats">${stat("clients", "Proxied sites", clients.length)}${stat("routes", "Routes", totalRoutes)}${stat("redirects", "Redirects", totalRedirects)}${stat("canonicals", "Canonicals", totalCanonicals)}${stat("schemas", "Schemas", totalSchema)}</div>
     ${
       clients.length === 0
-        ? `<div class="empty">No clients to show. Use the legacy admin worker to create one (write surface ports here in a follow-up).</div>`
-        : `<h2>Your clients</h2><table class="data"><thead><tr><th>client_id</th><th>proxy</th><th>status</th><th>updated</th></tr></thead><tbody>${rows}</tbody></table>`
+        ? `<div class="empty">No proxied sites yet. <a href="/app/clients/new">Add one →</a> or <a href="/app/clients/bulk-new">bulk-create from a URL list</a>.</div>`
+        : `<h2>Your proxied sites</h2><table class="data"><thead><tr><th>client_id</th><th>proxy</th><th>status</th><th>updated</th></tr></thead><tbody>${rows}</tbody></table>`
     }`;
 }
 
-export async function renderClientsList(env: AppEnv, user: User): Promise<string> {
-  const clients = await loadVisibleClients(env, user);
+/** Cluster info needed by the Sites page filter. Passed in by the
+ *  route handler (data orchestration lives there to avoid an
+ *  app.ts → clusters.ts import cycle). */
+export interface ClusterFilterOption {
+  id: number;
+  type: "topical" | "geo";
+  label: string;
+}
+
+export function renderClientsList(
+  clients: ClientRow[],
+  clusters: readonly ClusterFilterOption[],
+  clusterMembers: ReadonlyMap<number, readonly string[]>,
+  user: User,
+): string {
+  const headerActions = `<span style="float:right;display:inline-flex;gap:.4rem"><a href="/app/clients/bulk-new" class="btn">Bulk-create</a> <a href="/app/clients/new" class="btn btn-primary">+ New proxied site</a></span>`;
   if (clients.length === 0) {
-    return `<h1>Clients <span style="float:right;display:inline-flex;gap:.4rem"><a href="/app/clients/bulk-new" class="btn">Bulk-create</a> <a href="/app/clients/new" class="btn btn-primary">+ New client</a></span></h1>
-      <p class="subtitle">${user.role === "super_admin" ? "No clients in the platform yet." : "You don't own any clients yet."}</p>
-      <div class="empty">No clients to show. <a href="/app/clients/new">Create the first one →</a> or <a href="/app/clients/bulk-new">bulk-create from a URL list</a>.</div>`;
+    return `<h1>Proxied sites ${headerActions}</h1>
+      <p class="subtitle">${user.role === "super_admin" ? "No proxied sites in the platform yet." : "You don't have any proxied sites yet."}</p>
+      <div class="empty">No proxied sites to show. <a href="/app/clients/new">Add the first one →</a> or <a href="/app/clients/bulk-new">bulk-create from a URL list</a>.</div>`;
   }
+  // Build a per-site cluster-membership map so we can stamp each row's
+  // data-clusters attribute. cluster_members is indexed by cluster_id;
+  // we invert it to client_id → list of cluster_ids.
+  const clustersByClient = new Map<string, number[]>();
+  for (const [clusterId, memberIds] of clusterMembers.entries()) {
+    for (const memberId of memberIds) {
+      const list = clustersByClient.get(memberId) ?? [];
+      list.push(clusterId);
+      clustersByClient.set(memberId, list);
+    }
+  }
+  // Per-row zone — null means "in_place" (proxy_domain is the customer
+  // apex, not on a registered platform zone). This drives the zone
+  // filter dropdown.
   const rows = clients
-    .map(
-      (c) => `<tr>
+    .map((c) => {
+      const zone = matchProxyZone(c.proxy_domain) ?? "in_place";
+      const memberOf = clustersByClient.get(c.client_id) ?? [];
+      // Lowercased substring soup for the search filter — JS just
+      // .includes() against the input value to decide visibility.
+      const searchHaystack = `${c.client_id} ${c.proxy_domain} ${c.source_domain}`.toLowerCase();
+      return `<tr
+          data-search="${esc(searchHaystack)}"
+          data-status="${esc(c.status)}"
+          data-zone="${esc(zone)}"
+          data-clusters="${memberOf.join(",")}">
         <td><a href="/app/clients/${esc(c.client_id)}" class="mono">${esc(c.client_id)}</a></td>
         <td class="mono">${esc(c.proxy_domain)}</td>
         <td class="mono">${esc(c.source_domain)}</td>
         <td>${statusPill(c.status)}</td>
-        <td>v${esc(c.schema_version)}</td>
+        <td class="mono" style="font-size:.8rem;color:var(--fg-muted)">${esc(zone)}</td>
         <td class="mono" style="color:var(--fg-muted)">${esc(c.created_at)}</td>
-      </tr>`,
-    )
+      </tr>`;
+    })
     .join("");
   const ownership =
     user.role === "super_admin"
-      ? "All clients across the platform (super-admin)."
-      : `Clients you own (${clients.length}).`;
-  return `<h1>Clients <span style="float:right;display:inline-flex;gap:.4rem"><a href="/app/clients/bulk-new" class="btn">Bulk-create</a> <a href="/app/clients/new" class="btn btn-primary">+ New client</a></span></h1>
+      ? "All proxied sites across the platform (super-admin)."
+      : `${clients.length} proxied site${clients.length === 1 ? "" : "s"} you own.`;
+  // Filter UI: search + status + zone + cluster. All client-side JS
+  // filtering since 100 rows is fine in the DOM. Each filter narrows
+  // independently; visibility = AND across all four filters.
+  const zoneOptions = [
+    `<option value="">All zones</option>`,
+    ...PROXY_ZONES.map((z) => `<option value="${esc(z)}">${esc(z)}</option>`),
+    `<option value="in_place">in-place (custom apex)</option>`,
+  ].join("");
+  const clusterOptions = [
+    `<option value="">All clusters</option>`,
+    ...clusters
+      .slice()
+      .sort((a, b) => a.label.localeCompare(b.label))
+      .map(
+        (c) =>
+          `<option value="${c.id}">${esc(c.label)} (${esc(c.type)}, ${(clusterMembers.get(c.id) ?? []).length} sites)</option>`,
+      ),
+  ].join("");
+  return `<h1>Proxied sites ${headerActions}</h1>
     <p class="subtitle">${ownership}</p>
-    <table class="data">
-      <thead><tr><th>client_id</th><th>proxy</th><th>source</th><th>status</th><th>schema</th><th>created</th></tr></thead>
+    <div class="card" style="padding:.75rem 1rem;margin-bottom:.75rem">
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:.6rem;align-items:end">
+        <div>
+          <label for="sites_search" style="font-weight:600;font-size:.78rem;display:block;margin-bottom:.2rem">Search</label>
+          <input id="sites_search" type="text" placeholder="client_id, proxy, or source domain" style="font:inherit;font-size:.88rem;padding:.4rem .55rem;border:1px solid var(--border-strong);border-radius:var(--radius);background:var(--bg);color:var(--fg);width:100%">
+        </div>
+        <div>
+          <label for="sites_status" style="font-weight:600;font-size:.78rem;display:block;margin-bottom:.2rem">Status</label>
+          <select id="sites_status" style="font:inherit;font-size:.88rem;padding:.4rem .55rem;border:1px solid var(--border-strong);border-radius:var(--radius);background:var(--bg);color:var(--fg);width:100%">
+            <option value="">All statuses</option>
+            <option value="active">active</option>
+            <option value="paused">paused</option>
+            <option value="terminated">terminated</option>
+          </select>
+        </div>
+        <div>
+          <label for="sites_zone" style="font-weight:600;font-size:.78rem;display:block;margin-bottom:.2rem">Zone</label>
+          <select id="sites_zone" style="font:inherit;font-size:.88rem;padding:.4rem .55rem;border:1px solid var(--border-strong);border-radius:var(--radius);background:var(--bg);color:var(--fg);width:100%">${zoneOptions}</select>
+        </div>
+        <div>
+          <label for="sites_cluster" style="font-weight:600;font-size:.78rem;display:block;margin-bottom:.2rem">Cluster</label>
+          <select id="sites_cluster" style="font:inherit;font-size:.88rem;padding:.4rem .55rem;border:1px solid var(--border-strong);border-radius:var(--radius);background:var(--bg);color:var(--fg);width:100%">${clusterOptions}</select>
+        </div>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:.6rem">
+        <span id="sites_count" class="field-hint" style="margin:0">${clients.length} of ${clients.length} sites</span>
+        <button type="button" id="sites_reset" class="btn" style="font-size:.75rem;padding:.25rem .65rem">Clear filters</button>
+      </div>
+    </div>
+    <table class="data" id="sites_table">
+      <thead><tr><th>client_id</th><th>proxy</th><th>source</th><th>status</th><th>zone</th><th>created</th></tr></thead>
       <tbody>${rows}</tbody>
-    </table>`;
+    </table>
+    <script>
+    (function(){
+      var search = document.getElementById('sites_search');
+      var status = document.getElementById('sites_status');
+      var zone = document.getElementById('sites_zone');
+      var cluster = document.getElementById('sites_cluster');
+      var count = document.getElementById('sites_count');
+      var reset = document.getElementById('sites_reset');
+      var tbody = document.querySelector('#sites_table tbody');
+      if (!tbody) return;
+      var rows = tbody.querySelectorAll('tr');
+      var total = rows.length;
+      function applyFilters(){
+        var q = (search.value || '').toLowerCase().trim();
+        var s = status.value;
+        var z = zone.value;
+        var c = cluster.value;
+        var visible = 0;
+        for (var i = 0; i < rows.length; i++) {
+          var r = rows[i];
+          var ok = true;
+          if (q && r.dataset.search.indexOf(q) === -1) ok = false;
+          if (ok && s && r.dataset.status !== s) ok = false;
+          if (ok && z && r.dataset.zone !== z) ok = false;
+          if (ok && c) {
+            var ids = (r.dataset.clusters || '').split(',').filter(Boolean);
+            if (ids.indexOf(c) === -1) ok = false;
+          }
+          r.style.display = ok ? '' : 'none';
+          if (ok) visible += 1;
+        }
+        count.textContent = visible + ' of ' + total + ' sites';
+      }
+      [search, status, zone, cluster].forEach(function(el){
+        el.addEventListener('input', applyFilters);
+        el.addEventListener('change', applyFilters);
+      });
+      reset.addEventListener('click', function(){
+        search.value = '';
+        status.value = '';
+        zone.value = '';
+        cluster.value = '';
+        applyFilters();
+      });
+    })();
+    </script>`;
 }
 
 function rulesTable(headers: string[], rows: string[]): string {
@@ -807,7 +934,7 @@ function renderPagesWithEditsPanel(
 export async function renderClientDetail(env: AppEnv, user: User, id: string): Promise<string> {
   const client = await loadVisibleClient(env, user, id);
   if (!client) {
-    return `<div class="crumbs"><a href="/app/clients">← Clients</a></div>
+    return `<div class="crumbs"><a href="/app/clients">← Proxied sites</a></div>
       <h1>Not found</h1>
       <div class="empty">No client with that id, or you don't have access to it.</div>`;
   }
@@ -867,7 +994,7 @@ export async function renderClientDetail(env: AppEnv, user: User, id: string): P
     mode === "in_place"
       ? `<a class="mono" href="https://${esc(client.proxy_domain)}/" target="_blank" rel="noopener">${esc(client.proxy_domain)}</a> &nbsp;→&nbsp; origin pulled from <span class="mono">${esc(routeOriginSummary(cfg))}</span>`
       : `<a class="mono" href="https://${esc(client.proxy_domain)}/" target="_blank" rel="noopener">${esc(client.proxy_domain)}</a> &nbsp;→&nbsp; <span class="mono">${esc(client.source_domain)}</span>`;
-  return `<div class="crumbs"><a href="/app/clients">← Clients</a></div>
+  return `<div class="crumbs"><a href="/app/clients">← Proxied sites</a></div>
     <h1>${esc(client.client_id)} ${statusPill(client.status)} ${modePill}</h1>
     <p class="subtitle">${subtitle}</p>
     ${renderActionsRow(client)}
@@ -912,13 +1039,13 @@ export async function renderAuditPage(env: AppEnv, user: User): Promise<string> 
   const ownership =
     user.role === "super_admin"
       ? "All audit + attestation events across the platform."
-      : "Audit + attestation events on clients you own.";
+      : "Audit + attestation events on proxied sites you own.";
   return `<h1>Audit log</h1>
     <p class="subtitle">${ownership}</p>
     <h2>Audit events</h2>
-    ${auditRows ? `<table class="data"><thead><tr><th>id</th><th>at</th><th>client</th><th>event</th><th>actor</th><th>notes</th></tr></thead><tbody>${auditRows}</tbody></table>` : `<div class="empty">No audit events recorded.</div>`}
+    ${auditRows ? `<table class="data"><thead><tr><th>id</th><th>at</th><th>site</th><th>event</th><th>actor</th><th>notes</th></tr></thead><tbody>${auditRows}</tbody></table>` : `<div class="empty">No audit events recorded.</div>`}
     <h2>Attestations</h2>
-    ${attestRows ? `<table class="data"><thead><tr><th>id</th><th>at</th><th>client</th><th>proxy</th><th>source</th><th>by</th><th>scope</th></tr></thead><tbody>${attestRows}</tbody></table>` : `<div class="empty">No attestations recorded.</div>`}`;
+    ${attestRows ? `<table class="data"><thead><tr><th>id</th><th>at</th><th>site</th><th>proxy</th><th>source</th><th>by</th><th>scope</th></tr></thead><tbody>${attestRows}</tbody></table>` : `<div class="empty">No attestations recorded.</div>`}`;
 }
 
 /* ─── Audit + KV + validation helpers ─── */
@@ -1310,8 +1437,8 @@ export const NEW_CLIENT_TEMPLATE = `{
 }`;
 
 export function renderNewClientForm(prefilledJson: string, error: string | null): string {
-  return `<div class="crumbs"><a href="/app/clients">← Clients</a></div>
-    <h1>New client</h1>
+  return `<div class="crumbs"><a href="/app/clients">← Proxied sites</a></div>
+    <h1>New proxied site</h1>
     <p class="subtitle">Fill the structured fields below or edit the JSON directly. Validates against the same Zod schema the Worker uses at load time.</p>
     ${error ? `<div class="error-box">${esc(error)}</div>` : ""}
     <form class="editor" method="POST" action="/app/clients/new">
