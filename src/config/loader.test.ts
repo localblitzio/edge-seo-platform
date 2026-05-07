@@ -323,3 +323,91 @@ describe("loadConfig — link-project placements merge (Slice 2B)", () => {
     expect(config.content_injections).toHaveLength(operatorRuleCount + 1);
   });
 });
+
+describe("loadConfig — cluster_links merge (Slice C: cluster cross-linking)", () => {
+  it("appends cluster_links content_injections alongside placements", () => {
+    const placementsEnvelope = {
+      compiled_at: "2026-05-07T00:00:00Z",
+      content_injections: [
+        {
+          match: "^/.*",
+          selector: "body",
+          position: "append",
+          html: '<a data-test="placement">placement</a>',
+        },
+      ],
+    };
+    const clusterLinksEnvelope = {
+      compiled_at: "2026-05-07T00:00:00Z",
+      content_injections: [
+        {
+          match: "^/.*",
+          selector: "body",
+          position: "append",
+          html: '<div data-cluster-related="1">cluster</div>',
+        },
+      ],
+    };
+    const kv = makeKv({
+      [`domain:${HOST}`]: CLIENT_ID,
+      [`config:${CLIENT_ID}`]: VALID_JSON,
+      [`placements:${CLIENT_ID}`]: JSON.stringify(placementsEnvelope),
+      [`cluster_links:${CLIENT_ID}`]: JSON.stringify(clusterLinksEnvelope),
+    });
+    const d1 = makeD1([]);
+    const { ctx } = makeCtx();
+
+    return loadConfig(HOST, makeEnv(kv.binding, d1.binding), ctx).then((config) => {
+      const operatorRuleCount = JSON.parse(VALID_JSON).content_injections?.length ?? 0;
+      // Operator rules first, then placement rule, then cluster_links rule.
+      expect(config.content_injections).toHaveLength(operatorRuleCount + 2);
+      // Last rule is the cluster-link entry (HTMLRewriter applies in
+      // attach order — adding cluster-link entries last means they
+      // run AFTER placement rules, which is the documented ordering).
+      const last = config.content_injections[config.content_injections.length - 1];
+      expect(last?.html).toContain("data-cluster-related");
+    });
+  });
+
+  it("merges cluster_links even when placements is absent", () => {
+    const clusterLinksEnvelope = {
+      compiled_at: "2026-05-07T00:00:00Z",
+      content_injections: [
+        {
+          match: "^/.*",
+          selector: "body",
+          position: "append",
+          html: '<div data-cluster-related="1">cluster</div>',
+        },
+      ],
+    };
+    const kv = makeKv({
+      [`domain:${HOST}`]: CLIENT_ID,
+      [`config:${CLIENT_ID}`]: VALID_JSON,
+      [`cluster_links:${CLIENT_ID}`]: JSON.stringify(clusterLinksEnvelope),
+    });
+    const d1 = makeD1([]);
+    const { ctx } = makeCtx();
+
+    return loadConfig(HOST, makeEnv(kv.binding, d1.binding), ctx).then((config) => {
+      const operatorRuleCount = JSON.parse(VALID_JSON).content_injections?.length ?? 0;
+      expect(config.content_injections).toHaveLength(operatorRuleCount + 1);
+      const last = config.content_injections[config.content_injections.length - 1];
+      expect(last?.html).toContain("data-cluster-related");
+    });
+  });
+
+  it("returns the config unchanged when both placements + cluster_links are absent", () => {
+    const kv = makeKv({
+      [`domain:${HOST}`]: CLIENT_ID,
+      [`config:${CLIENT_ID}`]: VALID_JSON,
+    });
+    const d1 = makeD1([]);
+    const { ctx } = makeCtx();
+
+    return loadConfig(HOST, makeEnv(kv.binding, d1.binding), ctx).then((config) => {
+      const operatorRuleCount = JSON.parse(VALID_JSON).content_injections?.length ?? 0;
+      expect(config.content_injections).toHaveLength(operatorRuleCount);
+    });
+  });
+});

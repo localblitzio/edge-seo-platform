@@ -13,12 +13,18 @@
  *   - `config:${client_id}`
  *   - `redirects:${client_id}`
  *   - `placements:${client_id}`
+ *   - `cluster_links:${client_id}`
  *
- * Link-project placements (Slice 2B) are stored at `placements:${client_id}`
- * as a JSON envelope of pre-synthesized ContentInjectRule entries. The
- * loader reads this in parallel with the main config and appends the
- * entries to `config.content_injections`. Operator-defined rules are
- * preserved and run first; placement rules run after.
+ * Synthesized content_injections are merged in from two parallel KV
+ * sources:
+ *   - `placements:${client_id}` — link-project placements (Slice 2B)
+ *   - `cluster_links:${client_id}` — cluster cross-linking (Slice C)
+ *
+ * Both share the same envelope shape (`{compiled_at, content_injections[]}`)
+ * and are merged into `config.content_injections` after parsing the
+ * main config. Operator-defined rules run first; placement rules run
+ * second; cluster-link rules run last (HTMLRewriter applies in attach
+ * order — later rules don't override earlier ones, they add).
  *
  * On any validation failure, the loader throws ConfigValidationError. The
  * Worker continues serving the previously cached config (whatever is in
@@ -56,14 +62,18 @@ export async function loadConfig(
   // 1. KV: domain → client_id
   const cachedClientId = await env.CONFIG_KV.get(`domain:${hostHeader}`);
 
-  // 2. KV: client_id → config_json (and placements:client_id in parallel).
+  // 2. KV: client_id → config_json (+ placements + cluster_links in parallel).
   if (cachedClientId !== null) {
-    const [cachedConfig, placementsRaw] = await Promise.all([
+    const [cachedConfig, placementsRaw, clusterLinksRaw] = await Promise.all([
       env.CONFIG_KV.get(`config:${cachedClientId}`),
       env.CONFIG_KV.get(`placements:${cachedClientId}`),
+      env.CONFIG_KV.get(`cluster_links:${cachedClientId}`),
     ]);
     if (cachedConfig !== null) {
-      return mergePlacements(parseAndValidate(cachedConfig), placementsRaw);
+      let cfg = parseAndValidate(cachedConfig);
+      cfg = mergePlacements(cfg, placementsRaw);
+      cfg = mergePlacements(cfg, clusterLinksRaw);
+      return cfg;
     }
   }
 
@@ -93,12 +103,17 @@ export async function loadConfig(
     ]),
   );
 
-  // On D1 fallback we still want placements merged. Read from KV
-  // directly — placements are written by the admin pipeline, never
-  // backfilled from D1 here, so a cache miss just means "no placements
-  // for this client" which is the correct merge result.
-  const placementsRaw = await env.CONFIG_KV.get(`placements:${row.client_id}`);
-  return mergePlacements(validated, placementsRaw);
+  // On D1 fallback we still want both placements + cluster_links
+  // merged. Read from KV directly — both keys are written by the
+  // admin pipeline, never backfilled from D1, so a cache miss is
+  // correctly interpreted as "no synthesized rules for this client."
+  const [placementsRaw, clusterLinksRaw] = await Promise.all([
+    env.CONFIG_KV.get(`placements:${row.client_id}`),
+    env.CONFIG_KV.get(`cluster_links:${row.client_id}`),
+  ]);
+  let cfg = mergePlacements(validated, placementsRaw);
+  cfg = mergePlacements(cfg, clusterLinksRaw);
+  return cfg;
 }
 
 /**

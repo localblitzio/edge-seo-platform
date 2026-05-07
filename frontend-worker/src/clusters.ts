@@ -44,6 +44,10 @@ export interface ClusterRow {
   label: string;
   description: string | null;
   status: ClusterStatus;
+  /** Slice C: when 1, every member site gets a "Related sites" footer
+   *  block linking to the other members. Stored as INTEGER in SQLite
+   *  (0 / 1) — the worker converts to boolean at synthesis time. */
+  cross_link_enabled: number;
   created_at: string;
   updated_at: string;
 }
@@ -62,6 +66,7 @@ export interface ClusterInput {
   label: string;
   description: string | null;
   status: ClusterStatus;
+  cross_link_enabled: number;
 }
 
 /**
@@ -111,8 +116,17 @@ export function validateClusterInput(
     status = statusRaw as ClusterStatus;
   }
 
+  // Checkbox parses as "1" when checked, absent (undefined) when unchecked.
+  // Treat any non-"0" truthy string as enabled to be forgiving with manual
+  // form submissions.
+  const crossLinkRaw = raw.cross_link_enabled ?? "";
+  const cross_link_enabled = crossLinkRaw === "1" || crossLinkRaw === "on" ? 1 : 0;
+
   if (errors.length > 0) return { ok: false, errors };
-  return { ok: true, value: { type, label, description, status } };
+  return {
+    ok: true,
+    value: { type, label, description, status, cross_link_enabled },
+  };
 }
 
 /**
@@ -244,10 +258,17 @@ export async function loadAllClusterMembersByCluster(
 
 async function insertCluster(env: AppEnv, ownerId: number, input: ClusterInput): Promise<number> {
   const result = await env.CONFIG_DB.prepare(
-    `INSERT INTO clusters (owner_id, type, label, description, status)
-     VALUES (?, ?, ?, ?, ?)`,
+    `INSERT INTO clusters (owner_id, type, label, description, status, cross_link_enabled)
+     VALUES (?, ?, ?, ?, ?, ?)`,
   )
-    .bind(ownerId, input.type, input.label, input.description, input.status)
+    .bind(
+      ownerId,
+      input.type,
+      input.label,
+      input.description,
+      input.status,
+      input.cross_link_enabled,
+    )
     .run();
   const meta = (result as unknown as { meta?: { last_row_id?: number } }).meta;
   if (meta?.last_row_id != null) return meta.last_row_id;
@@ -262,10 +283,11 @@ async function insertCluster(env: AppEnv, ownerId: number, input: ClusterInput):
 async function updateClusterRow(env: AppEnv, id: number, input: ClusterInput): Promise<void> {
   await env.CONFIG_DB.prepare(
     `UPDATE clusters
-       SET type = ?, label = ?, description = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+       SET type = ?, label = ?, description = ?, status = ?, cross_link_enabled = ?,
+           updated_at = CURRENT_TIMESTAMP
      WHERE id = ?`,
   )
-    .bind(input.type, input.label, input.description, input.status, id)
+    .bind(input.type, input.label, input.description, input.status, input.cross_link_enabled, id)
     .run();
 }
 
@@ -380,12 +402,20 @@ interface ClusterFormPrefill {
   label: string;
   description: string;
   status: ClusterStatus;
+  cross_link_enabled: number;
   /** Selected member site IDs (client_id values). */
   selected: readonly string[];
 }
 
 function emptyClusterPrefill(): ClusterFormPrefill {
-  return { type: "topical", label: "", description: "", status: "active", selected: [] };
+  return {
+    type: "topical",
+    label: "",
+    description: "",
+    status: "active",
+    cross_link_enabled: 0,
+    selected: [],
+  };
 }
 
 function clusterRowToPrefill(
@@ -397,6 +427,7 @@ function clusterRowToPrefill(
     label: row.label,
     description: row.description ?? "",
     status: row.status,
+    cross_link_enabled: row.cross_link_enabled,
     selected: members.map((m) => m.client_id),
   };
 }
@@ -411,11 +442,14 @@ function rawToClusterPrefill(
   const status = (CLUSTER_STATUSES as readonly string[]).includes(raw.status ?? "")
     ? (raw.status as ClusterStatus)
     : "active";
+  const crossLinkRaw = raw.cross_link_enabled ?? "";
+  const cross_link_enabled = crossLinkRaw === "1" || crossLinkRaw === "on" ? 1 : 0;
   return {
     type,
     label: raw.label ?? "",
     description: raw.description ?? "",
     status,
+    cross_link_enabled,
     selected: selectedIds,
   };
 }
@@ -482,6 +516,16 @@ function renderClusterForm(opts: {
         <h2 style="margin-top:0">Member sites <span style="color:var(--fg-muted);font-size:.8rem;font-weight:400">(${MIN_CLUSTER_MEMBERS}–${MAX_CLUSTER_MEMBERS})</span></h2>
         <p class="field-hint" style="margin:0 0 .6rem">Pick the proxied sites that belong to this cluster. A site can belong to multiple clusters.</p>
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:.4rem">${siteCheckboxes}</div>
+      </div>
+      <div class="form-section">
+        <h2 style="margin-top:0">Cross-linking</h2>
+        <label class="checkbox-inline" style="display:flex;gap:.5rem;align-items:flex-start">
+          <input type="checkbox" name="cross_link_enabled" value="1"${opts.prefill.cross_link_enabled === 1 ? " checked" : ""} style="margin-top:.2rem">
+          <span>
+            <strong>Inject "Related sites" footer on every member</strong>
+            <div class="field-hint" style="margin-top:.2rem">When on, every member site gets an HTML block before <code>&lt;/body&gt;</code> linking to the other members of this cluster — PBN-style internal linking. Off by default; only turn on for clusters where the sites should reciprocally link.</div>
+          </span>
+        </label>
       </div>
       <div class="form-actions">
         <button class="btn btn-primary" type="submit">${esc(opts.submitLabel)}</button>
@@ -558,9 +602,13 @@ export function renderClusterDetail(
       </form>`;
     })
     .join(" ");
+  const crossLinkPill =
+    row.cross_link_enabled === 1
+      ? `<span class="pill pill-active" title="Members cross-link to each other via a 'Related sites' footer block injected into rendered HTML">cross-linking on</span>`
+      : "";
   return `<div class="crumbs"><a href="/app/clusters">← Clusters</a></div>
     <h1>${esc(row.label)}</h1>
-    <p class="subtitle">${typePill(row.type)} ${statusPill(row.status)} <span style="color:var(--fg-muted);margin-left:.5rem">id ${row.id} · ${members.length} of ${MAX_CLUSTER_MEMBERS} sites · created ${esc(row.created_at)} · updated ${esc(row.updated_at)}</span></p>
+    <p class="subtitle">${typePill(row.type)} ${statusPill(row.status)} ${crossLinkPill} <span style="color:var(--fg-muted);margin-left:.5rem">id ${row.id} · ${members.length} of ${MAX_CLUSTER_MEMBERS} sites · created ${esc(row.created_at)} · updated ${esc(row.updated_at)}</span></p>
     <div class="actions-row">
       <a class="btn btn-primary" href="/app/clusters/${row.id}/edit">Edit</a>
       <a class="btn" href="/app/clients/bulk-new?cluster_id=${row.id}" title="Open the bulk-create form with this cluster pre-selected — every site you create joins this cluster">+ Bulk-create sites for this cluster</a>
@@ -630,6 +678,11 @@ export async function handleNewClusterPost(
   }
   const id = await insertCluster(env, user.id, validation.value);
   await replaceClusterMembers(env, id, memberValidation.value);
+  // Cross-linking is opt-in (cross_link_enabled). Compile only when on
+  // — saves an unnecessary KV round-trip per member otherwise.
+  if (validation.value.cross_link_enabled === 1) {
+    await invalidateAfterClusterChange(env, memberValidation.value);
+  }
   return {
     response: flashRedirect(`/app/clusters/${id}`, {
       text: `Created cluster "${validation.value.label}" with ${memberValidation.value.length} site${memberValidation.value.length === 1 ? "" : "s"}.`,
@@ -680,8 +733,20 @@ export async function handleEditClusterPost(
       },
     };
   }
+  // Compute the union of currently-and-newly-affected clients BEFORE
+  // we replace the member list. Members removed by this edit lose
+  // cross-link rules from this cluster and need recompile too.
+  // Toggling cross_link_enabled OFF also affects every previous
+  // member (their KV should drop the rules from this cluster).
+  const previousCrossLinkEnabled = row.cross_link_enabled === 1;
+  const newCrossLinkEnabled = validation.value.cross_link_enabled === 1;
+  const affected =
+    previousCrossLinkEnabled || newCrossLinkEnabled
+      ? await affectedClientsForClusterChange(env, id, memberValidation.value)
+      : [];
   await updateClusterRow(env, id, validation.value);
   await replaceClusterMembers(env, id, memberValidation.value);
+  await invalidateAfterClusterChange(env, affected);
   return {
     response: flashRedirect(`/app/clusters/${id}`, {
       text: `Saved cluster "${validation.value.label}".`,
@@ -710,6 +775,16 @@ export async function handleClusterStatusPost(
     });
   }
   await setClusterStatusRow(env, id, requested as ClusterStatus);
+  // Status flip from active→archived (or back) changes whether the
+  // cross-link rules render. Recompile every member when this cluster
+  // had cross-linking enabled.
+  if (row.cross_link_enabled === 1) {
+    const memberRows = await loadClusterMembers(env, id);
+    await invalidateAfterClusterChange(
+      env,
+      memberRows.map((m) => m.client_id),
+    );
+  }
   return flashRedirect(`/app/clusters/${id}`, {
     text: `Status set to ${requested}.`,
     kind: "ok",
@@ -733,4 +808,247 @@ export async function loadClusterPageData(
     loadVisibleClients(env, user),
   ]);
   return { cluster, members, visibleClients };
+}
+
+/* ─── Slice C: cross-linking between cluster members ─── */
+
+/**
+ * Synthesized rule shape mirroring `ContentInjectRule` in src/config/schema.ts.
+ * Defined locally (not imported) so this module owns the KV format.
+ */
+export interface SynthesizedCrossLinkRule {
+  match: string;
+  selector: string;
+  position: "append";
+  html: string;
+}
+
+/** KV value written to `cluster_links:<client_id>`. */
+export interface ClusterLinksKvValue {
+  compiled_at: string;
+  /** ContentInjectRule entries the worker merges into config.content_injections. */
+  content_injections: SynthesizedCrossLinkRule[];
+}
+
+/** HTML escape — same character set as app.ts esc(). Inlined so this
+ *  module's KV writes don't depend on app.ts at runtime (avoids
+ *  circular import). */
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (c) => {
+    switch (c) {
+      case "&":
+        return "&amp;";
+      case "<":
+        return "&lt;";
+      case ">":
+        return "&gt;";
+      case '"':
+        return "&quot;";
+      case "'":
+        return "&#39;";
+      default:
+        return c;
+    }
+  });
+}
+
+/**
+ * Build the "Related sites" content_injection for a single member of a
+ * cross-linked cluster.
+ *
+ * @param cluster the cluster the rule belongs to
+ * @param forClientId the member whose pages this rule will run on
+ *   (reserved for future per-site customization; currently unused)
+ * @param siblings the other members of the cluster
+ * @returns one SynthesizedCrossLinkRule, or null when the cluster has
+ *   no siblings (1-member cluster has nothing to cross-link to)
+ *
+ * The rule injects on every page (`^/.*` match) at body+append. The
+ * wrapping div carries `data-cluster-related="<cluster_id>"` so an
+ * operator can trace the block back to its source cluster, and the
+ * existing content-injector idempotence (data-edge-seo-rule marker)
+ * prevents double-injection on revisit.
+ */
+export function synthesizeClusterCrossLink(
+  cluster: ClusterRow,
+  forClientId: string,
+  siblings: ReadonlyArray<{ client_id: string; proxy_domain: string }>,
+): SynthesizedCrossLinkRule | null {
+  void forClientId;
+  if (siblings.length === 0) return null;
+  const linkItems = siblings
+    .map(
+      (s) =>
+        `<li><a href="https://${escapeHtml(s.proxy_domain)}/" rel="noopener">${escapeHtml(s.proxy_domain)}</a></li>`,
+    )
+    .join("");
+  const html = `<div data-cluster-related="${cluster.id}" style="margin:2rem 0;padding:1rem;border-top:1px solid #ddd;font-size:.85rem"><h4 style="margin:0 0 .5rem;font-size:.95rem">Related sites — ${escapeHtml(cluster.label)}</h4><ul style="margin:0;padding-left:1.2rem">${linkItems}</ul></div>`;
+  return {
+    match: "^/.*",
+    selector: "body",
+    position: "append",
+    html,
+  };
+}
+
+/**
+ * Re-compile the `cluster_links:<client_id>` KV entry for a single
+ * member site. Reads every cross-link-enabled, active cluster the
+ * site belongs to, builds one synthesized rule per cluster (linking
+ * to the OTHER members), writes the aggregated envelope to KV.
+ *
+ * Empty result deletes the KV entry so the loader's fast path skips
+ * the merge.
+ */
+export async function compileClusterLinksForClient(
+  env: AppEnv,
+  clientId: string,
+): Promise<{ written: boolean; ruleCount: number }> {
+  // One JOIN over (clusters × member-self × siblings × siblings' clients)
+  // gives every (cluster, sibling) pair the focal site needs links for.
+  const r = await env.CONFIG_DB.prepare(
+    `SELECT
+       c.id as cluster_id, c.owner_id as cluster_owner_id, c.type as cluster_type,
+       c.label as cluster_label, c.description as cluster_description,
+       c.status as cluster_status, c.cross_link_enabled as cluster_cross_link_enabled,
+       c.created_at as cluster_created_at, c.updated_at as cluster_updated_at,
+       sib.client_id as sibling_client_id,
+       sib_client.proxy_domain as sibling_proxy_domain
+     FROM clusters c
+     JOIN cluster_members me ON me.cluster_id = c.id
+     JOIN cluster_members sib ON sib.cluster_id = c.id AND sib.client_id != me.client_id
+     JOIN clients sib_client ON sib_client.client_id = sib.client_id
+     WHERE c.cross_link_enabled = 1
+       AND c.status = 'active'
+       AND me.client_id = ?
+     ORDER BY c.id, sib.client_id`,
+  )
+    .bind(clientId)
+    .all<{
+      cluster_id: number;
+      cluster_owner_id: number;
+      cluster_type: ClusterType;
+      cluster_label: string;
+      cluster_description: string | null;
+      cluster_status: ClusterStatus;
+      cluster_cross_link_enabled: number;
+      cluster_created_at: string;
+      cluster_updated_at: string;
+      sibling_client_id: string;
+      sibling_proxy_domain: string;
+    }>();
+  // Group siblings by cluster_id so we synthesize one rule per cluster.
+  const grouped = new Map<
+    number,
+    { cluster: ClusterRow; siblings: { client_id: string; proxy_domain: string }[] }
+  >();
+  for (const row of r.results ?? []) {
+    let entry = grouped.get(row.cluster_id);
+    if (!entry) {
+      entry = {
+        cluster: {
+          id: row.cluster_id,
+          owner_id: row.cluster_owner_id,
+          type: row.cluster_type,
+          label: row.cluster_label,
+          description: row.cluster_description,
+          status: row.cluster_status,
+          cross_link_enabled: row.cluster_cross_link_enabled,
+          created_at: row.cluster_created_at,
+          updated_at: row.cluster_updated_at,
+        },
+        siblings: [],
+      };
+      grouped.set(row.cluster_id, entry);
+    }
+    entry.siblings.push({
+      client_id: row.sibling_client_id,
+      proxy_domain: row.sibling_proxy_domain,
+    });
+  }
+  const synthesized: SynthesizedCrossLinkRule[] = [];
+  for (const { cluster, siblings } of grouped.values()) {
+    const rule = synthesizeClusterCrossLink(cluster, clientId, siblings);
+    if (rule) synthesized.push(rule);
+  }
+  const key = `cluster_links:${clientId}`;
+  if (synthesized.length === 0) {
+    await env.CONFIG_KV.delete(key);
+    return { written: false, ruleCount: 0 };
+  }
+  const value: ClusterLinksKvValue = {
+    compiled_at: new Date().toISOString(),
+    content_injections: synthesized,
+  };
+  await env.CONFIG_KV.put(key, JSON.stringify(value));
+  return { written: true, ruleCount: synthesized.length };
+}
+
+/**
+ * Best-effort Cloudflare HTTP cache purge for a client's proxy_domain.
+ * Mirrors the helper in link-projects.ts. Lazy-imports cloudflare-api
+ * + proxy-zone helpers to keep the unit-test graph clean.
+ */
+async function bestEffortHttpCachePurgeForCluster(env: AppEnv, clientId: string): Promise<void> {
+  if (!env.CF_API_TOKEN) return;
+  try {
+    const row = await env.CONFIG_DB.prepare(
+      "SELECT proxy_domain FROM clients WHERE client_id = ? LIMIT 1",
+    )
+      .bind(clientId)
+      .first<{ proxy_domain: string }>();
+    if (!row) return;
+    const proxy = row.proxy_domain;
+    const { matchProxyZone } = await import("../../src/config/proxy-zone.js");
+    const knownZone = matchProxyZone(proxy);
+    const zoneName = knownZone ?? proxy.replace(/^www\./i, "");
+    const { findZoneByName, purgeCacheByHosts } = await import("./cloudflare-api.js");
+    const zone = await findZoneByName(env.CF_API_TOKEN, zoneName);
+    if (!zone) return;
+    await purgeCacheByHosts(env.CF_API_TOKEN, zone.id, [proxy]);
+  } catch (e) {
+    console.warn("clusters: HTTP cache purge failed", e);
+  }
+}
+
+/**
+ * Recompile cluster_links KV + purge CF cache for every client_id
+ * given. Used by cluster create/edit/status handlers. KV writes run
+ * in parallel; cache purges run sequentially to avoid hammering CF.
+ */
+export async function invalidateAfterClusterChange(
+  env: AppEnv,
+  clientIds: readonly string[],
+): Promise<void> {
+  if (clientIds.length === 0) return;
+  await Promise.all(clientIds.map((c) => compileClusterLinksForClient(env, c)));
+  for (const c of clientIds) {
+    await bestEffortHttpCachePurgeForCluster(env, c);
+  }
+}
+
+/**
+ * Compute the union of currently-and-previously-affected client_ids
+ * for a cluster change. Members removed by an edit still need a
+ * recompile (their cluster_links should drop the rules from this
+ * cluster); members added by an edit also need one (they gain rules).
+ *
+ * Call BEFORE replacing the member list, passing the new member set.
+ */
+export async function affectedClientsForClusterChange(
+  env: AppEnv,
+  clusterId: number,
+  newMemberIds: readonly string[],
+): Promise<string[]> {
+  const r = await env.CONFIG_DB.prepare(
+    "SELECT client_id FROM cluster_members WHERE cluster_id = ?",
+  )
+    .bind(clusterId)
+    .all<{ client_id: string }>();
+  const before = new Set((r.results ?? []).map((row) => row.client_id));
+  const after = new Set(newMemberIds);
+  const union = new Set<string>();
+  for (const id of before) union.add(id);
+  for (const id of after) union.add(id);
+  return Array.from(union);
 }
