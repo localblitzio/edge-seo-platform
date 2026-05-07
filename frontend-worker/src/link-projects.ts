@@ -1237,15 +1237,16 @@ function renderPlacementsSection(
       ? ""
       : `<div style="display:flex;gap:.5rem;align-items:end;flex-wrap:wrap;margin-bottom:.75rem">
           <div style="flex:1;min-width:240px">
-            <label for="bulk_cluster_picker" style="font-weight:600;font-size:.78rem;display:block;margin-bottom:.2rem">Pre-fill from cluster</label>
+            <label for="bulk_cluster_picker" style="font-weight:600;font-size:.78rem;display:block;margin-bottom:.2rem">Use a cluster's sites</label>
             <select id="bulk_cluster_picker" style="font:inherit;font-size:.88rem;padding:.4rem .55rem;border:1px solid var(--border-strong);border-radius:var(--radius);background:var(--bg);color:var(--fg);width:100%">
               <option value="">— pick a cluster —</option>
               ${clusterOptions}
             </select>
           </div>
-          <button type="button" id="bulk_cluster_add" class="btn">+ Add cluster members</button>
+          <button type="button" id="bulk_cluster_use" class="btn btn-primary">Use this cluster</button>
+          <button type="button" id="bulk_cluster_add" class="btn" title="Add this cluster's members on top of the current selection (don't replace)">+ Add to selection</button>
         </div>
-        <p class="field-hint" style="margin:0 0 .6rem">Adds the selected cluster's member sites to the current selection. Pick another cluster + click again to layer in more. Doesn't replace — uncheck individuals manually if needed.</p>`;
+        <p class="field-hint" style="margin:0 0 .6rem"><strong>Use this cluster</strong> replaces the current selection with the cluster's member sites. <strong>+ Add to selection</strong> layers a cluster on top of what's already checked (useful when combining clusters).</p>`;
   const bulkSection =
     visibleClients.length < 2
       ? "" // single-client owner — no point offering bulk
@@ -1309,17 +1310,25 @@ function renderPlacementsSection(
               s.addEventListener('change', syncStrategy);
               syncStrategy();
             }
-            // Cluster picker — additive check of member sites.
+            // Cluster picker — two modes:
+            //   "Use this cluster"   = REPLACE selection with cluster members
+            //   "+ Add to selection" = ADD cluster members on top of current
+            // Both share the same per-id matching logic; the replace mode
+            // first unchecks everything, then runs the add path.
             var picker = document.getElementById('bulk_cluster_picker');
+            var useBtn = document.getElementById('bulk_cluster_use');
             var addBtn = document.getElementById('bulk_cluster_add');
-            if (picker && addBtn) {
+            if (picker && (useBtn || addBtn)) {
               var members = ${clusterMembersJson};
-              addBtn.addEventListener('click', function(){
+              function applyCluster(replace, btn, defaultLabel) {
                 var clusterId = picker.value;
                 if (!clusterId) return;
                 var ids = members[clusterId] || [];
                 var checks = document.querySelectorAll('input[name="client_ids"]');
-                var added = 0;
+                if (replace) {
+                  for (var k = 0; k < checks.length; k++) checks[k].checked = false;
+                }
+                var checkedNow = 0;
                 var missing = [];
                 for (var i = 0; i < ids.length; i++) {
                   var id = ids[i];
@@ -1328,18 +1337,24 @@ function renderPlacementsSection(
                     if (checks[j].value === id) {
                       if (!checks[j].checked) {
                         checks[j].checked = true;
-                        added += 1;
                       }
+                      checkedNow += 1;
                       found = true;
                       break;
                     }
                   }
                   if (!found) missing.push(id);
                 }
-                var msg = '+' + added + ' checked';
-                if (missing.length > 0) msg += ' (' + missing.length + ' member' + (missing.length === 1 ? '' : 's') + ' not visible: ' + missing.join(', ') + ')';
-                addBtn.textContent = msg;
-                setTimeout(function(){ addBtn.textContent = '+ Add cluster members'; }, 3000);
+                var msg = (replace ? checkedNow : '+' + checkedNow) + ' checked';
+                if (missing.length > 0) msg += ' (' + missing.length + ' not visible: ' + missing.join(', ') + ')';
+                btn.textContent = msg;
+                setTimeout(function(){ btn.textContent = defaultLabel; }, 3000);
+              }
+              if (useBtn) useBtn.addEventListener('click', function(){
+                applyCluster(true, useBtn, 'Use this cluster');
+              });
+              if (addBtn) addBtn.addEventListener('click', function(){
+                applyCluster(false, addBtn, '+ Add to selection');
               });
             }
           })();
