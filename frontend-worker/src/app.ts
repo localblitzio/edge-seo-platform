@@ -485,9 +485,9 @@ export async function renderOverview(env: AppEnv, user: User): Promise<string> {
 export async function renderClientsList(env: AppEnv, user: User): Promise<string> {
   const clients = await loadVisibleClients(env, user);
   if (clients.length === 0) {
-    return `<h1>Clients <a href="/app/clients/new" class="btn btn-primary" style="float:right">+ New client</a></h1>
+    return `<h1>Clients <span style="float:right;display:inline-flex;gap:.4rem"><a href="/app/clients/bulk-new" class="btn">Bulk-create</a> <a href="/app/clients/new" class="btn btn-primary">+ New client</a></span></h1>
       <p class="subtitle">${user.role === "super_admin" ? "No clients in the platform yet." : "You don't own any clients yet."}</p>
-      <div class="empty">No clients to show. <a href="/app/clients/new">Create the first one →</a></div>`;
+      <div class="empty">No clients to show. <a href="/app/clients/new">Create the first one →</a> or <a href="/app/clients/bulk-new">bulk-create from a URL list</a>.</div>`;
   }
   const rows = clients
     .map(
@@ -505,7 +505,7 @@ export async function renderClientsList(env: AppEnv, user: User): Promise<string
     user.role === "super_admin"
       ? "All clients across the platform (super-admin)."
       : `Clients you own (${clients.length}).`;
-  return `<h1>Clients <a href="/app/clients/new" class="btn btn-primary" style="float:right">+ New client</a></h1>
+  return `<h1>Clients <span style="float:right;display:inline-flex;gap:.4rem"><a href="/app/clients/bulk-new" class="btn">Bulk-create</a> <a href="/app/clients/new" class="btn btn-primary">+ New client</a></span></h1>
     <p class="subtitle">${ownership}</p>
     <table class="data">
       <thead><tr><th>client_id</th><th>proxy</th><th>source</th><th>status</th><th>schema</th><th>created</th></tr></thead>

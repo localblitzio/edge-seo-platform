@@ -84,6 +84,13 @@ import {
   verifyPassword,
 } from "./auth.js";
 import {
+  handleBulkConfirmPost,
+  handleBulkPreviewPost,
+  renderBulkNewForm,
+  renderBulkPreview,
+  renderBulkResult,
+} from "./bulk-clients.js";
+import {
   handleClusterStatusPost,
   handleEditClusterPost,
   handleNewClusterPost,
@@ -845,6 +852,121 @@ export default {
           flash: null,
         }),
         { status: 400 },
+      );
+    }
+
+    /* ─── Bulk-create sites (paste-URLs flow, /app/clients/bulk-new) ─── */
+    /* MUST come before the catch-all "/app/clients/<id>" route below.   */
+
+    if (path === "/app/clients/bulk-new" && method === "GET") {
+      if (!user) return redirectToLogin(url);
+      const clients = await loadVisibleClients(env, user);
+      const visibleClusters = await loadVisibleClusters(env, user);
+      // ?cluster_id=N pre-selects the cluster (used by the
+      // "Bulk-create sites for this cluster" link on a cluster page).
+      // Only honor the value if it's actually one of the operator's
+      // visible clusters — otherwise leave it null and let the
+      // operator pick from the dropdown.
+      const clusterIdParam = url.searchParams.get("cluster_id");
+      let preselectedClusterId: number | null = null;
+      if (clusterIdParam) {
+        const parsed = Number.parseInt(clusterIdParam, 10);
+        if (Number.isFinite(parsed) && parsed > 0 && visibleClusters.some((c) => c.id === parsed)) {
+          preselectedClusterId = parsed;
+        }
+      }
+      return htmlResponse(
+        htmlPage({
+          title: "Bulk-create sites — Edge SEO Platform",
+          body: appLayout({
+            title: "Bulk-create sites",
+            content: renderBulkNewForm({
+              prefill: {
+                zone: "localpage.us.com",
+                attested_by_email: user.email,
+                attested_ip: "",
+                scope: "full_site",
+                cluster_id: preselectedClusterId,
+                status: "active",
+                raw_urls: "",
+              },
+              visibleClusters,
+              errors: [],
+            }),
+            activeNav: "clients",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+      );
+    }
+
+    if (path === "/app/clients/bulk-new/preview" && method === "POST") {
+      if (!user) return redirectToLogin(url);
+      const result = await handleBulkPreviewPost(request, env, url, user);
+      if (result.response) return result.response;
+      const clients = await loadVisibleClients(env, user);
+      if (result.step1Render) {
+        return htmlResponse(
+          htmlPage({
+            title: "Bulk-create sites — Edge SEO Platform",
+            body: appLayout({
+              title: "Bulk-create sites",
+              content: renderBulkNewForm(result.step1Render),
+              activeNav: "clients",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+          { status: 400 },
+        );
+      }
+      if (result.step2Render) {
+        return htmlResponse(
+          htmlPage({
+            title: "Preview — Bulk-create sites — Edge SEO Platform",
+            body: appLayout({
+              title: "Preview — Bulk-create sites",
+              content: renderBulkPreview({ ...result.step2Render, errors: [] }),
+              activeNav: "clients",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+      return new Response("Internal error", { status: 500 });
+    }
+
+    if (path === "/app/clients/bulk-new/confirm" && method === "POST") {
+      if (!user) return redirectToLogin(url);
+      const result = await handleBulkConfirmPost(request, env, url, user);
+      if (result.response) return result.response;
+      if (!result.result) return new Response("Internal error", { status: 500 });
+      const clients = await loadVisibleClients(env, user);
+      return htmlResponse(
+        htmlPage({
+          title: "Bulk-create result — Edge SEO Platform",
+          body: appLayout({
+            title: "Bulk-create result",
+            content: renderBulkResult(result.result),
+            activeNav: "clients",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
       );
     }
 
