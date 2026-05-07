@@ -40,6 +40,8 @@ import { emitRequestCounter } from "./observability/metrics.js";
 import { fetchFromOrigin } from "./proxy/index.js";
 import { resolveRedirect } from "./redirects/index.js";
 import { resolveRoute } from "./router/route-resolver.js";
+import { generateSitemapXml } from "./sitemap/generator.js";
+import { extractKeyFromVerificationPath, isIndexNowVerificationPath } from "./sitemap/indexnow.js";
 import { buildRewriter, isHtmlResponse } from "./transform/index.js";
 
 interface RequestContext {
@@ -124,6 +126,19 @@ async function runPipeline(
     rctx.pipeline_stage = "404"; // not really 404, but no other enum value fits paused/terminated; logger ok
     return authResult;
   }
+
+  // Special-case routes the worker owns and serves directly without
+  // running the redirect/proxy pipeline:
+  //
+  //   GET /sitemap.xml         → generate from this client's config
+  //   GET /<INDEXNOW_KEY>.txt  → IndexNow verification file
+  //
+  // These run BEFORE redirects so the sitemap can't be redirected
+  // away by the operator's static/pattern rules, and BEFORE caching
+  // because they're cheap to generate per request and the response
+  // headers can drive their own freshness.
+  const sitemapResponse = maybeServeSitemapOrIndexNow(rctx, config, env);
+  if (sitemapResponse) return sitemapResponse;
 
   // §5 step 11 (early lookup): on HTML cache hit short-circuit
   // steps 3-10. Per §9.1 invariants, the lookup is gated on
@@ -372,4 +387,59 @@ function finalize(rctx: RequestContext, response: Response, env: Env): void {
     bytes_out: 0,
     content_type_class: classifyContentType(response.headers.get("content-type")),
   });
+}
+
+/**
+ * Special-case route handlers that run after auth and before redirects:
+ *   - GET /sitemap.xml          → generated from the client's ClientConfig
+ *   - GET /<INDEXNOW_KEY>.txt   → returns the bound INDEXNOW_KEY as plain text
+ *
+ * Returns a Response when the request matched one of these; null
+ * otherwise (so the regular pipeline proceeds).
+ *
+ * Both are GET-only — anything else (POST/PUT/DELETE/etc) falls through
+ * to the regular pipeline and 405s on whatever route handler picks it
+ * up. HEAD is treated as GET (returns headers without body, per the
+ * runtime's standard HEAD/GET behavior on Response objects).
+ */
+function maybeServeSitemapOrIndexNow(
+  rctx: RequestContext,
+  config: ClientConfig,
+  env: Env,
+): Response | null {
+  const method = rctx.request.method.toUpperCase();
+  if (method !== "GET" && method !== "HEAD") return null;
+  const path = rctx.url.pathname;
+
+  if (path === "/sitemap.xml") {
+    const xml = generateSitemapXml(config);
+    rctx.pipeline_stage = "custom_page";
+    return new Response(xml, {
+      status: 200,
+      headers: {
+        "content-type": "application/xml; charset=utf-8",
+        // Sitemaps are operator-edit-driven; cache for an hour at the
+        // edge. Manual cache purge fires on every config save so a real
+        // change still propagates within seconds.
+        "cache-control": "public, max-age=3600",
+      },
+    });
+  }
+
+  if (isIndexNowVerificationPath(path)) {
+    const key = env.INDEXNOW_KEY;
+    if (!key) return null; // No key bound — let the request fall through (404 from origin or 200 if origin serves it).
+    const requested = extractKeyFromVerificationPath(path);
+    if (requested !== key) return null; // Different key — not our verification file; let it through.
+    rctx.pipeline_stage = "custom_page";
+    return new Response(key, {
+      status: 200,
+      headers: {
+        "content-type": "text/plain; charset=utf-8",
+        "cache-control": "public, max-age=86400",
+      },
+    });
+  }
+
+  return null;
 }

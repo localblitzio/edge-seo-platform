@@ -25,6 +25,8 @@ import { DEFAULT_PROXY_ZONE, PROXY_ZONES, matchProxyZone } from "../../src/confi
 import { ClientConfig } from "../../src/config/schema.js";
 import { assertConfigInvariants } from "../../src/config/validator.js";
 import { ConfigValidationError } from "../../src/lib/errors.js";
+import { collectSitemapUrls } from "../../src/sitemap/generator.js";
+import { pingIndexNow } from "../../src/sitemap/indexnow.js";
 import type { User } from "./auth.js";
 import { BUILD_VERSION } from "./build-version.js";
 import { LIST_EDITOR_JS } from "./list-editor-js.js";
@@ -59,6 +61,15 @@ export interface AppEnv {
    * Override via `wrangler.toml` `[vars]` to switch environments.
    */
   PROXY_WORKER_SCRIPT?: string;
+  /**
+   * IndexNow API key. When bound, admin write paths POST changed
+   * URLs to `https://api.indexnow.org/indexnow` so search engines
+   * (Bing, Yandex, Seznam, etc.) re-fetch the page promptly. The
+   * proxy worker also serves the verification file at
+   * `https://<host>/<INDEXNOW_KEY>.txt`. Off by default — set via
+   * `wrangler secret put INDEXNOW_KEY` to enable.
+   */
+  INDEXNOW_KEY?: string;
 }
 
 export interface ClientRow {
@@ -1903,12 +1914,34 @@ export async function handleNewClientPost(
     new_status: cfg.status,
     notes: null,
   });
+  await maybePingIndexNow(env, cfg);
   return {
     response: flashRedirect(`/app/clients/${cfg.client_id}`, {
       text: `Created ${cfg.client_id}.`,
       kind: "ok",
     }),
   };
+}
+
+/**
+ * Ping IndexNow for every sitemap-eligible URL on this client.
+ *
+ * Best-effort: no-op when `INDEXNOW_KEY` isn't bound, swallows network
+ * errors. Search engines don't need a "diff" — pinging the full URL
+ * list says "these are the canonical URLs on this site, please
+ * refresh." A no-op when the config has no sitemap-eligible URLs (no
+ * literal-path rules, or everything is filtered out by canonical /
+ * indexation rules).
+ */
+async function maybePingIndexNow(env: AppEnv, cfg: ClientConfig): Promise<void> {
+  if (!env.INDEXNOW_KEY) return;
+  const urls = collectSitemapUrls(cfg);
+  if (urls.length === 0) return;
+  try {
+    await pingIndexNow(cfg.proxy_domain, env.INDEXNOW_KEY, urls);
+  } catch (e) {
+    console.warn("indexnow ping failed", e);
+  }
 }
 
 export async function handleEditClientPost(
@@ -1970,6 +2003,7 @@ export async function handleEditClientPost(
     new_status: cfg.status,
     notes: null,
   });
+  await maybePingIndexNow(env, cfg);
   return {
     response: flashRedirect(`/app/clients/${clientId}`, {
       text: `Saved. before=${beforeHash} → after=${afterHash}`,

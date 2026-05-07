@@ -154,7 +154,14 @@
       "Bash(git revert *)",
       "Bash(curl -sS -H 'Cookie: edge_seo_session=__TRACKED_VAR__' https://edgeseo.app/app/clients/lantern-crest/edit -o .scratch/edit2.html -w 'HTTP %{http_code}\\\\n')",
       "Bash(curl -sS -H 'Cookie: edge_seo_session=__TRACKED_VAR__' https://edgeseo.app/app/clients/lantern-crest/edit -o .scratch/edit3.html -w 'HTTP %{http_code}\\\\n')",
-      "Bash(curl -sS -H 'Cookie: edge_seo_session=__TRACKED_VAR__' https://edgeseo.app/app/clients/lantern-crest/edit -o .scratch/edit.html -w 'HTTP %{http_code}\\\\n')"
+      "Bash(curl -sS -H 'Cookie: edge_seo_session=__TRACKED_VAR__' https://edgeseo.app/app/clients/lantern-crest/edit -o .scratch/edit.html -w 'HTTP %{http_code}\\\\n')",
+      "Bash(git -C \"C:/CodeProjects/DomainEdge\" fetch origin main)",
+      "Bash(git -C \"C:/CodeProjects/DomainEdge\" pull --ff-only origin main)",
+      "Bash(git -C \"C:/CodeProjects/DomainEdge\" log --oneline -3)",
+      "Bash(git reset *)",
+      "Bash(perl -i -pe 's/\\\\r\\\\n/\\\\n/g' src/sitemap/generator.ts src/sitemap/generator.test.ts src/sitemap/indexnow.ts src/sitemap/indexnow.test.ts src/worker.ts frontend-worker/src/app.ts)",
+      "Bash(curl -sS -o .scratch/sitemap.xml -w \"HTTP %{http_code} bytes:%{size_download}\\\\n\" https://lanterncrest.com/sitemap.xml)",
+      "Bash(curl -sS -o .scratch/sitemap.xml -w \"HTTP %{http_code} bytes:%{size_download}\\\\n\" https://rfengineer.localpage.us.com/sitemap.xml)"
     ]
   }
 }
