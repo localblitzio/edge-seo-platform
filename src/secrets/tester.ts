@@ -11,6 +11,7 @@
  */
 
 import { buildSubmissions, submitToIndexNow } from "../sitemap/indexnow.js";
+import { submitToOmegaIndexer } from "../sitemap/omega-indexer.js";
 import { checkPrimeBalance } from "../sitemap/prime-indexer.js";
 import { submitToSinbyte } from "../sitemap/sinbyte.js";
 
@@ -209,14 +210,57 @@ export async function testSinbyteKey(value: string, testHost: string): Promise<T
 }
 
 /**
- * Stub tester for indexer slots whose API contract isn't yet wired
- * (Omega). Just checks the value is non-empty and looks plausible
- * (printable ASCII, reasonable length) — not a substitute for the
- * real handshake but enough to catch "I pasted the wrong field"
- * mistakes.
+ * Test the Omega Indexer API key by submitting one URL.
  *
- * Returns `warn` rather than `ok` so the operator knows there's no
- * live integration yet.
+ * Same pattern as Sinbyte — Omega has no documented read-only
+ * endpoint (no balance check), so the only definitive test is a
+ * real submission. Costs 1 credit from the operator's plan.
+ */
+export async function testOmegaIndexerKey(value: string, testHost: string): Promise<TestResult> {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return { kind: "err", message: "No Omega Indexer key provided. Enter a value before testing." };
+  }
+  if (!testHost.trim()) {
+    return {
+      kind: "err",
+      message:
+        "No proxy domain available to test against. Add a proxied site first — Omega tests submit a single homepage URL.",
+    };
+  }
+  const result = await submitToOmegaIndexer({
+    apikey: trimmed,
+    campaignname: `edge-seo test ${new Date().toISOString()}`,
+    urls: [`https://${testHost}/`],
+  });
+  if (result.ok) {
+    return {
+      kind: "ok",
+      message:
+        "Omega Indexer accepted the submission (HTTP 2xx). Note: this consumed ONE credit from your Omega plan.",
+      ...(result.responseBody ? { details: result.responseBody } : {}),
+    };
+  }
+  if (result.status === 0) {
+    return {
+      kind: "err",
+      message: "Network error reaching omegaindexer.com. Check edge connectivity and retry.",
+    };
+  }
+  return {
+    kind: "err",
+    message: `Omega Indexer rejected the submission (HTTP ${result.status}). The key may be invalid, the plan may be expired, or the request shape changed.`,
+    ...(result.responseBody ? { details: result.responseBody } : {}),
+  };
+}
+
+/**
+ * Stub tester — kept for any future indexer slot whose API contract
+ * isn't yet wired. All current indexers (IndexNow, Prime, Sinbyte,
+ * Omega) have real testers above; this is the fallback for new slots.
+ *
+ * Just checks the value is non-empty and looks plausible (printable
+ * ASCII, reasonable length).
  */
 export function testStubIndexerKey(value: string, serviceLabel: string): TestResult {
   const trimmed = value.trim();

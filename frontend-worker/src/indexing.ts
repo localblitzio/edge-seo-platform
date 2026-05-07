@@ -30,6 +30,8 @@ import { ClientConfig } from "../../src/config/schema.js";
 interface ConfiguredIndexer {
   slotKey: string;
   label: string;
+  /** Brand-ish background colour for the Submit button — set per-entry in `indexer-registry.ts`. */
+  color: string;
 }
 
 /* ─── Helpers ─── */
@@ -69,7 +71,7 @@ async function loadConfiguredIndexers(env: AppEnv): Promise<ConfiguredIndexer[]>
     const entry = ACTIVE_INDEXERS[i];
     const value = values[i];
     if (!entry || !value) continue;
-    out.push({ slotKey: entry.slotKey, label: entry.label });
+    out.push({ slotKey: entry.slotKey, label: entry.label, color: entry.color });
   }
   return out;
 }
@@ -149,10 +151,9 @@ const INDEXING_CSS = `
 .indexing-actions{margin-top:1.25rem;padding:1rem 1.25rem;background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius)}
 .indexing-actions h3{margin:0 0 .65rem;font-size:.95rem}
 .indexing-actions .submit-row{display:flex;gap:.5rem;flex-wrap:wrap;margin-top:.5rem}
-.indexing-actions .submit-row button{font:inherit;padding:.45rem .9rem;border:1px solid var(--border-strong);background:var(--bg-elevated);color:var(--fg);border-radius:var(--radius);cursor:pointer}
+.indexing-actions .submit-row button{font:inherit;padding:.45rem .9rem;border:1px solid var(--border-strong);background:var(--bg-elevated);color:var(--fg);border-radius:var(--radius);cursor:pointer;font-weight:500}
 .indexing-actions .submit-row button:hover{border-color:var(--accent);color:var(--accent)}
-.indexing-actions .submit-row button.primary{background:var(--accent);color:var(--accent-fg);border-color:var(--accent)}
-.indexing-actions .submit-row button.primary:hover{filter:brightness(1.1);color:var(--accent-fg)}
+.indexing-actions .submit-row button.indexer-btn:hover{filter:brightness(1.1);color:#fff!important}
 .indexing-actions .empty{color:var(--fg-muted);font-size:.9rem;margin:0}
 .indexing-actions .empty a{color:var(--accent)}
 `;
@@ -177,7 +178,12 @@ export function renderIndexingPage(opts: {
     ? configuredIndexers
         .map(
           (i) =>
-            `<button type="submit" name="indexer" value="${esc(i.slotKey)}" class="primary">Submit selected to ${esc(i.label)}</button>`,
+            // Per-indexer hue from `indexer-registry.ts` so operators
+            // can tell the four services apart at a glance. Inline
+            // style keeps the colour source-of-truth in the registry
+            // (no CSS-in-templates sync drift). White text against
+            // each registry colour is WCAG-AA at minimum.
+            `<button type="submit" name="indexer" value="${esc(i.slotKey)}" class="indexer-btn" style="background:${esc(i.color)};border-color:${esc(i.color)};color:#fff">Submit selected to ${esc(i.label)}</button>`,
         )
         .join("\n      ")
     : `<p class="empty">No indexers configured. Bind an API key in <a href="/app/settings/api-keys">Settings → API keys</a> to enable submissions.</p>`;

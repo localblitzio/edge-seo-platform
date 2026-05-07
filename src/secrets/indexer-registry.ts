@@ -18,6 +18,7 @@
  */
 
 import { pingIndexNow } from "../sitemap/indexnow.js";
+import { pingOmegaIndexer } from "../sitemap/omega-indexer.js";
 import { pingPrimeIndexer } from "../sitemap/prime-indexer.js";
 import { pingSinbyte } from "../sitemap/sinbyte.js";
 
@@ -52,6 +53,13 @@ export interface IndexerEntry {
   slotKey: string;
   /** Short label for the UI button ("Submit to IndexNow"). */
   label: string;
+  /**
+   * Brand-ish background colour for the per-indexer Submit button on
+   * the Indexing page. Each integration gets a distinct hue so
+   * operators can tell at a glance which service a button targets.
+   * Use a colour with WCAG-AA contrast against white text (#fff).
+   */
+  color: string;
   /** Live submit. */
   submit: IndexerPing;
 }
@@ -60,6 +68,7 @@ export const ACTIVE_INDEXERS: readonly IndexerEntry[] = [
   {
     slotKey: "INDEXNOW_KEY",
     label: "IndexNow",
+    color: "#2563eb", // blue — Microsoft/Bing-ish
     submit: async (key, urls, ctx) => {
       const r = await pingIndexNow(ctx.proxyDomain, key, urls);
       return {
@@ -77,6 +86,7 @@ export const ACTIVE_INDEXERS: readonly IndexerEntry[] = [
   {
     slotKey: "PRIME_INDEXER_KEY",
     label: "Prime Indexer",
+    color: "#ea580c", // orange — distinct from the blue accent
     submit: async (key, urls, ctx) => {
       const projectName = `${ctx.proxyDomain} ${new Date().toISOString()}`;
       const r = await pingPrimeIndexer(key, urls, projectName);
@@ -95,6 +105,7 @@ export const ACTIVE_INDEXERS: readonly IndexerEntry[] = [
   {
     slotKey: "SINBYTE_API_KEY",
     label: "Sinbyte",
+    color: "#0d9488", // teal
     submit: async (key, urls, ctx) => {
       const batchName = `${ctx.proxyDomain} ${new Date().toISOString()}`;
       const r = await pingSinbyte(key, urls, batchName);
@@ -107,6 +118,25 @@ export const ACTIVE_INDEXERS: readonly IndexerEntry[] = [
           r.failed === 0
             ? `Sinbyte: submitted ${r.ok} batch${r.ok === 1 ? "" : "es"} with ${urls.length} URL${urls.length === 1 ? "" : "s"} (method=tools, dripfeed enabled).`
             : `Sinbyte: ${r.failed}/${r.submitted} batch${r.submitted === 1 ? "" : "es"} failed to submit.`,
+      };
+    },
+  },
+  {
+    slotKey: "OMEGA_INDEXER_KEY",
+    label: "Omega Indexer",
+    color: "#7c3aed", // purple
+    submit: async (key, urls, ctx) => {
+      const campaignName = `${ctx.proxyDomain} ${new Date().toISOString()}`;
+      const r = await pingOmegaIndexer(key, urls, campaignName);
+      return {
+        ok: r.failed === 0 && r.ok > 0,
+        submitted: r.submitted,
+        successes: r.ok,
+        failures: r.failed,
+        message:
+          r.failed === 0
+            ? `Omega Indexer: submitted ${r.ok} campaign${r.ok === 1 ? "" : "s"} with ${urls.length} URL${urls.length === 1 ? "" : "s"}.`
+            : `Omega Indexer: ${r.failed}/${r.submitted} campaign${r.submitted === 1 ? "" : "s"} failed to submit.`,
       };
     },
   },
