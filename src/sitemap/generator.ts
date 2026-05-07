@@ -263,7 +263,41 @@ function isPathSeedEligible(path: string, config: ClientConfig): boolean {
  * crawl-time freshness comparison when `lastmod` is absent.
  */
 export function generateSitemapXml(config: ClientConfig): string {
-  const urls = collectSitemapUrls(config);
+  return buildXml(collectSitemapUrls(config));
+}
+
+/**
+ * Async variant that ALSO merges in URLs from the upstream sitemap
+ * (when `config.ingest_upstream_sitemap` is true). Used by the proxy
+ * worker's `/sitemap.xml` route. KV-cached so the upstream fetch
+ * happens at most once per hour per client.
+ *
+ * Falls back to the operator-pinned-only result when:
+ *   - `ingest_upstream_sitemap` is false
+ *   - upstream fetch fails AND nothing's cached yet
+ *
+ * The auto-ping flow on config save still uses the sync
+ * `collectSitemapUrls` — we deliberately do NOT auto-ping every
+ * upstream URL on every save (would burn credits with paid indexers).
+ */
+export async function generateSitemapXmlWithUpstream(
+  config: ClientConfig,
+  env: { CONFIG_KV: import("@cloudflare/workers-types").KVNamespace },
+  ctx: import("@cloudflare/workers-types").ExecutionContext,
+): Promise<string> {
+  const operatorUrls = collectSitemapUrls(config);
+  if (!config.ingest_upstream_sitemap) {
+    return buildXml(operatorUrls);
+  }
+  // Lazy import to avoid pulling upstream code into the operator-only path.
+  const { getUpstreamSitemapUrls } = await import("./upstream.js");
+  const upstreamUrls = await getUpstreamSitemapUrls(config, env, ctx);
+  // Merge + dedupe + sort.
+  const merged = Array.from(new Set([...operatorUrls, ...upstreamUrls])).sort();
+  return buildXml(merged);
+}
+
+function buildXml(urls: string[]): string {
   const body = urls.map((u) => `  <url><loc>${xmlEscape(u)}</loc></url>`).join("\n");
   return `<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">

@@ -12,6 +12,7 @@
 
 import { buildSubmissions, submitToIndexNow } from "../sitemap/indexnow.js";
 import { checkPrimeBalance } from "../sitemap/prime-indexer.js";
+import { submitToSinbyte } from "../sitemap/sinbyte.js";
 
 /**
  * Discriminated result shape — `kind` tells the UI which icon/colour
@@ -158,11 +159,61 @@ export async function testPrimeIndexerKey(value: string): Promise<TestResult> {
 }
 
 /**
+ * Test the Sinbyte API key by submitting one URL.
+ *
+ * Sinbyte has no documented read-only endpoint (no balance check, no
+ * key-only verify), so the only definitive test is a real submission.
+ * This burns ONE entry from the operator's plan quota — acceptable
+ * cost for "did the key actually work" confidence.
+ *
+ * Uses method="tools" since that's what the platform uses for
+ * auto-ping + manual submissions; no GSC verification required.
+ */
+export async function testSinbyteKey(value: string, testHost: string): Promise<TestResult> {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return { kind: "err", message: "No Sinbyte key provided. Enter a value before testing." };
+  }
+  if (!testHost.trim()) {
+    return {
+      kind: "err",
+      message:
+        "No proxy domain available to test against. Add a proxied site first — Sinbyte tests submit a single homepage URL.",
+    };
+  }
+  const result = await submitToSinbyte({
+    apikey: trimmed,
+    name: `edge-seo test ${new Date().toISOString()}`,
+    dripfeed: 1,
+    method: "tools",
+    urls: [`https://${testHost}/`],
+  });
+  if (result.ok) {
+    return {
+      kind: "ok",
+      message:
+        "Sinbyte accepted the submission (status: ok). Note: this consumed ONE entry from your plan quota.",
+    };
+  }
+  if (result.status === 0) {
+    return {
+      kind: "err",
+      message: "Network error reaching app.sinbyte.com. Check edge connectivity and retry.",
+    };
+  }
+  return {
+    kind: "err",
+    message: `Sinbyte rejected the submission (HTTP ${result.status}). The key may be invalid, the plan may be expired, or the response shape changed.`,
+    ...(result.responseBody ? { details: result.responseBody } : {}),
+  };
+}
+
+/**
  * Stub tester for indexer slots whose API contract isn't yet wired
- * (Omega, Sinbyte). Just checks the value is non-empty and looks
- * plausible (printable ASCII, reasonable length) — not a substitute
- * for the real handshake but enough to catch "I pasted the wrong
- * field" mistakes.
+ * (Omega). Just checks the value is non-empty and looks plausible
+ * (printable ASCII, reasonable length) — not a substitute for the
+ * real handshake but enough to catch "I pasted the wrong field"
+ * mistakes.
  *
  * Returns `warn` rather than `ok` so the operator knows there's no
  * live integration yet.
