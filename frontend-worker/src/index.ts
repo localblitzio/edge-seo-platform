@@ -83,6 +83,18 @@ import {
   setPassword as setUserPassword,
   verifyPassword,
 } from "./auth.js";
+import {
+  handleClusterStatusPost,
+  handleEditClusterPost,
+  handleNewClusterPost,
+  loadClusterMemberCounts,
+  loadClusterPageData,
+  loadVisibleClusters,
+  renderClusterDetail,
+  renderClustersList,
+  renderEditClusterForm,
+  renderNewClusterForm,
+} from "./clusters.js";
 import { type EmailBinding, resetPasswordMessage, sendEmail } from "./email.js";
 import { inspectSourcePage } from "./inspector.js";
 import {
@@ -1376,6 +1388,190 @@ export default {
             headers: { "content-type": "application/json" },
           });
         }
+      }
+
+      // Unknown sub-route — fall through to 404 below.
+    }
+
+    /* ─── Clusters (Slice A: registry only) ─── */
+
+    if (path === "/app/clusters" && method === "GET") {
+      if (!user) return redirectToLogin(url);
+      const clients = await loadVisibleClients(env, user);
+      const rows = await loadVisibleClusters(env, user);
+      const memberCounts = await loadClusterMemberCounts(
+        env,
+        rows.map((r) => r.id),
+      );
+      return htmlResponse(
+        htmlPage({
+          title: "Clusters — Edge SEO Platform",
+          body: appLayout({
+            title: "Clusters",
+            content: renderClustersList(rows, memberCounts, user),
+            activeNav: "clusters",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+      );
+    }
+
+    if (path === "/app/clusters/new" && method === "GET") {
+      if (!user) return redirectToLogin(url);
+      const clients = await loadVisibleClients(env, user);
+      return htmlResponse(
+        htmlPage({
+          title: "New cluster — Edge SEO Platform",
+          body: appLayout({
+            title: "New cluster",
+            content: renderNewClusterForm(null, clients, []),
+            activeNav: "clusters",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+      );
+    }
+
+    if (path === "/app/clusters/new" && method === "POST") {
+      if (!user) return redirectToLogin(url);
+      const result = await handleNewClusterPost(request, env, url, user);
+      if (result.response) return result.response;
+      const clients = await loadVisibleClients(env, user);
+      return htmlResponse(
+        htmlPage({
+          title: "New cluster — Edge SEO Platform",
+          body: appLayout({
+            title: "New cluster",
+            content: renderNewClusterForm(
+              result.rerenderError?.prefill ?? null,
+              result.rerenderError?.visibleClients ?? clients,
+              result.rerenderError?.errors ?? ["Unknown error"],
+            ),
+            activeNav: "clusters",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+        { status: 400 },
+      );
+    }
+
+    if (path.startsWith("/app/clusters/")) {
+      if (!user) return redirectToLogin(url);
+      const rest = path.slice("/app/clusters/".length);
+      const slash = rest.indexOf("/");
+      const idStr = slash === -1 ? rest : rest.slice(0, slash);
+      const sub = slash === -1 ? "" : rest.slice(slash + 1);
+      const id = Number.parseInt(idStr, 10);
+      if (!Number.isFinite(id) || id <= 0) {
+        return new Response(null, { status: 303, headers: { location: "/app/clusters" } });
+      }
+      const clients = await loadVisibleClients(env, user);
+      const data = await loadClusterPageData(env, user, id);
+      if (!data) {
+        return htmlResponse(
+          htmlPage({
+            title: "Not found — Edge SEO Platform",
+            body: appLayout({
+              title: "Cluster",
+              content:
+                '<h1>Not found</h1><div class="empty">No cluster with that id, or you don\'t have access to it.</div>',
+              activeNav: "clusters",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+          { status: 404 },
+        );
+      }
+
+      if (sub === "" && method === "GET") {
+        return htmlResponse(
+          htmlPage({
+            title: `${data.cluster.label} — Edge SEO Platform`,
+            body: appLayout({
+              title: data.cluster.label,
+              content: renderClusterDetail(data.cluster, data.members, data.visibleClients),
+              activeNav: "clusters",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+
+      if (sub === "edit" && method === "GET") {
+        return htmlResponse(
+          htmlPage({
+            title: `Edit ${data.cluster.label} — Edge SEO Platform`,
+            body: appLayout({
+              title: `Edit ${data.cluster.label}`,
+              content: renderEditClusterForm(
+                data.cluster,
+                data.members,
+                null,
+                data.visibleClients,
+                [],
+              ),
+              activeNav: "clusters",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+
+      if (sub === "edit" && method === "POST") {
+        const result = await handleEditClusterPost(request, env, url, user, id);
+        if (result.response) return result.response;
+        const re = result.rerenderError;
+        if (!re) return new Response("Internal error", { status: 500 });
+        return htmlResponse(
+          htmlPage({
+            title: `Edit ${re.row.label} — Edge SEO Platform`,
+            body: appLayout({
+              title: `Edit ${re.row.label}`,
+              content: renderEditClusterForm(
+                re.row,
+                re.members,
+                re.prefill,
+                re.visibleClients,
+                re.errors,
+              ),
+              activeNav: "clusters",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+          { status: 400 },
+        );
+      }
+
+      if (sub === "status" && method === "POST") {
+        return handleClusterStatusPost(request, env, url, user, id);
       }
 
       // Unknown sub-route — fall through to 404 below.
