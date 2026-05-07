@@ -1,25 +1,27 @@
 # Edge SEO Platform — status
 
-**Last update:** 2026-05-03
-**Phase:** 1 (foundation) shipped + Phase-2 admin editor (full write surface) shipped.
-**Pilot client:** Lantern Crest Senior Living — live in staging.
+**Last update:** 2026-05-07
+**Phase:** 1 (foundation) shipped + Phase 2 (admin editor) shipped + Phases A–E
+of the frontend-worker rewrite shipped + Link Projects (Slices 1–4) shipped.
+**Production:** not yet — all live infrastructure is staging.
 
-This file is your at-a-glance "where are we" reminder. Everything in
-[CHANGELOG.md](CHANGELOG.md) is the long-form release notes; this is the
-operator's pinboard.
+This file is your at-a-glance "where are we" reminder. [CHANGELOG.md](CHANGELOG.md)
+is the long-form release notes; [HANDOFF.md](HANDOFF.md) captures session-end
+context for the next coding session; this is the operator's pinboard.
 
 ---
 
 ## 🌐 What's running on Cloudflare
 
-| Worker | URL | Purpose | Bindings |
-| ------ | --- | ------- | -------- |
-| **edge-seo-platform-staging** | https://edge-seo-platform-staging.localblitzio.workers.dev | Main edge SEO pipeline. Serves Lantern Crest by reverse-proxying `https://lanterncrestseniorlivingsantee.com` with the full §5 transform stack on top. | `CONFIG_KV`, `CONFIG_DB`, `CONTENT_R2`, `LOGS_R2`, `METRICS` |
-| **edge-seo-admin** | https://edge-seo-admin.localblitzio.workers.dev | Admin dashboard + editor. Reads + writes the same D1 + KV bindings the main worker uses. All writes validate against the same Zod schema the Worker uses at load time. Behind HTTP basic auth (`ADMIN_USERNAME` / `ADMIN_PASSWORD` Worker secrets). | `CONFIG_KV`, `CONFIG_DB`, `ADMIN_USERNAME`, `ADMIN_PASSWORD` |
+| Worker | URL | Purpose |
+| ------ | --- | ------- |
+| **edge-seo-frontend** | `edgeseo.app/*` (+ workers.dev fallback) | App + auth surface. Landing page, /login, /forgot, /reset, /verify, /logout. Multi-tenant `/app/*` (clients, link projects, audit log) and super-admin `/admin/*`. Bound to the same `CONFIG_KV` + `CONFIG_DB` so it reads + writes the same data the proxy worker serves. |
+| **edge-seo-platform-staging** | `*.localpage.us.com/*`, `*.localsite.us.com/*`, `404-media.com/*`, `seoinencinitas.com/*` | Main edge SEO pipeline. Reverse-proxies + transforms + injects per the §5 lifecycle. Reads compiled link-project placements from `placements:<client_id>` KV. |
+| **edge-seo-admin** | https://edge-seo-admin.localblitzio.workers.dev | Legacy basic-auth dashboard. Slated for deletion (Phase G in [HANDOFF.md](HANDOFF.md)) once /app/* has full parity. |
 
 **Cloudflare account:** `Simon@localblitz.io's Account` (`cf2aaefcc5131a72802197c727a911b9`)
 
-**Resources** (all in staging, no production yet):
+**Resources** (staging):
 
 | Resource | Name | ID |
 | --- | --- | --- |
@@ -29,6 +31,11 @@ operator's pinboard.
 | R2 bucket (logs) | `edge-seo-logs-staging` | — |
 | Analytics Engine | `edge_seo_metrics_staging` | — |
 
+**Worker secrets** (set via `wrangler secret put`):
+- `CF_API_TOKEN` — used by auto-onboarding + cache-purge buttons + link-project HTTP cache invalidation. Scope: All zones from the account, with Workers Scripts/KV/Routes:Edit, DNS:Edit, Cache Purge:Purge.
+- `INDEXNOW_KEY` — bound, IndexNow integration not yet wired
+- `GSC_SERVICE_ACCOUNT_JSON` — bound, GSC integration not yet wired
+
 ---
 
 ## 🐙 Git + CI
@@ -36,46 +43,48 @@ operator's pinboard.
 - **Repo:** https://github.com/localblitzio/edge-seo-platform (private)
 - **Default branch:** `main`
 - **CI:** [.github/workflows/ci.yml](.github/workflows/ci.yml) — push to `main` →
-  typecheck + lint + tests → auto-deploy to staging → manual approval gate for
-  production.
-- **GitHub Secrets configured:**
-  - `CLOUDFLARE_API_TOKEN` (with Workers + KV + D1 + Zone scopes)
-  - `CLOUDFLARE_ACCOUNT_ID` = `cf2aaefcc5131a72802197c727a911b9`
+  typecheck + lint + tests → auto-deploy `edge-seo-platform-staging`,
+  `edge-seo-admin`, and `edge-seo-frontend` to staging in parallel jobs →
+  manual approval gate for production.
+- **GitHub Secrets configured:** `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`
 
 ---
 
-## 👤 Pilot client config (Lantern Crest)
+## 👥 Active clients
 
-Source of truth: [config/lantern-crest-staging.json](config/lantern-crest-staging.json)
+Listed roughly by onboarding date. All multi-tenant — owner_id scoped to
+`simon@localblitzmarketing.com` (super-admin sees all).
 
-**Active rules:**
+| client_id | mode | proxy_domain | source/origin | Notes |
+| --- | --- | --- | --- | --- |
+| `lantern-crest` | subdomain_proxy | `lantern-crest.localpage.us.com` | `lanterncrestseniorlivingsantee.com` | Original pilot. Canonical=origin, noindex. |
+| `404-media` | in_place | `404-media.com` | `144.202.74.213` (resolve_override) | Real customer apex on GridPane WordPress. www → apex via WP redirect. |
+| `seoinencinitas` | in_place | `seoinencinitas.com` | `seoinencinitas.pages.dev` | Real customer on Cloudflare Pages. No resolve_override needed. |
+| `rfengineer` | subdomain_proxy | `rfengineer.localpage.us.com` | `rfengineer.net` | Test/demo. Has link-project placement (id=3). |
+| `bestofindianapolis` | subdomain_proxy | `bestofindianapolis.localpage.us.com` | `bestofindianapolis.net` | Test/demo. |
+| `simonwhiteai` | subdomain_proxy | `simonwhiteai.localpage.us.com` | (operator personal) | Test/demo. |
+| `theheritagesteakhouse` | subdomain_proxy | `theheritagesteakhouse.localpage.us.com` | (operator owns) | Test/demo. |
 
-- **Routing** — `^/.*` proxies to `https://lanterncrestseniorlivingsantee.com` with `none` origin auth.
-- **Canonical** — `^/.*` → `origin` strategy. Every page has `<link rel="canonical" href="https://lanterncrestseniorlivingsantee.com/...">` injected. Prevents duplicate-content penalty (proxy doesn't compete with source).
-- **Indexation** — `^/.*` → `noindex,follow`. Search engines crawl links but don't index the proxy. Source site retains its rankings.
-- **Caching** — `^/.*` → 600s TTL on the response cache (bypassed for Authorization, Set-Cookie, 5xx, bot UAs per §9.1).
-
-**Inactive rules** (empty arrays): static / pattern / conditional redirects,
-schema injections, link rewrites, element removals, content injections, meta
-rewrites, forms.
+Multi-zone enabled — clients can also be on `*.localsite.us.com` (added 2026-05-06).
 
 ---
 
 ## 🛠 Day-1 operator workflow
 
-| Task | Command |
-| ---- | ------- |
-| Edit a client config (web) | https://edge-seo-admin.localblitzio.workers.dev/clients/&lt;id&gt;/edit |
-| Add a new client (web) | https://edge-seo-admin.localblitzio.workers.dev/clients/new |
-| Flip status / purge cache / capture attestation | Buttons on the client detail page |
-| Edit a client config (CLI) | Edit `config/<client>-staging.json` locally |
-| Validate before push | `npm run config:validate -- config/<client>-staging.json` |
-| Push to staging (CLI) | `npm run seed-client -- --env=staging --config=config/<client>-staging.json` |
-| Deploy worker code | `git push` (CI auto-deploys main + admin worker to staging on `main`) |
-| View live state | https://edge-seo-admin.localblitzio.workers.dev (browse) |
-| Local end-to-end demo | `npm run demo:seed && npm run dev && npm run admin` |
-| Synthetic perf check | `npm run load-test` |
-| Production smoke | `npm run smoke -- --host=<proxy-domain>` |
+| Task | Where |
+| ---- | ----- |
+| Sign in | https://edgeseo.app/login |
+| List + edit clients | https://edgeseo.app/app/clients |
+| Create a new client (subdomain_proxy or in_place) | https://edgeseo.app/app/clients/new — pick a zone radio or "Custom domain" |
+| Auto-onboard (creates DNS + Workers Route via CF API) | "Install on Cloudflare" button on an in_place client detail page |
+| Manage link-projects (push a target URL via N proxied sites) | https://edgeseo.app/app/link-projects |
+| Bulk-apply a link-project across clients | "Bulk apply" details element on the link-project detail page |
+| Verify a target URL is reachable | "Check target URL" button on the link-project detail page |
+| Capture / view permission attestation | "Capture attestation" on a client detail page |
+| Per-page editing (text/meta rewrites, schema, redirects) | "Edit page" link from the client detail "Pages with edits" section |
+| Inspector (find CSS selectors on the source) | Form section on the client edit page → "Inspect page on source" |
+| Audit log | https://edgeseo.app/app/audit |
+| Purge a client's cache (KV + CF HTTP) | "Purge cache" button on the client detail page |
 
 ---
 
@@ -87,12 +96,13 @@ rewrites, forms.
     Cloudflare Edge (anycast)
               ↓
    ┌──── edge-seo-platform-staging Worker ────┐
-   │                                          │
    │  §5 pipeline:                            │
    │    1. config load (KV → D1 fallback)     │
+   │       + placements:<client_id> merge     │
+   │       (link-project content_injections)  │
    │    2. authorization gate (status/expiry) │
    │    3. cache lookup (early)               │
-   │    4-5. redirects (static/pattern/cond.) │
+   │    4–5. redirects (static/pattern/cond.) │
    │    6. route resolution                   │
    │    7. proxy fetch / custom_page          │
    │    8. 5xx handling                       │
@@ -100,84 +110,111 @@ rewrites, forms.
    │   10. header transforms                  │
    │   11. cache write (post-transform)       │
    │   12. log + metrics                      │
-   │                                          │
    └─────────┬────────────────┬───────────────┘
              ↓                ↓
    CONFIG_KV   CONFIG_DB    →  → fetch upstream origin
-   (cache)     (truth)            (e.g. lanterncrestseniorlivingsantee.com)
+   (cache)     (truth)
         ↑                ↑
-        │                │  (read by both workers)
+        │   (read+write by frontend-worker)
         ↓                ↓
-   ┌─── edge-seo-admin Worker ───┐
-   │                              │
-   │  Read-only dashboard at      │
-   │  /, /clients, /clients/:id,  │
-   │  /redirects, /audit, /kv     │
-   │                              │
-   │  HTTP basic auth gate        │
-   │                              │
-   └──────────────────────────────┘
+   ┌─── edge-seo-frontend Worker ────┐
+   │   edgeseo.app/* — auth, multi-  │
+   │   tenant /app/*, super-admin    │
+   │   /admin/*, debug endpoints     │
+   │   • compiles placements → KV    │
+   │   • purges CF HTTP cache on     │
+   │     placement / project edits   │
+   │   • CF API: DNS, Workers Route, │
+   │     cache purge (CF_API_TOKEN)  │
+   └─────────────────────────────────┘
 ```
+
+KV keyspace:
+- `domain:<host>` → `<client_id>` (mapping)
+- `config:<client_id>` → JSON `ClientConfig` (read by proxy worker)
+- `placements:<client_id>` → JSON `{ compiled_at, content_injections[] }` (read by proxy worker, written by frontend-worker on placement / project edits)
 
 ---
 
-## ✅ Done (Phase 1)
+## ✅ Done
 
-All M0–M12 milestones from `docs/tech-spec.md` §15:
+### Phase 1 — Foundation (M0–M12)
 
-- M0 — repo bootstrap, TypeScript strict, Biome, Vitest, wrangler.toml
-- M1 — Zod ClientConfig schema + load-time invariants + KV/D1 loader
-- M2 — security headers, structured logger, Analytics Engine metrics
-- M3 — three-layer redirect resolver (static / pattern / conditional)
-- M4 — canonical resolver with §6.3 SEO defaults (proxy → origin)
-- M5 — full HTMLRewriter pipeline (meta / canonical / schema / link / element / content / indexation)
-- M6 — `X-Robots-Tag` header for non-HTML responses
-- M7 — proxy hardening (none/aop/header_token/mtls dispatch, upstream 5xx → 503)
-- M8 — custom-pages with R2 ETag/Last-Modified passthrough
-- M9 — append-only attestation recorder (D1 INSERT)
-- M10 — response cache with §9.1 invariants enforced
-- M11 — 15 §12.2 integration tests committed (runner blocked on Windows; documented)
-- M12 — operator artifacts (validate-config, seed-client, load-test, smoke, runbook)
+All milestones from `docs/tech-spec.md` §15:
+- M0 repo bootstrap; M1 Zod schema + loader; M2 logger + metrics; M3 redirects;
+  M4 canonical; M5 HTMLRewriter pipeline; M6 X-Robots-Tag; M7 proxy hardening;
+  M8 custom-pages; M9 attestation; M10 response cache; M11 integration tests;
+  M12 operator artifacts.
 
-**262 unit tests passing**, target coverage met on high-risk modules:
+### Phase 2 — Admin write surface
 
-- `src/config/`: 100% / 100% / 100% / 100%
+- Editable client config (web form + raw JSON textarea)
+- Per-client status flips, cache purge, attestation capture
+- CSRF + flash redirect pattern
+
+### Phases A–E — Frontend worker rewrite (multi-user)
+
+- Phase A — D1 users/sessions/email_tokens schema, multi-tenant `clients.owner_id`
+- Phase B — landing page on edgeseo.app
+- Phase C — Cloudflare Email Routing for transactional mail
+- Phase D — login / forgot / reset / verify / logout (PBKDF2 server-side sessions)
+- Phase E — `/app/*` write surface, structured form + rich list editors,
+  per-page editor, inspector for CSS selectors, custom pages, static-site ZIP
+  uploads, file browser
+
+### Slice features (post-Phase E)
+
+- **In-place mode** — worker runs on the customer's own apex (404-media, seoinencinitas)
+- **Cloudflare auto-onboard** — DNS + Workers Route created via CF API on save
+- **resolve_override** — first-class form field for managed-host customers
+- **Worker fingerprint header** + route-drift predeploy check
+- **Multi-zone proxy support** — `localpage.us.com` + `localsite.us.com` (one radio per zone)
+- **Link Projects (Slices 1–4)** — registry, per-(project × client × page-match) placements, KV-compiled content_injections merged at request time, anchor rotation, custom CSS-selector strategy, stat cards, target-URL check, bulk apply
+
+### Test surface
+
+**500+ unit tests passing** repo-wide. Coverage targets met on the high-risk modules:
+- `src/config/`: 100% statements / branches / functions / lines
 - `src/redirects/`: 100% / 100% / 100% / 97%
 - `src/canonical/`: 100% / 100% / 100% / 94%
 - `src/lib/`: 100% across all axes
+- `frontend-worker/src/link-projects.ts`: comprehensive (validation, synthesizer, rotation, stats, bulk validation)
 
-**Live verified end-to-end:**
+### Live verified end-to-end
 
-- https://edge-seo-platform-staging.localblitzio.workers.dev/ returns 200
-- `<link rel="canonical" href="https://lanterncrestseniorlivingsantee.com/">` injected (M4 + M5)
-- `<meta name="robots" content="noindex,follow">` injected (M5 + new B-config)
-- `Server` / `X-Powered-By` stripped from origin response (M2 + §10)
-- `referrer-policy` + `x-content-type-options` added (M2 + §10)
-- HTTP basic auth on admin worker prompts on first visit (Phase 2 MVP)
+- All 7 active clients serving 200/HTML
+- Canonical, robots, security-header rewrites confirmed
+- Link injection working on `rfengineer`, `404-media` (verified in rendered DOM)
+- Cache purge propagates within seconds after admin edit (CF HTTP cache + KV)
 
 ---
 
 ## ⚠️ Known issues / limitations
 
-1. **Integration test runner unstable on Windows.** `tests/integration/pipeline.test.ts` has 15 §12.2 scenarios written, but `@cloudflare/vitest-pool-workers` running on wrangler 3.114 hangs mid-suite due to a Cross-Request-Promise-Resolve / Node IPC race. Unit tests cover the same logic. Re-attempt after wrangler 4 + vitest-pool-workers upgrade.
-2. **No production environment yet.** Staging-only. Production resources, real proxy domain, and DNS cut are unscheduled.
-3. **No Logpush job configured.** Worker emits structured logs and Analytics Engine counters, but they're not yet shipped to a queryable backend. PRD §7.11 alerts not configured.
-4. **No second client.** Multi-tenancy is designed in but not yet exercised. Onboarding a second client tests that "add a client = config row" assumption holds — now also exercises the new `/clients/new` editor path.
-5. **R2 unused at runtime.** `CONTENT_R2` bound but not yet writing custom-page content; `LOGS_R2` waiting on Logpush.
+1. **No production environment yet.** Staging-only. `wrangler.toml` has `REPLACE_WITH_PRODUCTION_KV_ID` placeholders. Spinning up production needs: new KV/D1/R2 namespaces, production CF_API_TOKEN secret, route registration on production-zone-of-record, DNS cut.
+2. **No Logpush job configured.** Worker emits structured logs + Analytics Engine counters but they're not yet shipped to a queryable backend. PRD §10 SLO alerts not configured.
+3. **Integration test runner unstable on Windows.** `tests/integration/pipeline.test.ts` has 15 §12.2 scenarios written, but `@cloudflare/vitest-pool-workers` on wrangler 3.114 hangs mid-suite. Unit tests cover the same logic. Re-attempt after wrangler 4 + vitest-pool-workers upgrade.
+4. **Phase F not started.** `/admin/users` super-admin CRUD (invite / edit / delete / force-reset) is the next planned phase per [HANDOFF.md](HANDOFF.md).
+5. **Phase G not started.** `edge-seo-admin` worker is legacy + slated for deletion once /app/* parity confirmed.
+6. **IndexNow + sitemap generation not wired.** Secrets bound, code skeleton in `src/sitemap/`, no implementation.
+7. **mTLS origin auth has a code path** but the per-client cert binding workflow isn't documented end-to-end.
+8. **Form submissions** — D1 table exists, no read/write code in the worker.
 
 ---
 
 ## 🎯 Next-steps menu
 
-Pick any. Or none — Phase 1 is shippable as-is.
+Pick any.
 
 | Option | Why | Effort |
-| ------ | --- | ------ |
-| **Onboard a second client** | Validates multi-tenancy AND live-fires the new `/clients/new` editor. Pick a permissioned source, paste config in the web form, hit the proxy. | ~15 min |
-| **Production env** | Separate KV/D1/R2, real production proxy domain, click-to-deploy through GitHub Actions production gate. | ~1 hr |
-| **Logpush + Grafana** | Production observability — see traffic, latency, error rates per client. Wire the §11 SLO budgets to real dashboards. | ~1 hr |
-| **Real SEO content rules for Lantern Crest** | Schema injection (LocalBusiness), targeted meta rewrites, internal link rewrites. Make the proxy do useful SEO work beyond canonical-and-noindex. | ~30 min |
-| **Reverse the pilot canonical** | Currently canonical points to source (don't compete). If the goal is for the proxy to rank, flip canonical to `self` and remove `noindex`. Strategic decision per use case. | ~5 min config change |
+| --- | --- | --- |
+| **Phase F — super-admin user CRUD** | Already in HANDOFF.md as planned next. Lets others admin clients — foundational for agency tooling. | ~2 hr |
+| **SEO operational tools — IndexNow + sitemap generation** | Highest direct SEO value. Pings search engines on content changes; generates sitemaps from per-client routing config. | ~4 hr |
+| **Production deploy** | First paying customer trigger. Needs new CF resources, secrets, DNS. | ~4 hr |
+| **Operational dashboards** | Read Workers Analytics Engine: p95 latency, error rate, cache hit ratio per client. PRD §10. | ~3 hr |
+| **Rich form for the rest of ClientConfig** | link_rewrites, conditional redirects, element_removals are still raw-JSON edited. Operator UX gap. | ~3 hr |
+| **Inspector → placement integration** | "Use this selector" button on the inspector that creates a link-project placement directly. Makes the selector strategy more discoverable. | ~2 hr |
+| **Logpush + Grafana** | Production observability — see traffic, latency, error rates per client. Wire §11 SLO budgets to real dashboards. | ~3 hr |
 
 ---
 
@@ -185,38 +222,57 @@ Pick any. Or none — Phase 1 is shippable as-is.
 
 ```
 docs/
-  prd.md, tech-spec.md            ← Source-of-truth specs
-  runbooks/pilot-deploy.md        ← Step-by-step operator runbook
+  prd.md, tech-spec.md             ← Source-of-truth specs
+  runbooks/                        ← Operator runbooks
 src/
   worker.ts                        ← Main worker entrypoint (§5 pipeline)
-  config/                          ← Zod schema + loader + invariants
+  config/                          ← Zod schema, loader (now reads placements:* too), invariants
   redirects/                       ← Three-layer redirect resolver
-  canonical/                       ← Canonical strategy (M4)
-  transform/                       ← HTMLRewriter pipeline (M5)
-  proxy/                           ← Origin fetch + auth dispatch (M7)
-  custom-pages/                    ← R2/KV-backed page renderer (M8)
-  attestation/                     ← D1 attestation recorder (M9)
-  cache/                           ← Response cache + §9.1 invariants (M10)
-  indexation/                      ← X-Robots-Tag header (M6)
+  canonical/                       ← Canonical strategy
+  transform/                       ← HTMLRewriter pipeline (meta/canonical/schema/link/element/content/text/indexation)
+  proxy/                           ← Origin fetch + auth dispatch (incl. resolve_override)
+  custom-pages/                    ← R2/KV-backed page renderer
+  attestation/                     ← D1 attestation recorder
+  cache/                           ← Response cache + §9.1 invariants (incl. 0-byte poison guard)
+  indexation/                      ← X-Robots-Tag header
+  sitemap/                         ← Skeleton (M not yet built)
   lib/                             ← Errors, headers
-  observability/                   ← Logger, metrics
-admin-worker/                      ← Hosted admin dashboard worker
+  observability/                   ← Logger, metrics, log shipper
+frontend-worker/                   ← edgeseo.app worker
+  src/index.ts                     ← Router (auth flows + /app/* + /admin/*)
+  src/auth.ts                      ← PBKDF2 sessions, email tokens, cookies
+  src/email.ts                     ← Cloudflare Email Service templates
+  src/app.ts                       ← /app/* page rendering + write handlers + sidebar
+  src/link-projects.ts             ← Link projects: types, validation, synthesizer, KV compile, audit, all routes
+  src/cloudflare-api.ts            ← CF API helpers (zones, DNS, routes, cache purge)
+  src/inspector.ts                 ← Source-page CSS selector picker
+  src/zip-extractor.ts             ← Static-site ZIP upload
+  src/list-editor-js.ts            ← Client-side JS for rich list editors
+  src/build-version.ts             ← Stamped at deploy time
+admin-worker/                      ← Legacy basic-auth dashboard (slated for deletion in Phase G)
 admin-ui/                          ← Local read-only inspector (legacy of admin-worker)
 config/
-  lantern-crest-staging.json       ← Pilot client config (source of truth)
-  lantern-crest.template.json      ← Template for new clients
+  lantern-crest-staging.json       ← Pilot client config
 scripts/
   validate-config.ts               ← Pre-flight Zod + invariant validator
   seed-client.ts                   ← One-command D1 upsert + KV invalidate
   load-test.mjs                    ← Synthetic perf regression detector
   post-deploy-smoke.mjs            ← Production smoke test
-  seed-demo.mjs                    ← Local Miniflare demo seeder
-  update-lantern-crest-staging.sql ← One-off SQL (now obsoleted by seed-client)
+  check-route-drift.mjs            ← Predeploy: D1 in_place clients vs wrangler.toml routes
+  stamp-build-version.mjs          ← Bakes git SHA into build-version.ts pre-deploy
 tests/
   integration/pipeline.test.ts     ← 15 §12.2 scenarios (runner-blocked on Windows)
+  unit/frontend-worker/            ← auth, email, list-editor, inspector, zip-extractor, link-projects
+  unit/admin-worker/               ← legacy admin helpers
 migrations/
-  0001_initial.sql                 ← D1 schema (clients, attestations, audit_log, form_submissions)
-wrangler.toml                      ← Main worker bindings (default + staging + production envs)
+  0001_initial.sql                 ← clients, attestations, audit_log, form_submissions
+  0002_users.sql                   ← Phase A: users, sessions, email_tokens, owner_id
+  0003_link_projects.sql           ← Slice 1: link_projects table
+  0004_link_project_placements.sql ← Slice 2A: per-(project × client × page-match) placements
+  0005_link_project_placement_selector.sql ← Slice 3: target_selector + position columns, broaden strategy CHECK
+wrangler.toml                      ← Main worker bindings + multi-zone routes
+frontend-worker/wrangler.toml      ← edge-seo-frontend bindings + edgeseo.app route
+admin-worker/wrangler.toml         ← Legacy admin worker bindings
 ```
 
-Past commits in `git log --oneline` capture the milestone-by-milestone history.
+`git log --oneline` captures the milestone-by-milestone history.
