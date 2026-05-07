@@ -40,6 +40,7 @@ import { emitRequestCounter } from "./observability/metrics.js";
 import { fetchFromOrigin } from "./proxy/index.js";
 import { resolveRedirect } from "./redirects/index.js";
 import { resolveRoute } from "./router/route-resolver.js";
+import { getSecret } from "./secrets/store.js";
 import { generateSitemapXml } from "./sitemap/generator.js";
 import { extractKeyFromVerificationPath, isIndexNowVerificationPath } from "./sitemap/indexnow.js";
 import { buildRewriter, isHtmlResponse } from "./transform/index.js";
@@ -137,7 +138,7 @@ async function runPipeline(
   // away by the operator's static/pattern rules, and BEFORE caching
   // because they're cheap to generate per request and the response
   // headers can drive their own freshness.
-  const sitemapResponse = maybeServeSitemapOrIndexNow(rctx, config, env);
+  const sitemapResponse = await maybeServeSitemapOrIndexNow(rctx, config, env);
   if (sitemapResponse) return sitemapResponse;
 
   // §5 step 11 (early lookup): on HTML cache hit short-circuit
@@ -402,11 +403,11 @@ function finalize(rctx: RequestContext, response: Response, env: Env): void {
  * up. HEAD is treated as GET (returns headers without body, per the
  * runtime's standard HEAD/GET behavior on Response objects).
  */
-function maybeServeSitemapOrIndexNow(
+async function maybeServeSitemapOrIndexNow(
   rctx: RequestContext,
   config: ClientConfig,
   env: Env,
-): Response | null {
+): Promise<Response | null> {
   const method = rctx.request.method.toUpperCase();
   if (method !== "GET" && method !== "HEAD") return null;
   const path = rctx.url.pathname;
@@ -427,7 +428,7 @@ function maybeServeSitemapOrIndexNow(
   }
 
   if (isIndexNowVerificationPath(path)) {
-    const key = env.INDEXNOW_KEY;
+    const key = await getSecret(env, "INDEXNOW_KEY");
     if (!key) return null; // No key bound — let the request fall through (404 from origin or 200 if origin serves it).
     const requested = extractKeyFromVerificationPath(path);
     if (requested !== key) return null; // Different key — not our verification file; let it through.

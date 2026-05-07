@@ -25,6 +25,7 @@ import { DEFAULT_PROXY_ZONE, PROXY_ZONES, matchProxyZone } from "../../src/confi
 import { ClientConfig } from "../../src/config/schema.js";
 import { assertConfigInvariants } from "../../src/config/validator.js";
 import { ConfigValidationError } from "../../src/lib/errors.js";
+import { getSecret } from "../../src/secrets/store.js";
 import { collectSitemapUrls } from "../../src/sitemap/generator.js";
 import { pingIndexNow } from "../../src/sitemap/indexnow.js";
 import type { User } from "./auth.js";
@@ -62,12 +63,13 @@ export interface AppEnv {
    */
   PROXY_WORKER_SCRIPT?: string;
   /**
-   * IndexNow API key. When bound, admin write paths POST changed
-   * URLs to `https://api.indexnow.org/indexnow` so search engines
-   * (Bing, Yandex, Seznam, etc.) re-fetch the page promptly. The
-   * proxy worker also serves the verification file at
-   * `https://<host>/<INDEXNOW_KEY>.txt`. Off by default — set via
-   * `wrangler secret put INDEXNOW_KEY` to enable.
+   * Legacy fallback for the IndexNow API key — preferred storage is
+   * the D1 `secrets` table edited from the Settings → API keys admin
+   * page (see `src/secrets/store.ts`). The Worker reads via
+   * `getSecret(env, "INDEXNOW_KEY")` which checks KV → D1 → env in
+   * that order, so a value bound here keeps working until the
+   * operator pastes the same value into the UI and unsets the
+   * Worker secret.
    */
   INDEXNOW_KEY?: string;
 }
@@ -369,6 +371,8 @@ const NAV_ICONS: Record<string, string> = {
   "link-projects": `<svg ${NAV_SVG_ATTRS}><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`,
   // grid (Clusters — group of related sites)
   clusters: `<svg ${NAV_SVG_ATTRS}><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>`,
+  // key (Settings → API keys)
+  "settings:api-keys": `<svg ${NAV_SVG_ATTRS}><circle cx="7.5" cy="15.5" r="3.5"/><line x1="10" y1="13" x2="20" y2="3"/><line x1="16" y1="7" x2="19" y2="4"/><line x1="14" y1="9" x2="17" y2="6"/></svg>`,
   // shield-user (Super-admin Users)
   admin: `<svg ${NAV_SVG_ATTRS}><path d="M12 2l8 4v6c0 5-3.5 9-8 10-4.5-1-8-5-8-10V6z"/><circle cx="12" cy="10" r="2.5"/><path d="M8 16c1-1.5 2.5-2.5 4-2.5s3 1 4 2.5"/></svg>`,
   // globe (per-client row)
@@ -422,7 +426,9 @@ export function appSidebar(opts: { activeNav: string; clients: ClientRow[]; user
     .join("");
   const adminLink =
     opts.user.role === "super_admin"
-      ? `<div class="app-sidebar-section">Super-admin</div><a href="/admin/users"${opts.activeNav === "admin:users" ? ' class="active"' : ""}>${NAV_ICONS.admin}<span>Users</span></a>`
+      ? `<div class="app-sidebar-section">Super-admin</div>
+         <a href="/app/settings/api-keys"${opts.activeNav === "settings:api-keys" ? ' class="active"' : ""}>${NAV_ICONS["settings:api-keys"]}<span>API keys</span></a>
+         <a href="/admin/users"${opts.activeNav === "admin:users" ? ' class="active"' : ""}>${NAV_ICONS.admin}<span>Users</span></a>`
       : "";
   const clientList = ""; // Per-site sub-list dropped — see comment above.
   // Build version pinned at deploy time — operators use this to
@@ -1934,11 +1940,12 @@ export async function handleNewClientPost(
  * indexation rules).
  */
 async function maybePingIndexNow(env: AppEnv, cfg: ClientConfig): Promise<void> {
-  if (!env.INDEXNOW_KEY) return;
+  const key = await getSecret(env as unknown as Parameters<typeof getSecret>[0], "INDEXNOW_KEY");
+  if (!key) return;
   const urls = collectSitemapUrls(cfg);
   if (urls.length === 0) return;
   try {
-    await pingIndexNow(cfg.proxy_domain, env.INDEXNOW_KEY, urls);
+    await pingIndexNow(cfg.proxy_domain, key, urls);
   } catch (e) {
     console.warn("indexnow ping failed", e);
   }

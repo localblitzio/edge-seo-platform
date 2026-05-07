@@ -124,6 +124,7 @@ import {
   renderNewLinkProjectForm,
 } from "./link-projects.js";
 import { LOGO_DATA_URL } from "./logo-data-url.js";
+import { handleSettingsApiKeysPost, renderSettingsApiKeysPage } from "./settings.js";
 
 interface Env {
   CONFIG_KV: KVNamespace;
@@ -1719,6 +1720,36 @@ export default {
             title: "Audit log",
             content: await renderAuditPage(env, user),
             activeNav: "audit",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+      );
+    }
+
+    /* ─── Settings → API keys (super-admin only) ─── */
+
+    if (path === "/app/settings/api-keys") {
+      if (!user) return redirectToLogin(url);
+      if (user.role !== "super_admin") {
+        return new Response("Forbidden — super-admin only.", { status: 403 });
+      }
+      if (method === "POST") {
+        const csrf = checkCsrf(request, url);
+        if (csrf) return csrf;
+        return handleSettingsApiKeysPost(request, env, user);
+      }
+      const clients = await loadVisibleClients(env, user);
+      return htmlResponse(
+        htmlPage({
+          title: "API keys — Edge SEO Platform",
+          body: appLayout({
+            title: "API keys",
+            content: await renderSettingsApiKeysPage(env),
+            activeNav: "settings:api-keys",
             user,
             flash,
             clients,

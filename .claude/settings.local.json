@@ -161,7 +161,10 @@
       "Bash(git reset *)",
       "Bash(perl -i -pe 's/\\\\r\\\\n/\\\\n/g' src/sitemap/generator.ts src/sitemap/generator.test.ts src/sitemap/indexnow.ts src/sitemap/indexnow.test.ts src/worker.ts frontend-worker/src/app.ts)",
       "Bash(curl -sS -o .scratch/sitemap.xml -w \"HTTP %{http_code} bytes:%{size_download}\\\\n\" https://lanterncrest.com/sitemap.xml)",
-      "Bash(curl -sS -o .scratch/sitemap.xml -w \"HTTP %{http_code} bytes:%{size_download}\\\\n\" https://rfengineer.localpage.us.com/sitemap.xml)"
+      "Bash(curl -sS -o .scratch/sitemap.xml -w \"HTTP %{http_code} bytes:%{size_download}\\\\n\" https://rfengineer.localpage.us.com/sitemap.xml)",
+      "Bash(git credential *)",
+      "Bash(python -c \"import sys, json; d=json.load\\(sys.stdin\\); [print\\(r['name'], '|', r['status'], '|', r['conclusion']\\) for r in d['check_runs']]\")",
+      "Bash(grep -n \"import.*sitemap\\\\|import.*secret\\\\|from.*\\\\\\\\.\\\\\\\\./src\" frontend-worker/src/app.ts)"
     ]
   }
 }
