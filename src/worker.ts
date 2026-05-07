@@ -41,7 +41,7 @@ import { fetchFromOrigin } from "./proxy/index.js";
 import { resolveRedirect } from "./redirects/index.js";
 import { resolveRoute } from "./router/route-resolver.js";
 import { getSecret } from "./secrets/store.js";
-import { generateSitemapXml } from "./sitemap/generator.js";
+import { generateSitemapXml, generateSitemapXmlWithUpstream } from "./sitemap/generator.js";
 import { extractKeyFromVerificationPath, isIndexNowVerificationPath } from "./sitemap/indexnow.js";
 import { buildRewriter, isHtmlResponse } from "./transform/index.js";
 
@@ -138,7 +138,7 @@ async function runPipeline(
   // away by the operator's static/pattern rules, and BEFORE caching
   // because they're cheap to generate per request and the response
   // headers can drive their own freshness.
-  const sitemapResponse = await maybeServeSitemapOrIndexNow(rctx, config, env);
+  const sitemapResponse = await maybeServeSitemapOrIndexNow(rctx, config, env, ctx);
   if (sitemapResponse) return sitemapResponse;
 
   // §5 step 11 (early lookup): on HTML cache hit short-circuit
@@ -407,13 +407,18 @@ async function maybeServeSitemapOrIndexNow(
   rctx: RequestContext,
   config: ClientConfig,
   env: Env,
+  ctx: ExecutionContext,
 ): Promise<Response | null> {
   const method = rctx.request.method.toUpperCase();
   if (method !== "GET" && method !== "HEAD") return null;
   const path = rctx.url.pathname;
 
   if (path === "/sitemap.xml") {
-    const xml = generateSitemapXml(config);
+    // Use the upstream-merging variant when the operator has opted in;
+    // otherwise stick with the cheap operator-only generator.
+    const xml = config.ingest_upstream_sitemap
+      ? await generateSitemapXmlWithUpstream(config, env, ctx)
+      : generateSitemapXml(config);
     rctx.pipeline_stage = "custom_page";
     return new Response(xml, {
       status: 200,

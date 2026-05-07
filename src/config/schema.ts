@@ -336,6 +336,29 @@ export const ClientConfig = z.object({
     )
     .default([]),
   /**
+   * When true, the proxy worker fetches the upstream's `/sitemap.xml`
+   * (or the URL set in `upstream_sitemap_url`), rewrites every URL's
+   * host to this proxy domain, and merges them into the sitemap this
+   * site serves. Use case: a wildcard-routed proxy site that doesn't
+   * have per-page rules can still expose a complete URL list to
+   * search engines as long as the upstream auto-generates one
+   * (Webflow, HubSpot, Shopify all do).
+   *
+   * Cached in KV under `upstream_sitemap:<client_id>` for 1h. The
+   * upstream-derived URLs DO appear in `/sitemap.xml` but are NOT
+   * auto-pinged via IndexNow/Prime on every config save — that's
+   * deliberate to avoid burning credits on URLs the operator didn't
+   * explicitly choose. Use the per-site Indexing page to submit
+   * upstream URLs manually.
+   */
+  ingest_upstream_sitemap: z.boolean().default(false),
+  /**
+   * Override URL for the upstream sitemap. Defaults to
+   * `https://${source_domain}/sitemap.xml` when unset and
+   * `ingest_upstream_sitemap` is true.
+   */
+  upstream_sitemap_url: z.string().url().optional(),
+  /**
    * Schema version. Bumping requires: a discriminated union over
    * `schema_version` with both old and new variants, plus a migration
    * function applied on read. Never break-replace without migration coverage.
