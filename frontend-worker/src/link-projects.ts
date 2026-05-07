@@ -623,11 +623,20 @@ export async function handleLinkProjectStatusPost(
   });
 }
 
-/* ─── Placements (Slice 2A) ─── */
+/* ─── Placements (Slices 2A + 3) ─── */
 
-export type LinkProjectPlacementStrategy = "footer";
+export type LinkProjectPlacementStrategy = "footer" | "selector";
 export const LINK_PROJECT_PLACEMENT_STRATEGIES: readonly LinkProjectPlacementStrategy[] = [
   "footer",
+  "selector",
+];
+
+export type LinkProjectPlacementPosition = "before" | "after" | "prepend" | "append";
+export const LINK_PROJECT_PLACEMENT_POSITIONS: readonly LinkProjectPlacementPosition[] = [
+  "before",
+  "after",
+  "prepend",
+  "append",
 ];
 
 export type LinkProjectPlacementStatus = "active" | "paused";
@@ -646,13 +655,17 @@ export const REL_PRESETS: readonly string[] = [
   "noopener noreferrer",
 ];
 
-/** Row shape mirroring the link_project_placements table (migration 0004). */
+/** Row shape mirroring the link_project_placements table (migrations 0004 + 0005). */
 export interface LinkProjectPlacementRow {
   id: number;
   link_project_id: number;
   client_id: string;
   page_match: string;
   strategy: LinkProjectPlacementStrategy;
+  /** CSS selector for `selector` strategy. NULL for `footer`. */
+  target_selector: string | null;
+  /** Position relative to target_selector for `selector` strategy. NULL for `footer`. */
+  position: LinkProjectPlacementPosition | null;
   anchor_override: string | null;
   rel_attribute: string;
   status: LinkProjectPlacementStatus;
@@ -664,6 +677,8 @@ export interface LinkProjectPlacementInput {
   client_id: string;
   page_match: string;
   strategy: LinkProjectPlacementStrategy;
+  target_selector: string | null;
+  position: LinkProjectPlacementPosition | null;
   anchor_override: string | null;
   rel_attribute: string;
   status: LinkProjectPlacementStatus;
@@ -672,6 +687,7 @@ export interface LinkProjectPlacementInput {
 const MAX_PAGE_MATCH_LENGTH = 512;
 const MAX_ANCHOR_OVERRIDE_LENGTH = 200;
 const MAX_REL_LENGTH = 100;
+const MAX_TARGET_SELECTOR_LENGTH = 256;
 const CLIENT_ID_PATTERN = /^[a-z0-9-]+$/;
 
 /**
@@ -718,6 +734,31 @@ export function validateLinkProjectPlacementInput(
   }
   const strategy = strategyRaw as LinkProjectPlacementStrategy;
 
+  // target_selector + position are required when strategy='selector',
+  // ignored when strategy='footer' (which always uses body+append).
+  let targetSelector: string | null = null;
+  let position: LinkProjectPlacementPosition | null = null;
+  if (strategy === "selector") {
+    const sel = (raw.target_selector ?? "").trim();
+    if (sel.length === 0) {
+      errors.push("target_selector is required when strategy is 'selector'");
+    } else if (sel.length > MAX_TARGET_SELECTOR_LENGTH) {
+      errors.push(`target_selector must be ${MAX_TARGET_SELECTOR_LENGTH} characters or fewer`);
+    } else {
+      targetSelector = sel;
+    }
+    const posRaw = (raw.position ?? "").trim();
+    if (posRaw.length === 0) {
+      errors.push("position is required when strategy is 'selector'");
+    } else if (!(LINK_PROJECT_PLACEMENT_POSITIONS as readonly string[]).includes(posRaw)) {
+      errors.push(`position must be one of: ${LINK_PROJECT_PLACEMENT_POSITIONS.join(", ")}`);
+    } else {
+      position = posRaw as LinkProjectPlacementPosition;
+    }
+  }
+  // For strategy='footer', target_selector/position stay null and the
+  // synthesizer plugs in body+append at render time.
+
   const anchorOverrideRaw = (raw.anchor_override ?? "").trim();
   let anchorOverride: string | null = null;
   if (anchorOverrideRaw.length > MAX_ANCHOR_OVERRIDE_LENGTH) {
@@ -748,6 +789,8 @@ export function validateLinkProjectPlacementInput(
       client_id: clientId,
       page_match: pageMatch,
       strategy,
+      target_selector: targetSelector,
+      position,
       anchor_override: anchorOverride,
       rel_attribute: relAttribute,
       status,
@@ -786,14 +829,17 @@ async function insertPlacement(
 ): Promise<void> {
   await env.CONFIG_DB.prepare(
     `INSERT INTO link_project_placements
-       (link_project_id, client_id, page_match, strategy, anchor_override, rel_attribute, status)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+       (link_project_id, client_id, page_match, strategy, target_selector,
+        position, anchor_override, rel_attribute, status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
     .bind(
       linkProjectId,
       input.client_id,
       input.page_match,
       input.strategy,
+      input.target_selector,
+      input.position,
       input.anchor_override,
       input.rel_attribute,
       input.status,
@@ -809,14 +855,17 @@ async function updatePlacement(
 ): Promise<void> {
   await env.CONFIG_DB.prepare(
     `UPDATE link_project_placements
-       SET client_id = ?, page_match = ?, strategy = ?, anchor_override = ?,
-           rel_attribute = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+       SET client_id = ?, page_match = ?, strategy = ?, target_selector = ?,
+           position = ?, anchor_override = ?, rel_attribute = ?, status = ?,
+           updated_at = CURRENT_TIMESTAMP
      WHERE id = ? AND link_project_id = ?`,
   )
     .bind(
       input.client_id,
       input.page_match,
       input.strategy,
+      input.target_selector,
+      input.position,
       input.anchor_override,
       input.rel_attribute,
       input.status,
@@ -844,6 +893,8 @@ interface PlacementFormPrefill {
   client_id: string;
   page_match: string;
   strategy: LinkProjectPlacementStrategy;
+  target_selector: string;
+  position: LinkProjectPlacementPosition;
   anchor_override: string;
   rel_attribute: string;
   status: LinkProjectPlacementStatus;
@@ -854,6 +905,8 @@ function emptyPlacementPrefill(): PlacementFormPrefill {
     client_id: "",
     page_match: "^/.*",
     strategy: "footer",
+    target_selector: "",
+    position: "after",
     anchor_override: "",
     rel_attribute: "noopener",
     status: "active",
@@ -865,6 +918,8 @@ function placementRowToPrefill(row: LinkProjectPlacementRow): PlacementFormPrefi
     client_id: row.client_id,
     page_match: row.page_match,
     strategy: row.strategy,
+    target_selector: row.target_selector ?? "",
+    position: row.position ?? "after",
     anchor_override: row.anchor_override ?? "",
     rel_attribute: row.rel_attribute,
     status: row.status,
@@ -877,6 +932,11 @@ function rawToPlacementPrefill(raw: Record<string, string>): PlacementFormPrefil
   )
     ? (raw.strategy as LinkProjectPlacementStrategy)
     : "footer";
+  const position = (LINK_PROJECT_PLACEMENT_POSITIONS as readonly string[]).includes(
+    raw.position ?? "",
+  )
+    ? (raw.position as LinkProjectPlacementPosition)
+    : "after";
   const status = (LINK_PROJECT_PLACEMENT_STATUSES as readonly string[]).includes(raw.status ?? "")
     ? (raw.status as LinkProjectPlacementStatus)
     : "active";
@@ -884,6 +944,8 @@ function rawToPlacementPrefill(raw: Record<string, string>): PlacementFormPrefil
     client_id: raw.client_id ?? "",
     page_match: raw.page_match ?? "^/.*",
     strategy,
+    target_selector: raw.target_selector ?? "",
+    position,
     anchor_override: raw.anchor_override ?? "",
     rel_attribute: raw.rel_attribute ?? "noopener",
     status,
@@ -914,11 +976,19 @@ function renderPlacementForm(opts: {
     (s) =>
       `<option value="${esc(s)}"${s === opts.prefill.strategy ? " selected" : ""}>${esc(s)}</option>`,
   ).join("");
+  const positionOptions = LINK_PROJECT_PLACEMENT_POSITIONS.map(
+    (p) =>
+      `<option value="${esc(p)}"${p === opts.prefill.position ? " selected" : ""}>${esc(p)}</option>`,
+  ).join("");
   const statusOptions = LINK_PROJECT_PLACEMENT_STATUSES.map(
     (s) =>
       `<option value="${esc(s)}"${s === opts.prefill.status ? " selected" : ""}>${esc(s)}</option>`,
   ).join("");
   const relDatalistOptions = REL_PRESETS.map((r) => `<option value="${esc(r)}">`).join("");
+  // Selector-strategy fields hide when strategy=footer. Initial display
+  // is set inline so the form doesn't flash the wrong state on render;
+  // the inline JS below toggles on change.
+  const selectorFieldsDisplay = opts.prefill.strategy === "selector" ? "" : "display:none;";
   return `${errBox}
     <form class="editor" method="POST" action="${esc(opts.action)}">
       <div class="form-section">
@@ -945,7 +1015,7 @@ function renderPlacementForm(opts: {
           <div>
             <label for="lpp_strategy">strategy</label>
             <select id="lpp_strategy" name="strategy">${strategyOptions}</select>
-            <div class="field-hint">How the link is injected. Slice 2B ships footer (anchor before <code>&lt;/body&gt;</code>); more strategies follow.</div>
+            <div class="field-hint"><strong>footer:</strong> appends to <code>&lt;body&gt;</code>, link sits at the very bottom of the page. <strong>selector:</strong> custom CSS selector + position — for inline contextual links (after first paragraph, inside footer, etc.).</div>
           </div>
           <div>
             <label for="lpp_rel_attribute">rel attribute</label>
@@ -953,12 +1023,36 @@ function renderPlacementForm(opts: {
             <datalist id="lpp_rel_presets">${relDatalistOptions}</datalist>
             <div class="field-hint">Space-separated link types. Default <code>noopener</code> for security; add <code>nofollow</code> or <code>sponsored</code> when SEO context calls for it.</div>
           </div>
+          <div class="full-width lpp-selector-fields" style="${selectorFieldsDisplay}">
+            <label for="lpp_target_selector">target_selector <span style="color:var(--fg-muted);font-weight:400">(required for strategy=selector)</span></label>
+            <input id="lpp_target_selector" name="target_selector" type="text" value="${esc(opts.prefill.target_selector)}" maxlength="256" placeholder="article p:first-of-type">
+            <div class="field-hint">CSS selector for the element this placement injects relative to. Use the inspector on the source page to find selectors that survive across edits.</div>
+          </div>
+          <div class="lpp-selector-fields" style="${selectorFieldsDisplay}">
+            <label for="lpp_position">position</label>
+            <select id="lpp_position" name="position">${positionOptions}</select>
+            <div class="field-hint"><strong>after:</strong> sibling after the matched element (most common for "link after first paragraph"). <strong>before:</strong> sibling before. <strong>append/prepend:</strong> last/first child <em>inside</em> the matched element.</div>
+          </div>
           <div class="full-width">
             <label for="lpp_anchor_override">anchor_override <span style="color:var(--fg-muted);font-weight:400">(optional)</span></label>
-            <input id="lpp_anchor_override" name="anchor_override" type="text" value="${esc(opts.prefill.anchor_override)}" maxlength="200" placeholder="leave blank to use the project's default anchor">
-            <div class="field-hint">If set, this placement uses this exact anchor text instead of the project's first <code>anchor_options</code> entry.</div>
+            <input id="lpp_anchor_override" name="anchor_override" type="text" value="${esc(opts.prefill.anchor_override)}" maxlength="200" placeholder="leave blank to rotate through the project's anchor_options">
+            <div class="field-hint">If set, this placement uses this exact anchor text. If blank, the synthesizer rotates across the project's <code>anchor_options</code> deterministically by placement+page (same URL always shows the same anchor).</div>
           </div>
         </div>
+        <script>
+        (function(){
+          var s = document.getElementById('lpp_strategy');
+          if (!s) return;
+          var fields = document.querySelectorAll('.lpp-selector-fields');
+          function sync(){
+            for (var i = 0; i < fields.length; i++) {
+              fields[i].style.display = s.value === 'selector' ? '' : 'none';
+            }
+          }
+          s.addEventListener('change', sync);
+          sync();
+        })();
+        </script>
       </div>
       <div class="form-actions">
         <button class="btn btn-primary" type="submit">${esc(opts.submitLabel)}</button>
@@ -973,8 +1067,6 @@ function renderPlacementsSection(
 ): string {
   const visibleIds = new Set(visibleClients.map((c) => c.client_id));
   const projectAnchors = parseAnchorOptions(project.anchor_options);
-  const defaultAnchor =
-    projectAnchors[0] ?? "(no project anchor — set one or override per placement)";
   const rows = placements
     .map((p) => {
       const orphan = !visibleIds.has(p.client_id);
@@ -983,11 +1075,18 @@ function renderPlacementsSection(
         : `<a class="mono" href="/app/clients/${esc(p.client_id)}">${esc(p.client_id)}</a>`;
       const anchorCell = p.anchor_override
         ? `<span class="mono">${esc(p.anchor_override)}</span>`
-        : `<span style="color:var(--fg-muted);font-style:italic">project default</span>`;
+        : `<span style="color:var(--fg-muted);font-style:italic">rotated</span>`;
+      // For selector strategy, show "selector @ position" instead of
+      // bare strategy name so the table tells the operator where the
+      // link will land at a glance.
+      const strategyCell =
+        p.strategy === "selector" && p.target_selector && p.position
+          ? `<span class="mono" style="font-size:.8rem">${esc(p.target_selector)} <span style="color:var(--fg-muted)">@ ${esc(p.position)}</span></span>`
+          : esc(p.strategy);
       return `<tr>
         <td>${clientCell}</td>
         <td class="mono">${esc(p.page_match)}</td>
-        <td>${esc(p.strategy)}</td>
+        <td>${strategyCell}</td>
         <td>${anchorCell}</td>
         <td class="mono" style="font-size:.8rem">${esc(p.rel_attribute)}</td>
         <td>${placementStatusPill(p.status)}</td>
@@ -1004,7 +1103,7 @@ function renderPlacementsSection(
     placements.length === 0
       ? `<div class="empty">No placements yet. Add one below to start tracking which proxied client sites should push this target.</div>`
       : `<table class="data" style="margin-bottom:1rem">
-          <thead><tr><th>Client</th><th>page_match</th><th>strategy</th><th>anchor</th><th>rel</th><th>status</th><th></th></tr></thead>
+          <thead><tr><th>Client</th><th>page_match</th><th>strategy / selector</th><th>anchor</th><th>rel</th><th>status</th><th></th></tr></thead>
           <tbody>${rows}</tbody>
         </table>`;
   if (visibleClients.length === 0) {
@@ -1013,9 +1112,15 @@ function renderPlacementsSection(
       <p class="field-hint" style="margin:0">You don't have any clients to attach placements to yet. Create a client first.</p>
     </div>`;
   }
+  const anchorBlurb =
+    projectAnchors.length === 0
+      ? `Default anchor will be the target URL itself <span style="color:var(--fg-muted)">(no <code>anchor_options</code> set on this project — add some to use anchor rotation)</span>.`
+      : projectAnchors.length === 1
+        ? `Default anchor will be <code>${esc(projectAnchors[0] ?? "")}</code>.`
+        : `Anchors rotate across the project's <strong>${projectAnchors.length}</strong> options deterministically (same URL always shows the same anchor; diversity emerges across placements). Set <code>anchor_override</code> on a placement to pin a specific anchor.`;
   return `<div class="card">
     <h2 style="margin-top:0">Placements</h2>
-    <p class="field-hint" style="margin:.2rem 0 .8rem">Each placement says "inject a link to <code>${esc(project.target_url)}</code> on this client's pages matching the regex." Default anchor will be <code>${esc(defaultAnchor)}</code> unless overridden.</p>
+    <p class="field-hint" style="margin:.2rem 0 .8rem">Each placement says "inject a link to <code>${esc(project.target_url)}</code> on this client's pages matching the regex." ${anchorBlurb}</p>
     ${tableOrEmpty}
     ${renderPlacementForm({
       action: `/app/link-projects/${project.id}/placements/new`,
@@ -1195,11 +1300,15 @@ export async function loadProjectPageData(
  * Synthesized rule shape that mirrors `ContentInjectRule` from the
  * shared schema. Defined locally to avoid a frontend-worker → src/
  * import chain (and so the KV format is one place we control).
+ *
+ * `position` widened in Slice 3 to support the `selector` strategy
+ * (operator-defined CSS selector + position). Footer strategy still
+ * always emits position: "append".
  */
 export interface SynthesizedContentInjection {
   match: string;
   selector: string;
-  position: "append";
+  position: "before" | "after" | "prepend" | "append";
   html: string;
 }
 
@@ -1234,35 +1343,102 @@ function escapeHtml(value: string): string {
 }
 
 /**
+ * Stable hash of a string into a non-negative 32-bit integer. Used by
+ * the anchor rotator to pick a deterministic anchor for a given
+ * (placement, page_match) pair without per-row state.
+ *
+ * FNV-1a 32-bit — same algorithm as `fnvHash` in app.ts but kept
+ * private here so this module has no app.ts dependency at runtime.
+ */
+function stableUintHash(s: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+/**
+ * Pick the anchor text for a placement.
+ *
+ * Resolution order:
+ *   1. Per-placement override — exact text the operator typed.
+ *   2. Rotation across the project's anchor_options — picks one entry
+ *      deterministically based on a stable hash of the placement id +
+ *      page_match. Same placement on the same page-match always shows
+ *      the same anchor (rank-trackers stay consistent), but anchor
+ *      diversity emerges naturally across the placement set.
+ *   3. Fallback to the project's first anchor.
+ *   4. Final fallback to the target URL itself (if the project has no
+ *      anchors and the operator didn't override).
+ *
+ * Exported separately from synthesizePlacement so the unit test can
+ * drive it directly without constructing a full SynthesizedContentInjection.
+ */
+export function pickAnchor(
+  placement: Pick<LinkProjectPlacementRow, "id" | "page_match" | "anchor_override">,
+  project: Pick<LinkProjectRow, "target_url" | "anchor_options">,
+): string {
+  if (placement.anchor_override) return placement.anchor_override;
+  const anchors = parseAnchorOptions(project.anchor_options);
+  if (anchors.length === 0) return project.target_url;
+  if (anchors.length === 1) return anchors[0] ?? project.target_url;
+  // Stable per (placement.id, page_match): same URL always shows the
+  // same anchor. Including page_match in the hash means a placement
+  // that covers multiple page-matches (i.e. one row per match) gets
+  // its own deterministic pick per match, not the same one for all.
+  const idx = stableUintHash(`${placement.id}:${placement.page_match}`) % anchors.length;
+  return anchors[idx] ?? project.target_url;
+}
+
+/**
  * Synthesize a `ContentInjectRule`-shaped object for a single placement.
  *
- * The footer strategy injects a `<div>` with one `<a>` inside, appended
- * to `<body>` (i.e. inserted as the last child of body, just before
- * `</body>`). The wrapping div carries `data-lp-placement="<id>"` so an
- * operator inspecting the rendered HTML can trace a link back to its
- * placement row. Anchor text + target_url + rel_attribute are HTML-
- * escaped before interpolation.
+ * Two strategies supported:
+ *   - `footer` — fixed `body + append`. Inserts the link as the last
+ *     child of `<body>`, just before `</body>`.
+ *   - `selector` — operator-defined CSS selector + position (before /
+ *     after / prepend / append). Used for inline contextual links —
+ *     after the first paragraph, inside a footer element, etc.
  *
- * Returns null if the strategy isn't supported yet (future-proofing for
- * Slice 3 strategies that this function doesn't know about).
+ * The wrapping `<div>` carries `data-lp-placement="<id>"` so an operator
+ * inspecting the rendered HTML can trace a link back to its placement
+ * row. Anchor text + target_url + rel_attribute are HTML-escaped before
+ * interpolation.
+ *
+ * Returns null if the strategy isn't supported (future-proofing for
+ * strategies a future migration may add before this code knows about
+ * them) or if a `selector` placement is missing its required fields
+ * (defense-in-depth — admin-time validation should already block this).
  */
 export function synthesizePlacement(
   placement: LinkProjectPlacementRow,
   project: LinkProjectRow,
 ): SynthesizedContentInjection | null {
-  if (placement.strategy !== "footer") return null;
-  const projectAnchors = parseAnchorOptions(project.anchor_options);
-  const anchorText = placement.anchor_override ?? projectAnchors[0] ?? project.target_url;
+  const anchorText = pickAnchor(placement, project);
   const safeHref = escapeHtml(project.target_url);
   const safeRel = escapeHtml(placement.rel_attribute);
   const safeAnchor = escapeHtml(anchorText);
   const html = `<div data-lp-placement="${placement.id}"><a href="${safeHref}" rel="${safeRel}">${safeAnchor}</a></div>`;
-  return {
-    match: placement.page_match,
-    selector: "body",
-    position: "append",
-    html,
-  };
+  if (placement.strategy === "footer") {
+    return {
+      match: placement.page_match,
+      selector: "body",
+      position: "append",
+      html,
+    };
+  }
+  if (placement.strategy === "selector") {
+    if (!placement.target_selector || !placement.position) return null;
+    return {
+      match: placement.page_match,
+      selector: placement.target_selector,
+      position: placement.position,
+      html,
+    };
+  }
+  return null;
 }
 
 /**
@@ -1282,6 +1458,7 @@ export async function compilePlacementsForClient(
 ): Promise<{ written: boolean; ruleCount: number }> {
   const r = await env.CONFIG_DB.prepare(
     `SELECT p.id, p.link_project_id, p.client_id, p.page_match, p.strategy,
+            p.target_selector, p.position,
             p.anchor_override, p.rel_attribute, p.status,
             p.created_at, p.updated_at,
             lp.id as lp_id, lp.owner_id as lp_owner_id, lp.label as lp_label,
@@ -1301,6 +1478,8 @@ export async function compilePlacementsForClient(
       client_id: string;
       page_match: string;
       strategy: LinkProjectPlacementStrategy;
+      target_selector: string | null;
+      position: LinkProjectPlacementPosition | null;
       anchor_override: string | null;
       rel_attribute: string;
       status: LinkProjectPlacementStatus;
@@ -1325,6 +1504,8 @@ export async function compilePlacementsForClient(
       client_id: row.client_id,
       page_match: row.page_match,
       strategy: row.strategy,
+      target_selector: row.target_selector,
+      position: row.position,
       anchor_override: row.anchor_override,
       rel_attribute: row.rel_attribute,
       status: row.status,
@@ -1391,9 +1572,7 @@ async function bestEffortHttpCachePurge(env: AppEnv, clientId: string): Promise<
     const { findZoneByName, purgeCacheByHosts } = await import("./cloudflare-api.js");
     const zone = await findZoneByName(env.CF_API_TOKEN, zoneName);
     if (!zone) {
-      console.warn(
-        `link-projects: zone "${zoneName}" not found via CF API for client ${clientId}`,
-      );
+      console.warn(`link-projects: zone "${zoneName}" not found via CF API for client ${clientId}`);
       return;
     }
     await purgeCacheByHosts(env.CF_API_TOKEN, zone.id, [proxy]);

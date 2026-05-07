@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  LINK_PROJECT_PLACEMENT_POSITIONS,
   LINK_PROJECT_PLACEMENT_STATUSES,
   LINK_PROJECT_PLACEMENT_STRATEGIES,
   LINK_PROJECT_STATUSES,
   type LinkProjectPlacementRow,
   type LinkProjectRow,
   parseAnchorOptions,
+  pickAnchor,
   synthesizePlacement,
   validateLinkProjectInput,
   validateLinkProjectPlacementInput,
@@ -18,7 +20,9 @@ function makeProject(overrides: Partial<LinkProjectRow> = {}): LinkProjectRow {
     owner_id: 1,
     label: "Test project",
     target_url: "https://xyz.com/services",
-    anchor_options: JSON.stringify(["our services", "click here"]),
+    // Single anchor by default so synthesizer tests don't depend on
+    // the rotation hash. Rotation behavior gets its own tests below.
+    anchor_options: JSON.stringify(["our services"]),
     status: "active",
     notes: null,
     created_at: "2026-05-01T00:00:00Z",
@@ -34,6 +38,8 @@ function makePlacement(overrides: Partial<LinkProjectPlacementRow> = {}): LinkPr
     client_id: "acme",
     page_match: "^/.*",
     strategy: "footer",
+    target_selector: null,
+    position: null,
     anchor_override: null,
     rel_attribute: "noopener",
     status: "active",
@@ -253,9 +259,17 @@ describe("validateLinkProjectPlacementInput — happy paths", () => {
   });
 
   it("accepts every strategy value defined in LINK_PROJECT_PLACEMENT_STRATEGIES", () => {
+    // selector strategy requires target_selector + position; supply them
+    // for every iteration so the test stays simple while exercising the
+    // strategy-enum coverage.
     for (const s of LINK_PROJECT_PLACEMENT_STRATEGIES) {
       const r = validateLinkProjectPlacementInput(
-        { client_id: "acme", strategy: s },
+        {
+          client_id: "acme",
+          strategy: s,
+          target_selector: "main",
+          position: "after",
+        },
         VALID_CLIENTS,
       );
       expect(r.ok).toBe(true);
@@ -417,5 +431,219 @@ describe("synthesizePlacement", () => {
       strategy: "header" as unknown as LinkProjectPlacementRow["strategy"],
     };
     expect(synthesizePlacement(placement, project)).toBeNull();
+  });
+});
+
+describe("pickAnchor — rotation across project anchor_options", () => {
+  it("returns anchor_override verbatim when set", () => {
+    const project = makeProject({ anchor_options: JSON.stringify(["a", "b", "c"]) });
+    const placement = makePlacement({ anchor_override: "exact text" });
+    expect(pickAnchor(placement, project)).toBe("exact text");
+  });
+
+  it("returns the only anchor when project has exactly one", () => {
+    const project = makeProject({ anchor_options: JSON.stringify(["sole anchor"]) });
+    const placement = makePlacement({ anchor_override: null });
+    expect(pickAnchor(placement, project)).toBe("sole anchor");
+  });
+
+  it("falls back to target_url when project has zero anchors", () => {
+    const project = makeProject({ anchor_options: "[]" });
+    const placement = makePlacement({ anchor_override: null });
+    expect(pickAnchor(placement, project)).toBe(project.target_url);
+  });
+
+  it("is deterministic — same (placement, page_match) always picks the same anchor", () => {
+    const project = makeProject({ anchor_options: JSON.stringify(["a", "b", "c", "d"]) });
+    const placement = makePlacement({ anchor_override: null });
+    const calls = Array.from({ length: 10 }, () => pickAnchor(placement, project));
+    expect(new Set(calls).size).toBe(1); // all calls return the same anchor
+  });
+
+  it("picks one of the project's anchors (within set)", () => {
+    const anchors = ["alpha", "beta", "gamma"];
+    const project = makeProject({ anchor_options: JSON.stringify(anchors) });
+    const placement = makePlacement({ anchor_override: null });
+    expect(anchors).toContain(pickAnchor(placement, project));
+  });
+
+  it("distributes across anchors as placement.id varies (rotation diversity)", () => {
+    // 12 different placement ids feeding into 3 anchors should hit at
+    // least 2 distinct anchors. The hash isn't perfectly uniform on
+    // tiny inputs, but it should be far from "always picks one".
+    const anchors = ["alpha", "beta", "gamma"];
+    const project = makeProject({ anchor_options: JSON.stringify(anchors) });
+    const seen = new Set<string>();
+    for (let id = 1; id <= 12; id++) {
+      seen.add(pickAnchor(makePlacement({ id, anchor_override: null }), project));
+    }
+    expect(seen.size).toBeGreaterThanOrEqual(2);
+  });
+
+  it("includes page_match in the hash (different matches → potentially different picks)", () => {
+    // Same placement id, different page_match — at least one of these
+    // 8 page_match variants should diverge from the first when there
+    // are 3 anchors.
+    const anchors = ["alpha", "beta", "gamma"];
+    const project = makeProject({ anchor_options: JSON.stringify(anchors) });
+    const baseId = 7;
+    const baseAnchor = pickAnchor(
+      makePlacement({ id: baseId, page_match: "^/.*", anchor_override: null }),
+      project,
+    );
+    const matches = [
+      "^/$",
+      "^/blog/.*",
+      "^/about$",
+      "^/contact$",
+      "^/services/.*",
+      "^/products/.*",
+      "^/team$",
+      "^/x/y/z$",
+    ];
+    let diverged = false;
+    for (const m of matches) {
+      const a = pickAnchor(
+        makePlacement({ id: baseId, page_match: m, anchor_override: null }),
+        project,
+      );
+      if (a !== baseAnchor) {
+        diverged = true;
+        break;
+      }
+    }
+    expect(diverged).toBe(true);
+  });
+});
+
+describe("synthesizePlacement — selector strategy (Slice 3)", () => {
+  it("emits the operator's selector + position instead of body+append", () => {
+    const project = makeProject();
+    const placement = makePlacement({
+      strategy: "selector",
+      target_selector: "article p:first-of-type",
+      position: "after",
+    });
+    const rule = synthesizePlacement(placement, project);
+    expect(rule).not.toBeNull();
+    if (!rule) return;
+    expect(rule.selector).toBe("article p:first-of-type");
+    expect(rule.position).toBe("after");
+    expect(rule.html).toContain("our services");
+    expect(rule.html).toContain('data-lp-placement="42"');
+  });
+
+  it.each(LINK_PROJECT_PLACEMENT_POSITIONS.map((p) => [p]))("supports position=%s", (position) => {
+    const project = makeProject();
+    const placement = makePlacement({
+      strategy: "selector",
+      target_selector: "main",
+      position,
+    });
+    const rule = synthesizePlacement(placement, project);
+    expect(rule?.position).toBe(position);
+  });
+
+  it("returns null when strategy=selector but target_selector is missing (defense-in-depth)", () => {
+    const project = makeProject();
+    const placement = makePlacement({
+      strategy: "selector",
+      target_selector: null,
+      position: "after",
+    });
+    expect(synthesizePlacement(placement, project)).toBeNull();
+  });
+
+  it("returns null when strategy=selector but position is missing", () => {
+    const project = makeProject();
+    const placement = makePlacement({
+      strategy: "selector",
+      target_selector: "main",
+      position: null,
+    });
+    expect(synthesizePlacement(placement, project)).toBeNull();
+  });
+});
+
+describe("validateLinkProjectPlacementInput — selector strategy (Slice 3)", () => {
+  it("requires target_selector when strategy=selector", () => {
+    const r = validateLinkProjectPlacementInput(
+      { client_id: "acme", strategy: "selector", position: "after" },
+      VALID_CLIENTS,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors.some((e) => /target_selector is required/.test(e))).toBe(true);
+  });
+
+  it("requires position when strategy=selector", () => {
+    const r = validateLinkProjectPlacementInput(
+      { client_id: "acme", strategy: "selector", target_selector: "main" },
+      VALID_CLIENTS,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors.some((e) => /position is required/.test(e))).toBe(true);
+  });
+
+  it("rejects an unknown position value", () => {
+    const r = validateLinkProjectPlacementInput(
+      {
+        client_id: "acme",
+        strategy: "selector",
+        target_selector: "main",
+        position: "middle",
+      },
+      VALID_CLIENTS,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors.some((e) => /position must be one of/.test(e))).toBe(true);
+  });
+
+  it("accepts a valid selector+position combo", () => {
+    const r = validateLinkProjectPlacementInput(
+      {
+        client_id: "acme",
+        strategy: "selector",
+        target_selector: "article p:first-of-type",
+        position: "after",
+      },
+      VALID_CLIENTS,
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.value.strategy).toBe("selector");
+      expect(r.value.target_selector).toBe("article p:first-of-type");
+      expect(r.value.position).toBe("after");
+    }
+  });
+
+  it("ignores selector+position fields when strategy=footer (footer always uses body+append)", () => {
+    const r = validateLinkProjectPlacementInput(
+      {
+        client_id: "acme",
+        strategy: "footer",
+        target_selector: "main",
+        position: "before",
+      },
+      VALID_CLIENTS,
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.value.target_selector).toBeNull();
+      expect(r.value.position).toBeNull();
+    }
+  });
+
+  it("rejects an over-long target_selector", () => {
+    const r = validateLinkProjectPlacementInput(
+      {
+        client_id: "acme",
+        strategy: "selector",
+        target_selector: "a".repeat(257),
+        position: "after",
+      },
+      VALID_CLIENTS,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors.some((e) => /target_selector/.test(e))).toBe(true);
   });
 });
