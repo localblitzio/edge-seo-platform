@@ -4,10 +4,44 @@ import {
   LINK_PROJECT_PLACEMENT_STATUSES,
   LINK_PROJECT_PLACEMENT_STRATEGIES,
   LINK_PROJECT_STATUSES,
+  type LinkProjectPlacementRow,
+  type LinkProjectRow,
   parseAnchorOptions,
+  synthesizePlacement,
   validateLinkProjectInput,
   validateLinkProjectPlacementInput,
 } from "../../../frontend-worker/src/link-projects.js";
+
+function makeProject(overrides: Partial<LinkProjectRow> = {}): LinkProjectRow {
+  return {
+    id: 1,
+    owner_id: 1,
+    label: "Test project",
+    target_url: "https://xyz.com/services",
+    anchor_options: JSON.stringify(["our services", "click here"]),
+    status: "active",
+    notes: null,
+    created_at: "2026-05-01T00:00:00Z",
+    updated_at: "2026-05-01T00:00:00Z",
+    ...overrides,
+  };
+}
+
+function makePlacement(overrides: Partial<LinkProjectPlacementRow> = {}): LinkProjectPlacementRow {
+  return {
+    id: 42,
+    link_project_id: 1,
+    client_id: "acme",
+    page_match: "^/.*",
+    strategy: "footer",
+    anchor_override: null,
+    rel_attribute: "noopener",
+    status: "active",
+    created_at: "2026-05-01T00:00:00Z",
+    updated_at: "2026-05-01T00:00:00Z",
+    ...overrides,
+  };
+}
 
 describe("parseAnchorOptions", () => {
   it("returns the parsed array for a JSON-encoded string list", () => {
@@ -311,5 +345,77 @@ describe("validateLinkProjectPlacementInput — sad paths", () => {
     );
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.errors.some((e) => /page_match/.test(e))).toBe(true);
+  });
+});
+
+describe("synthesizePlacement", () => {
+  it("returns a body-append rule with the project's first anchor", () => {
+    const project = makeProject();
+    const placement = makePlacement();
+    const rule = synthesizePlacement(placement, project);
+    expect(rule).not.toBeNull();
+    if (!rule) return;
+    expect(rule.match).toBe("^/.*");
+    expect(rule.selector).toBe("body");
+    expect(rule.position).toBe("append");
+    expect(rule.html).toContain("our services");
+    expect(rule.html).toContain('href="https://xyz.com/services"');
+    expect(rule.html).toContain('rel="noopener"');
+    expect(rule.html).toContain('data-lp-placement="42"');
+  });
+
+  it("uses anchor_override when set, ignoring project anchors", () => {
+    const project = makeProject();
+    const placement = makePlacement({ anchor_override: "buy widgets" });
+    const rule = synthesizePlacement(placement, project);
+    expect(rule).not.toBeNull();
+    if (!rule) return;
+    expect(rule.html).toContain("buy widgets");
+    expect(rule.html).not.toContain("our services");
+  });
+
+  it("falls back to target_url as anchor when project has no anchors and no override", () => {
+    const project = makeProject({ anchor_options: "[]" });
+    const placement = makePlacement({ anchor_override: null });
+    const rule = synthesizePlacement(placement, project);
+    expect(rule).not.toBeNull();
+    if (!rule) return;
+    expect(rule.html).toContain("https://xyz.com/services");
+  });
+
+  it("HTML-escapes anchor text, target_url, and rel_attribute", () => {
+    const project = makeProject({
+      target_url: "https://x.com/?q=a&b=c",
+      anchor_options: JSON.stringify(['<script>alert("x")</script>']),
+    });
+    const placement = makePlacement({ rel_attribute: 'noopener "danger"' });
+    const rule = synthesizePlacement(placement, project);
+    expect(rule).not.toBeNull();
+    if (!rule) return;
+    expect(rule.html).not.toContain("<script>");
+    expect(rule.html).toContain("&lt;script&gt;");
+    expect(rule.html).toContain("&amp;");
+    expect(rule.html).toContain("&quot;danger&quot;");
+  });
+
+  it("propagates the placement's page_match into the synthesized rule", () => {
+    const project = makeProject();
+    const placement = makePlacement({ page_match: "^/blog/.*" });
+    const rule = synthesizePlacement(placement, project);
+    expect(rule?.match).toBe("^/blog/.*");
+  });
+
+  it("returns null for an unknown strategy (future-proofing)", () => {
+    const project = makeProject();
+    // Force an unknown strategy via cast — the current type system
+    // doesn't allow this directly, but data could be hand-edited or
+    // future migrations could introduce strategies before code knows
+    // about them. The null return makes the caller skip the rule
+    // gracefully instead of producing malformed HTML.
+    const placement = {
+      ...makePlacement(),
+      strategy: "header" as unknown as LinkProjectPlacementRow["strategy"],
+    };
+    expect(synthesizePlacement(placement, project)).toBeNull();
   });
 });

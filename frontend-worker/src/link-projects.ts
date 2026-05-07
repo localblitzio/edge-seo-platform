@@ -582,6 +582,10 @@ export async function handleEditLinkProjectPost(
     };
   }
   await updateLinkProjectRow(env, id, validation.value);
+  // anchor_options + status changes ripple through every client with a
+  // placement on this project, since the synthesized HTML embeds the
+  // anchor text and the status gates whether the rule renders at all.
+  await invalidateAfterProjectChange(env, id);
   return {
     response: flashRedirect(`/app/link-projects/${id}`, {
       text: `Saved "${validation.value.label}".`,
@@ -610,6 +614,9 @@ export async function handleLinkProjectStatusPost(
     });
   }
   await setLinkProjectStatus(env, id, requested as LinkProjectStatus);
+  // Status flip changes whether the project's placements render — every
+  // client with a placement on this project needs a KV recompile.
+  await invalidateAfterProjectChange(env, id);
   return flashRedirect(`/app/link-projects/${id}`, {
     text: `Status set to ${requested}.`,
     kind: "ok",
@@ -1073,6 +1080,7 @@ export async function handleNewPlacementPost(
     });
   }
   await insertPlacement(env, linkProjectId, validation.value);
+  await invalidateAfterPlacementChange(env, [validation.value.client_id]);
   return flashRedirect(`/app/link-projects/${linkProjectId}`, {
     text: `Added placement on ${validation.value.client_id}.`,
     kind: "ok",
@@ -1122,6 +1130,11 @@ export async function handleEditPlacementPost(
     };
   }
   await updatePlacement(env, linkProjectId, placementId, validation.value);
+  // If the operator moved the placement to a different client, BOTH
+  // need re-compile: the source loses a rule, the target gains one.
+  // Dedupe in case it didn't change.
+  const affected = Array.from(new Set([placement.client_id, validation.value.client_id]));
+  await invalidateAfterPlacementChange(env, affected);
   return {
     response: flashRedirect(`/app/link-projects/${linkProjectId}`, {
       text: `Saved placement ${placementId}.`,
@@ -1150,6 +1163,7 @@ export async function handleDeletePlacementPost(
     });
   }
   await deletePlacement(env, linkProjectId, placementId);
+  await invalidateAfterPlacementChange(env, [placement.client_id]);
   return flashRedirect(`/app/link-projects/${linkProjectId}`, {
     text: `Deleted placement on ${placement.client_id}.`,
     kind: "ok",
@@ -1173,4 +1187,255 @@ export async function loadProjectPageData(
     loadVisibleClients(env, user),
   ]);
   return { project, placements, visibleClients };
+}
+
+/* ─── Slice 2B: KV compile + worker pipeline integration ─── */
+
+/**
+ * Synthesized rule shape that mirrors `ContentInjectRule` from the
+ * shared schema. Defined locally to avoid a frontend-worker → src/
+ * import chain (and so the KV format is one place we control).
+ */
+export interface SynthesizedContentInjection {
+  match: string;
+  selector: string;
+  position: "append";
+  html: string;
+}
+
+/** KV value written to `placements:<client_id>` — list of synthesized rules. */
+export interface PlacementsKvValue {
+  /** ISO timestamp of last compile, for debugging. */
+  compiled_at: string;
+  /** ContentInjectRule entries the worker merges into config.content_injections. */
+  content_injections: SynthesizedContentInjection[];
+}
+
+/** HTML escape — replicates the helper in app.ts so this module can be
+ *  unit-tested without pulling app.ts into the test graph. Same character
+ *  set as `esc()` to keep behavior identical. */
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (c) => {
+    switch (c) {
+      case "&":
+        return "&amp;";
+      case "<":
+        return "&lt;";
+      case ">":
+        return "&gt;";
+      case '"':
+        return "&quot;";
+      case "'":
+        return "&#39;";
+      default:
+        return c;
+    }
+  });
+}
+
+/**
+ * Synthesize a `ContentInjectRule`-shaped object for a single placement.
+ *
+ * The footer strategy injects a `<div>` with one `<a>` inside, appended
+ * to `<body>` (i.e. inserted as the last child of body, just before
+ * `</body>`). The wrapping div carries `data-lp-placement="<id>"` so an
+ * operator inspecting the rendered HTML can trace a link back to its
+ * placement row. Anchor text + target_url + rel_attribute are HTML-
+ * escaped before interpolation.
+ *
+ * Returns null if the strategy isn't supported yet (future-proofing for
+ * Slice 3 strategies that this function doesn't know about).
+ */
+export function synthesizePlacement(
+  placement: LinkProjectPlacementRow,
+  project: LinkProjectRow,
+): SynthesizedContentInjection | null {
+  if (placement.strategy !== "footer") return null;
+  const projectAnchors = parseAnchorOptions(project.anchor_options);
+  const anchorText = placement.anchor_override ?? projectAnchors[0] ?? project.target_url;
+  const safeHref = escapeHtml(project.target_url);
+  const safeRel = escapeHtml(placement.rel_attribute);
+  const safeAnchor = escapeHtml(anchorText);
+  const html = `<div data-lp-placement="${placement.id}"><a href="${safeHref}" rel="${safeRel}">${safeAnchor}</a></div>`;
+  return {
+    match: placement.page_match,
+    selector: "body",
+    position: "append",
+    html,
+  };
+}
+
+/**
+ * Re-compile the `placements:<client_id>` KV entry for a single client.
+ *
+ * Reads every active placement on this client whose parent project is
+ * also active, synthesizes one ContentInjectRule per placement, and
+ * writes the result to KV.
+ *
+ * If the client ends up with zero active placements, the KV entry is
+ * DELETED (not written empty) so the loader's fast path returns early
+ * with no merge work.
+ */
+export async function compilePlacementsForClient(
+  env: AppEnv,
+  clientId: string,
+): Promise<{ written: boolean; ruleCount: number }> {
+  const r = await env.CONFIG_DB.prepare(
+    `SELECT p.id, p.link_project_id, p.client_id, p.page_match, p.strategy,
+            p.anchor_override, p.rel_attribute, p.status,
+            p.created_at, p.updated_at,
+            lp.id as lp_id, lp.owner_id as lp_owner_id, lp.label as lp_label,
+            lp.target_url as lp_target_url, lp.anchor_options as lp_anchor_options,
+            lp.status as lp_status, lp.notes as lp_notes,
+            lp.created_at as lp_created_at, lp.updated_at as lp_updated_at
+       FROM link_project_placements p
+       JOIN link_projects lp ON lp.id = p.link_project_id
+      WHERE p.client_id = ?
+        AND p.status = 'active'
+        AND lp.status = 'active'`,
+  )
+    .bind(clientId)
+    .all<{
+      id: number;
+      link_project_id: number;
+      client_id: string;
+      page_match: string;
+      strategy: LinkProjectPlacementStrategy;
+      anchor_override: string | null;
+      rel_attribute: string;
+      status: LinkProjectPlacementStatus;
+      created_at: string;
+      updated_at: string;
+      lp_id: number;
+      lp_owner_id: number;
+      lp_label: string;
+      lp_target_url: string;
+      lp_anchor_options: string;
+      lp_status: LinkProjectStatus;
+      lp_notes: string | null;
+      lp_created_at: string;
+      lp_updated_at: string;
+    }>();
+  const rows = r.results ?? [];
+  const synthesized: SynthesizedContentInjection[] = [];
+  for (const row of rows) {
+    const placement: LinkProjectPlacementRow = {
+      id: row.id,
+      link_project_id: row.link_project_id,
+      client_id: row.client_id,
+      page_match: row.page_match,
+      strategy: row.strategy,
+      anchor_override: row.anchor_override,
+      rel_attribute: row.rel_attribute,
+      status: row.status,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+    };
+    const project: LinkProjectRow = {
+      id: row.lp_id,
+      owner_id: row.lp_owner_id,
+      label: row.lp_label,
+      target_url: row.lp_target_url,
+      anchor_options: row.lp_anchor_options,
+      status: row.lp_status,
+      notes: row.lp_notes,
+      created_at: row.lp_created_at,
+      updated_at: row.lp_updated_at,
+    };
+    const rule = synthesizePlacement(placement, project);
+    if (rule) synthesized.push(rule);
+  }
+  const key = `placements:${clientId}`;
+  if (synthesized.length === 0) {
+    await env.CONFIG_KV.delete(key);
+    return { written: false, ruleCount: 0 };
+  }
+  const value: PlacementsKvValue = {
+    compiled_at: new Date().toISOString(),
+    content_injections: synthesized,
+  };
+  await env.CONFIG_KV.put(key, JSON.stringify(value));
+  return { written: true, ruleCount: synthesized.length };
+}
+
+/**
+ * Best-effort Cloudflare HTTP cache purge for a client's proxy_domain.
+ *
+ * Without this, KV updates take effect on next D1-fallback (TTL 60s)
+ * and CF's HTTP cache continues serving stale HTML for whatever its
+ * cache-control headers said. We want changes to land immediately
+ * after the operator clicks Save.
+ *
+ * Swallows errors: the KV write already covers correctness; this is
+ * a "make changes visible NOW" nicety. Imports cloudflare-api lazily
+ * to avoid pulling it into the test graph.
+ */
+async function bestEffortHttpCachePurge(env: AppEnv, clientId: string): Promise<void> {
+  if (!env.CF_API_TOKEN) return;
+  try {
+    const row = await env.CONFIG_DB.prepare(
+      "SELECT proxy_domain FROM clients WHERE client_id = ? LIMIT 1",
+    )
+      .bind(clientId)
+      .first<{ proxy_domain: string }>();
+    if (!row) return;
+    const { findZoneByName, purgeCacheByHosts } = await import("./cloudflare-api.js");
+    // Walk up parent labels so `foo.bar.example.com` matches a zone
+    // named `bar.example.com` or `example.com`.
+    const candidateZones = [row.proxy_domain];
+    const labels = row.proxy_domain.split(".");
+    for (let i = 1; i < labels.length - 1; i++) {
+      candidateZones.push(labels.slice(i).join("."));
+    }
+    let zoneId: string | null = null;
+    for (const candidate of candidateZones) {
+      const zone = await findZoneByName(env.CF_API_TOKEN, candidate);
+      if (zone) {
+        zoneId = zone.id;
+        break;
+      }
+    }
+    if (!zoneId) return;
+    await purgeCacheByHosts(env.CF_API_TOKEN, zoneId, [row.proxy_domain]);
+  } catch (e) {
+    console.warn("link-projects: HTTP cache purge failed", e);
+  }
+}
+
+/**
+ * Combined invalidation: re-compile KV for the affected client(s) AND
+ * best-effort flush the CF HTTP cache so changes propagate to live
+ * traffic. Designed to be called from any handler that mutates
+ * placements (one or two known client_ids).
+ */
+export async function invalidateAfterPlacementChange(
+  env: AppEnv,
+  clientIds: readonly string[],
+): Promise<void> {
+  await Promise.all(clientIds.map((c) => compilePlacementsForClient(env, c)));
+  // HTTP cache purge is sequential to avoid hammering the CF API on a
+  // project edit that touches many clients. Worst case: a few seconds
+  // for an N-client edit, which is fine for a foreground admin action.
+  for (const c of clientIds) {
+    await bestEffortHttpCachePurge(env, c);
+  }
+}
+
+/**
+ * Invalidate every client with a placement on the given project. Used
+ * when the project itself changes (anchor_options edit, status flip)
+ * since both ripple to every dependent client.
+ */
+export async function invalidateAfterProjectChange(
+  env: AppEnv,
+  linkProjectId: number,
+): Promise<{ clientCount: number }> {
+  const r = await env.CONFIG_DB.prepare(
+    "SELECT DISTINCT client_id FROM link_project_placements WHERE link_project_id = ?",
+  )
+    .bind(linkProjectId)
+    .all<{ client_id: string }>();
+  const clients = (r.results ?? []).map((row) => row.client_id);
+  await invalidateAfterPlacementChange(env, clients);
+  return { clientCount: clients.length };
 }

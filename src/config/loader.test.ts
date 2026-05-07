@@ -216,3 +216,110 @@ describe("loadConfig — failure modes", () => {
     expect(kv.puts).toHaveLength(0);
   });
 });
+
+describe("loadConfig — link-project placements merge (Slice 2B)", () => {
+  it("appends placement content_injections to the parsed config", async () => {
+    const placementsEnvelope = {
+      compiled_at: "2026-05-07T00:00:00Z",
+      content_injections: [
+        {
+          match: "^/.*",
+          selector: "body",
+          position: "append",
+          html: '<div data-lp-placement="1"><a href="https://xyz.com">visit</a></div>',
+        },
+      ],
+    };
+    const kv = makeKv({
+      [`domain:${HOST}`]: CLIENT_ID,
+      [`config:${CLIENT_ID}`]: VALID_JSON,
+      [`placements:${CLIENT_ID}`]: JSON.stringify(placementsEnvelope),
+    });
+    const d1 = makeD1([]);
+    const { ctx } = makeCtx();
+
+    const config = await loadConfig(HOST, makeEnv(kv.binding, d1.binding), ctx);
+    const operatorRuleCount = JSON.parse(VALID_JSON).content_injections?.length ?? 0;
+    expect(config.content_injections).toHaveLength(operatorRuleCount + 1);
+    // Placement rule appears AFTER operator rules so HTMLRewriter applies
+    // it last (defensive against operator rules that target the same
+    // selector and want first-attached precedence).
+    expect(config.content_injections[operatorRuleCount]?.selector).toBe("body");
+    expect(config.content_injections[operatorRuleCount]?.position).toBe("append");
+  });
+
+  it("returns the config unchanged when placements KV is absent", async () => {
+    const kv = makeKv({
+      [`domain:${HOST}`]: CLIENT_ID,
+      [`config:${CLIENT_ID}`]: VALID_JSON,
+    });
+    const d1 = makeD1([]);
+    const { ctx } = makeCtx();
+
+    const config = await loadConfig(HOST, makeEnv(kv.binding, d1.binding), ctx);
+    const operatorRuleCount = JSON.parse(VALID_JSON).content_injections?.length ?? 0;
+    expect(config.content_injections).toHaveLength(operatorRuleCount);
+  });
+
+  it("skips merge silently when placements JSON is corrupt (defensive)", async () => {
+    // A malformed placements entry must not break HTML serving — we'd
+    // rather lose the link injection than 500 the request. The admin
+    // write path validates before writing so this only happens via
+    // direct KV edits.
+    const kv = makeKv({
+      [`domain:${HOST}`]: CLIENT_ID,
+      [`config:${CLIENT_ID}`]: VALID_JSON,
+      [`placements:${CLIENT_ID}`]: "{not json",
+    });
+    const d1 = makeD1([]);
+    const { ctx } = makeCtx();
+
+    const config = await loadConfig(HOST, makeEnv(kv.binding, d1.binding), ctx);
+    const operatorRuleCount = JSON.parse(VALID_JSON).content_injections?.length ?? 0;
+    expect(config.content_injections).toHaveLength(operatorRuleCount);
+  });
+
+  it("filters out malformed placement entries while keeping valid ones", async () => {
+    const placementsEnvelope = {
+      compiled_at: "2026-05-07T00:00:00Z",
+      content_injections: [
+        { match: "^/.*", selector: "body", position: "append", html: "<a>good</a>" },
+        // Missing required fields — should be skipped.
+        { selector: "body", position: "append" },
+        { match: 123, selector: "body", position: "append", html: "<a>bad</a>" },
+        { match: "^/$", selector: "body", position: "append", html: "<a>also good</a>" },
+      ],
+    };
+    const kv = makeKv({
+      [`domain:${HOST}`]: CLIENT_ID,
+      [`config:${CLIENT_ID}`]: VALID_JSON,
+      [`placements:${CLIENT_ID}`]: JSON.stringify(placementsEnvelope),
+    });
+    const d1 = makeD1([]);
+    const { ctx } = makeCtx();
+
+    const config = await loadConfig(HOST, makeEnv(kv.binding, d1.binding), ctx);
+    const operatorRuleCount = JSON.parse(VALID_JSON).content_injections?.length ?? 0;
+    expect(config.content_injections).toHaveLength(operatorRuleCount + 2);
+  });
+
+  it("merges placements on the D1 fallback path too (cold KV)", async () => {
+    const placementsEnvelope = {
+      compiled_at: "2026-05-07T00:00:00Z",
+      content_injections: [
+        { match: "^/.*", selector: "body", position: "append", html: "<a>via D1</a>" },
+      ],
+    };
+    // Only the placements key is in KV; config + domain come from D1.
+    const kv = makeKv({
+      [`placements:${CLIENT_ID}`]: JSON.stringify(placementsEnvelope),
+    });
+    const d1 = makeD1([{ proxy_domain: HOST, client_id: CLIENT_ID, config_json: VALID_JSON }]);
+    const { ctx, settled } = makeCtx();
+
+    const config = await loadConfig(HOST, makeEnv(kv.binding, d1.binding), ctx);
+    await settled;
+    const operatorRuleCount = JSON.parse(VALID_JSON).content_injections?.length ?? 0;
+    expect(config.content_injections).toHaveLength(operatorRuleCount + 1);
+  });
+});
