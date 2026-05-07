@@ -25,6 +25,11 @@
 import type { AppEnv, ClientRow, FlashMessage } from "./app.js";
 import { canSeeAllClients, esc, loadVisibleClients, writeAudit } from "./app.js";
 import type { User } from "./auth.js";
+import {
+  type ClusterRow,
+  loadAllClusterMembersByCluster,
+  loadVisibleClusters,
+} from "./clusters.js";
 
 export type LinkProjectStatus = "draft" | "active" | "paused" | "archived";
 
@@ -396,6 +401,8 @@ export function renderLinkProjectDetail(
   row: LinkProjectRow,
   placements: LinkProjectPlacementRow[],
   visibleClients: ClientRow[],
+  visibleClusters: readonly ClusterRow[] = [],
+  clusterMembers: ReadonlyMap<number, readonly string[]> = new Map(),
 ): string {
   const anchors = parseAnchorOptions(row.anchor_options);
   const stats = aggregateProjectStats(placements);
@@ -468,7 +475,7 @@ export function renderLinkProjectDetail(
         ? `<div class="card"><h2 style="margin-top:0">Notes</h2><p style="white-space:pre-wrap;margin:0">${esc(row.notes)}</p></div>`
         : ""
     }
-    ${renderPlacementsSection(row, placements, visibleClients)}`;
+    ${renderPlacementsSection(row, placements, visibleClients, visibleClusters, clusterMembers)}`;
 }
 
 interface FormPrefill {
@@ -1125,6 +1132,8 @@ function renderPlacementsSection(
   project: LinkProjectRow,
   placements: LinkProjectPlacementRow[],
   visibleClients: ClientRow[],
+  visibleClusters: readonly ClusterRow[] = [],
+  clusterMembers: ReadonlyMap<number, readonly string[]> = new Map(),
 ): string {
   const visibleIds = new Set(visibleClients.map((c) => c.client_id));
   const projectAnchors = parseAnchorOptions(project.anchor_options);
@@ -1207,6 +1216,36 @@ function renderPlacementsSection(
     (s) => `<option value="${esc(s)}"${s === "footer" ? " selected" : ""}>${esc(s)}</option>`,
   ).join("");
   const bulkRelDatalist = REL_PRESETS.map((r) => `<option value="${esc(r)}">`).join("");
+  // Cluster picker — pre-fills the checkbox grid with a cluster's
+  // member sites. Additive: picking another cluster adds its members
+  // to the current selection. Operator can still uncheck individuals.
+  const clusterOptions = visibleClusters
+    .filter((c) => c.status === "active")
+    .map((c) => {
+      const memberCount = clusterMembers.get(c.id)?.length ?? 0;
+      return `<option value="${c.id}">${esc(c.label)} (${esc(c.type)}, ${memberCount} site${memberCount === 1 ? "" : "s"})</option>`;
+    })
+    .join("");
+  // Embed the (cluster_id → member_ids) map as JSON so the inline JS
+  // doesn't need a server round-trip per cluster pick. JSON.stringify
+  // a plain object built from the Map.
+  const clusterMembersJson = JSON.stringify(
+    Object.fromEntries(Array.from(clusterMembers.entries())),
+  );
+  const clusterPickerHtml =
+    visibleClusters.length === 0
+      ? ""
+      : `<div style="display:flex;gap:.5rem;align-items:end;flex-wrap:wrap;margin-bottom:.75rem">
+          <div style="flex:1;min-width:240px">
+            <label for="bulk_cluster_picker" style="font-weight:600;font-size:.78rem;display:block;margin-bottom:.2rem">Pre-fill from cluster</label>
+            <select id="bulk_cluster_picker" style="font:inherit;font-size:.88rem;padding:.4rem .55rem;border:1px solid var(--border-strong);border-radius:var(--radius);background:var(--bg);color:var(--fg);width:100%">
+              <option value="">— pick a cluster —</option>
+              ${clusterOptions}
+            </select>
+          </div>
+          <button type="button" id="bulk_cluster_add" class="btn">+ Add cluster members</button>
+        </div>
+        <p class="field-hint" style="margin:0 0 .6rem">Adds the selected cluster's member sites to the current selection. Pick another cluster + click again to layer in more. Doesn't replace — uncheck individuals manually if needed.</p>`;
   const bulkSection =
     visibleClients.length < 2
       ? "" // single-client owner — no point offering bulk
@@ -1216,6 +1255,7 @@ function renderPlacementsSection(
           <form class="editor" method="POST" action="/app/link-projects/${project.id}/placements/bulk-new">
             <div class="form-section">
               <h2 style="margin-top:0">Clients</h2>
+              ${clusterPickerHtml}
               <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:.4rem">${bulkClientCheckboxes}</div>
             </div>
             <div class="form-section">
@@ -1259,15 +1299,49 @@ function renderPlacementsSection(
           <script>
           (function(){
             var s = document.getElementById('bulk_strategy');
-            if (!s) return;
-            var fields = document.querySelectorAll('.bulk-selector-fields');
-            function sync(){
-              for (var i = 0; i < fields.length; i++) {
-                fields[i].style.display = s.value === 'selector' ? '' : 'none';
+            if (s) {
+              var fields = document.querySelectorAll('.bulk-selector-fields');
+              function syncStrategy(){
+                for (var i = 0; i < fields.length; i++) {
+                  fields[i].style.display = s.value === 'selector' ? '' : 'none';
+                }
               }
+              s.addEventListener('change', syncStrategy);
+              syncStrategy();
             }
-            s.addEventListener('change', sync);
-            sync();
+            // Cluster picker — additive check of member sites.
+            var picker = document.getElementById('bulk_cluster_picker');
+            var addBtn = document.getElementById('bulk_cluster_add');
+            if (picker && addBtn) {
+              var members = ${clusterMembersJson};
+              addBtn.addEventListener('click', function(){
+                var clusterId = picker.value;
+                if (!clusterId) return;
+                var ids = members[clusterId] || [];
+                var checks = document.querySelectorAll('input[name="client_ids"]');
+                var added = 0;
+                var missing = [];
+                for (var i = 0; i < ids.length; i++) {
+                  var id = ids[i];
+                  var found = false;
+                  for (var j = 0; j < checks.length; j++) {
+                    if (checks[j].value === id) {
+                      if (!checks[j].checked) {
+                        checks[j].checked = true;
+                        added += 1;
+                      }
+                      found = true;
+                      break;
+                    }
+                  }
+                  if (!found) missing.push(id);
+                }
+                var msg = '+' + added + ' checked';
+                if (missing.length > 0) msg += ' (' + missing.length + ' member' + (missing.length === 1 ? '' : 's') + ' not visible: ' + missing.join(', ') + ')';
+                addBtn.textContent = msg;
+                setTimeout(function(){ addBtn.textContent = '+ Add cluster members'; }, 3000);
+              });
+            }
           })();
           </script>
         </details>`;
@@ -1618,14 +1692,24 @@ export async function loadProjectPageData(
   project: LinkProjectRow;
   placements: LinkProjectPlacementRow[];
   visibleClients: ClientRow[];
+  /** Clusters the operator owns — used to populate the "Pre-fill from cluster" picker. */
+  visibleClusters: ClusterRow[];
+  /** cluster_id → list of member client_ids. Drives the inline JS that
+   *  additively checks placement-form checkboxes when a cluster is picked. */
+  clusterMembers: Map<number, string[]>;
 } | null> {
   const project = await loadVisibleLinkProject(env, user, linkProjectId);
   if (!project) return null;
-  const [placements, visibleClients] = await Promise.all([
+  const [placements, visibleClients, visibleClusters] = await Promise.all([
     loadPlacementsForProject(env, linkProjectId),
     loadVisibleClients(env, user),
+    loadVisibleClusters(env, user),
   ]);
-  return { project, placements, visibleClients };
+  const clusterMembers = await loadAllClusterMembersByCluster(
+    env,
+    visibleClusters.map((c) => c.id),
+  );
+  return { project, placements, visibleClients, visibleClusters, clusterMembers };
 }
 
 /* ─── Slice 4: reporting + broken-link check + bulk apply ─── */
