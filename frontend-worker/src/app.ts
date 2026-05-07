@@ -21,7 +21,7 @@
  *     / `loadVisibleClient`.
  */
 
-import { DEFAULT_PROXY_ZONE } from "../../src/config/proxy-zone.js";
+import { DEFAULT_PROXY_ZONE, PROXY_ZONES } from "../../src/config/proxy-zone.js";
 import { ClientConfig } from "../../src/config/schema.js";
 import { assertConfigInvariants } from "../../src/config/validator.js";
 import { ConfigValidationError } from "../../src/lib/errors.js";
@@ -1133,6 +1133,22 @@ function renderStructuredFormBody(opts: {
   isEdit: boolean;
 }): string {
   const idAttrs = opts.isEdit ? "readonly" : 'required pattern="[a-z0-9-]+"';
+  // One radio per registered proxy zone, plus a "custom" radio. Default
+  // (checked) is the first zone — DEFAULT_PROXY_ZONE — and only its
+  // subdomain input is enabled. The inline JS below toggles enabled
+  // state and reads/writes `proxy_domain` based on the selected radio.
+  const zoneRadiosHtml = PROXY_ZONES.map((zone, i) => {
+    const checkedAttr = i === 0 ? " checked" : "";
+    const disabledAttr = i === 0 ? "" : " disabled";
+    return [
+      '<label class="proxy-radio">',
+      `<input type="radio" name="proxy_mode" value="zone:${i}" id="f_proxy_mode_zone_${i}"${checkedAttr}>`,
+      `<span>*.${esc(zone)}:</span>`,
+      `<input id="f_proxy_subdomain_${i}" type="text" placeholder="client-id" style="width:14rem"${disabledAttr}>`,
+      `<span class="proxy-suffix">.${esc(zone)}</span>`,
+      "</label>",
+    ].join("");
+  }).join("");
   return [
     '<div class="form-section"><h2>Identity</h2><div class="form-grid">',
     '<div><label for="f_client_id">client_id</label>',
@@ -1143,12 +1159,10 @@ function renderStructuredFormBody(opts: {
     '<select id="f_mode"><option value="subdomain_proxy">subdomain_proxy — worker runs on a controlled zone (default)</option><option value="in_place">in_place — worker runs on the customer\'s own domain</option></select>',
     "<div class=\"field-hint\"><strong>subdomain_proxy:</strong> proxy_domain is on a zone you control (e.g. <code>*.localpage.us.com</code>). source_domain is the customer's site, fetched as upstream. Cookie + Location host rewrites apply.<br><strong>in_place:</strong> set proxy_domain = source_domain = the customer's own domain. routing[0].origin must point at a separate origin host (e.g. <code>origin.acme.com</code>) so the proxy fetch doesn't loop. Requires a Workers Route on the same Cloudflare account.</div></div>",
     '<div class="full-width"><label>proxy_domain</label><div class="proxy-mode">',
-    '<label class="proxy-radio"><input type="radio" name="proxy_mode" value="default" id="f_proxy_mode_default" checked>',
-    '<span>Default zone:</span><input id="f_proxy_subdomain" type="text" placeholder="client-id" style="width:14rem">',
-    `<span class="proxy-suffix">.${esc(DEFAULT_PROXY_ZONE)}</span></label>`,
+    zoneRadiosHtml,
     '<label class="proxy-radio"><input type="radio" name="proxy_mode" value="custom" id="f_proxy_mode_custom">',
     '<span>Custom domain:</span><input id="f_proxy_custom" type="text" placeholder="yourdomain.com" style="width:18rem" disabled></label>',
-    '</div><div class="field-hint">Default zone: served by the platform\'s wildcard DNS. Custom: requires DNS pointed at the worker.</div>',
+    '</div><div class="field-hint">Each <code>*.&lt;zone&gt;</code> option is served by the platform\'s wildcard DNS — pick any. Custom: requires DNS pointed at the worker.</div>',
     '<input type="hidden" id="f_proxy_domain"></div>',
     '<div class="full-width"><label for="f_source_domain">source_domain</label><input id="f_source_domain" type="text" required>',
     '<div class="field-hint">the upstream the platform fetches from (e.g. customer-cms.example.com)</div></div>',
@@ -1204,23 +1218,28 @@ function renderStructuredFormBody(opts: {
     "</div>",
     "<script>",
     "(function(){",
-    `var ZONE=${JSON.stringify(DEFAULT_PROXY_ZONE)};var ZONE_SUFFIX='.'+ZONE;`,
+    `var ZONES=${JSON.stringify(PROXY_ZONES)};`,
     "var ta=document.getElementById('config_json');if(!ta)return;",
     "var scalarFields={f_client_id:['client_id'],f_source_domain:['source_domain'],f_status:['status'],f_mode:['mode'],f_attested_by_email:['authorization','attested_by_email'],f_attested_ip:['authorization','attested_ip'],f_scope:['authorization','scope']};",
     "function get(o,p){for(var i=0;i<p.length;i++){if(o==null)return undefined;o=o[p[i]];}return o;}",
     "function setPath(o,p,v){for(var i=0;i<p.length-1;i++){var k=p[i];if(o[k]==null||typeof o[k]!=='object')o[k]={};o=o[k];}o[p[p.length-1]]=v;}",
     "function safeParse(){try{return JSON.parse(ta.value);}catch(e){return null;}}",
-    "function applyProxyDomain(pd){var dR=document.getElementById('f_proxy_mode_default'),cR=document.getElementById('f_proxy_mode_custom'),sE=document.getElementById('f_proxy_subdomain'),cE=document.getElementById('f_proxy_custom');if(typeof pd==='string'&&pd.length>ZONE_SUFFIX.length&&pd.slice(-ZONE_SUFFIX.length)===ZONE_SUFFIX){dR.checked=true;sE.value=pd.slice(0,-ZONE_SUFFIX.length);sE.disabled=false;cE.value='';cE.disabled=true;}else{cR.checked=true;cE.value=pd||'';cE.disabled=false;sE.disabled=true;}}",
-    "function currentProxyDomain(){var d=document.getElementById('f_proxy_mode_default').checked;if(d){var s=document.getElementById('f_proxy_subdomain').value.trim();return s===''?'':s+ZONE_SUFFIX;}return document.getElementById('f_proxy_custom').value.trim();}",
+    "function checkedZoneIndex(){for(var i=0;i<ZONES.length;i++){var r=document.getElementById('f_proxy_mode_zone_'+i);if(r&&r.checked)return i;}return -1;}",
+    "function applyProxyDomain(pd){var matched=-1,sub='';if(typeof pd==='string'){for(var i=0;i<ZONES.length;i++){var sfx='.'+ZONES[i];if(pd.length>sfx.length&&pd.slice(-sfx.length)===sfx){matched=i;sub=pd.slice(0,-sfx.length);break;}}}for(var j=0;j<ZONES.length;j++){var rr=document.getElementById('f_proxy_mode_zone_'+j),ee=document.getElementById('f_proxy_subdomain_'+j);if(rr)rr.checked=(j===matched);if(ee){ee.disabled=(j!==matched);if(j===matched)ee.value=sub;else ee.value='';}}var cR=document.getElementById('f_proxy_mode_custom'),cE=document.getElementById('f_proxy_custom');if(matched===-1){if(cR)cR.checked=true;if(cE){cE.value=pd||'';cE.disabled=false;}}else{if(cR)cR.checked=false;if(cE){cE.value='';cE.disabled=true;}}}",
+    "function currentProxyDomain(){var idx=checkedZoneIndex();if(idx>=0){var sE=document.getElementById('f_proxy_subdomain_'+idx);var s=sE?sE.value.trim():'';return s===''?'':s+'.'+ZONES[idx];}var cE=document.getElementById('f_proxy_custom');return cE?cE.value.trim():'';}",
     "function syncFromJson(){var j=safeParse();if(!j)return;Object.keys(scalarFields).forEach(function(id){var el=document.getElementById(id);if(!el)return;var v=get(j,scalarFields[id]);el.value=v==null?'':String(v);});applyProxyDomain(j.proxy_domain||'');var sp=get(j,['authorization','scope_paths']),spEl=document.getElementById('f_scope_paths');if(spEl)spEl.value=Array.isArray(sp)?sp.join(', '):'';var or=get(j,['routing',0,'origin']),oEl=document.getElementById('f_origin');if(oEl)oEl.value=or||'';var ro=get(j,['routing',0,'resolve_override']),roEl=document.getElementById('f_resolve_override');if(roEl)roEl.value=ro||'';}",
     "function syncToJson(){var j=safeParse();if(!j)return;Object.keys(scalarFields).forEach(function(id){var el=document.getElementById(id);if(!el)return;if(el.value!=='')setPath(j,scalarFields[id],el.value);});var pd=currentProxyDomain();if(pd)j.proxy_domain=pd;var spEl=document.getElementById('f_scope_paths'),scEl=document.getElementById('f_scope');if(j.authorization==null||typeof j.authorization!=='object')j.authorization={};if(scEl&&scEl.value==='specified_paths'&&spEl&&spEl.value.trim()!==''){j.authorization.scope_paths=spEl.value.split(',').map(function(s){return s.trim();}).filter(Boolean);}else{delete j.authorization.scope_paths;}var oEl=document.getElementById('f_origin');if(oEl&&oEl.value!==''){if(!Array.isArray(j.routing))j.routing=[];if(j.routing[0]==null||typeof j.routing[0]!=='object')j.routing[0]={match:'^/.*',type:'proxy',origin_auth:{type:'none'}};j.routing[0].origin=oEl.value;}var roEl=document.getElementById('f_resolve_override');if(roEl){if(!Array.isArray(j.routing))j.routing=[];if(j.routing[0]==null||typeof j.routing[0]!=='object')j.routing[0]={match:'^/.*',type:'proxy',origin_auth:{type:'none'}};if(roEl.value.trim()!==''){j.routing[0].resolve_override=roEl.value.trim();}else{delete j.routing[0].resolve_override;}}ta.value=JSON.stringify(j,null,2);}",
-    "var cidEl=document.getElementById('f_client_id');if(cidEl&&!cidEl.readOnly){cidEl.addEventListener('input',function(){var sE=document.getElementById('f_proxy_subdomain');if(!sE)return;if(sE.dataset.userEdited!=='1'){sE.value=cidEl.value;syncToJson();}});}",
-    "var sE0=document.getElementById('f_proxy_subdomain');if(sE0)sE0.addEventListener('input',function(){sE0.dataset.userEdited='1';});",
+    // When client_id changes (new-client only), auto-fill the
+    // currently-selected zone's subdomain input — unless the user has
+    // already edited it. If custom is selected, do nothing.
+    "var cidEl=document.getElementById('f_client_id');if(cidEl&&!cidEl.readOnly){cidEl.addEventListener('input',function(){var idx=checkedZoneIndex();if(idx<0)return;var sE=document.getElementById('f_proxy_subdomain_'+idx);if(!sE)return;if(sE.dataset.userEdited!=='1'){sE.value=cidEl.value;syncToJson();}});}",
+    "for(var zi=0;zi<ZONES.length;zi++){(function(i){var ee=document.getElementById('f_proxy_subdomain_'+i);if(ee)ee.addEventListener('input',function(){ee.dataset.userEdited='1';});})(zi);}",
     "var srcEl=document.getElementById('f_source_domain'),orgEl=document.getElementById('f_origin');function shouldFillOrigin(){if(!orgEl)return false;if(orgEl.dataset.userEdited==='1')return false;var v=orgEl.value||'';return v===''||v.indexOf('REPLACE_')!==-1;}if(srcEl&&orgEl){srcEl.addEventListener('input',function(){if(!shouldFillOrigin())return;var s=srcEl.value.trim();orgEl.value=s===''?'':'https://'+s.replace(/^https?:\\/\\//i,'');syncToJson();});orgEl.addEventListener('input',function(){orgEl.dataset.userEdited='1';});if(shouldFillOrigin()&&srcEl.value&&srcEl.value.indexOf('REPLACE_')===-1){orgEl.value='https://'+srcEl.value.replace(/^https?:\\/\\//i,'');syncToJson();}}",
-    "function onMode(){var d=document.getElementById('f_proxy_mode_default').checked;document.getElementById('f_proxy_subdomain').disabled=!d;document.getElementById('f_proxy_custom').disabled=d;syncToJson();}",
-    "document.getElementById('f_proxy_mode_default').addEventListener('change',onMode);",
-    "document.getElementById('f_proxy_mode_custom').addEventListener('change',onMode);",
-    "Object.keys(scalarFields).concat(['f_scope_paths','f_origin','f_resolve_override','f_proxy_subdomain','f_proxy_custom']).forEach(function(id){var el=document.getElementById(id);if(el)el.addEventListener('input',syncToJson);});",
+    "function onMode(){var idx=checkedZoneIndex();for(var i=0;i<ZONES.length;i++){var ee=document.getElementById('f_proxy_subdomain_'+i);if(ee)ee.disabled=(i!==idx);}var cE=document.getElementById('f_proxy_custom');if(cE)cE.disabled=(idx>=0);syncToJson();}",
+    "for(var zj=0;zj<ZONES.length;zj++){var zr=document.getElementById('f_proxy_mode_zone_'+zj);if(zr)zr.addEventListener('change',onMode);}",
+    "var cRel=document.getElementById('f_proxy_mode_custom');if(cRel)cRel.addEventListener('change',onMode);",
+    "var proxyInputIds=['f_proxy_custom'];for(var zk=0;zk<ZONES.length;zk++)proxyInputIds.push('f_proxy_subdomain_'+zk);",
+    "Object.keys(scalarFields).concat(['f_scope_paths','f_origin','f_resolve_override']).concat(proxyInputIds).forEach(function(id){var el=document.getElementById(id);if(el)el.addEventListener('input',syncToJson);});",
     // Auto-fill resolve_override when mode = in_place. Suggests
     // `origin.<source_domain>` so the operator only edits if the
     // origin has a non-default hostname. Clears the field when mode

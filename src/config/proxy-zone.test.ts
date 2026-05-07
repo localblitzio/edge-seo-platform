@@ -2,38 +2,67 @@ import { describe, expect, it } from "vitest";
 
 import {
   DEFAULT_PROXY_ZONE,
+  PROXY_ZONES,
   RESERVED_SUBDOMAINS,
   defaultProxyDomainFor,
-  isDefaultProxyZone,
-  subdomainOfDefaultZone,
+  isProxyZoneDomain,
+  matchProxyZone,
+  subdomainOfProxyZone,
 } from "./proxy-zone.js";
 
-describe("isDefaultProxyZone", () => {
-  it("returns true for a single-label subdomain on the default zone", () => {
-    expect(isDefaultProxyZone(`acme.${DEFAULT_PROXY_ZONE}`)).toBe(true);
+describe("PROXY_ZONES", () => {
+  it("has DEFAULT_PROXY_ZONE as the first entry", () => {
+    expect(PROXY_ZONES[0]).toBe(DEFAULT_PROXY_ZONE);
   });
 
-  it("returns true for a multi-label subdomain on the default zone", () => {
-    expect(isDefaultProxyZone(`foo.bar.${DEFAULT_PROXY_ZONE}`)).toBe(true);
+  it("contains both registered zones", () => {
+    expect(PROXY_ZONES).toContain("localpage.us.com");
+    expect(PROXY_ZONES).toContain("localsite.us.com");
+  });
+});
+
+describe("matchProxyZone", () => {
+  it("returns the matching zone for a single-label subdomain", () => {
+    expect(matchProxyZone(`acme.${DEFAULT_PROXY_ZONE}`)).toBe(DEFAULT_PROXY_ZONE);
   });
 
-  it("returns false for a different zone", () => {
-    expect(isDefaultProxyZone("client.example.com")).toBe(false);
+  it("matches secondary zones too", () => {
+    expect(matchProxyZone("acme.localsite.us.com")).toBe("localsite.us.com");
   });
 
-  it("returns false for the bare zone (no subdomain)", () => {
-    expect(isDefaultProxyZone(DEFAULT_PROXY_ZONE)).toBe(false);
+  it("matches multi-label subdomains", () => {
+    expect(matchProxyZone(`foo.bar.${DEFAULT_PROXY_ZONE}`)).toBe(DEFAULT_PROXY_ZONE);
   });
 
-  it("returns false for a zone that just shares a suffix (substring trick)", () => {
+  it("returns null for an unknown zone", () => {
+    expect(matchProxyZone("client.example.com")).toBeNull();
+  });
+
+  it("returns null for the bare zone (no subdomain)", () => {
+    expect(matchProxyZone(DEFAULT_PROXY_ZONE)).toBeNull();
+  });
+
+  it("returns null for a zone that just shares a suffix (substring trick)", () => {
     // "fakelocalpage.us.com" must not match "localpage.us.com" — the leading
     // dot in the check `endsWith(".${zone}")` defends against this.
-    expect(isDefaultProxyZone(`fake${DEFAULT_PROXY_ZONE}`)).toBe(false);
+    expect(matchProxyZone(`fake${DEFAULT_PROXY_ZONE}`)).toBeNull();
+  });
+});
+
+describe("isProxyZoneDomain", () => {
+  it("returns true for a subdomain on any registered zone", () => {
+    for (const zone of PROXY_ZONES) {
+      expect(isProxyZoneDomain(`acme.${zone}`)).toBe(true);
+    }
+  });
+
+  it("returns false for an unknown zone", () => {
+    expect(isProxyZoneDomain("client.example.com")).toBe(false);
   });
 });
 
 describe("defaultProxyDomainFor", () => {
-  it("constructs `<id>.${zone}`", () => {
+  it("constructs `<id>.${DEFAULT_PROXY_ZONE}`", () => {
     expect(defaultProxyDomainFor("acme")).toBe(`acme.${DEFAULT_PROXY_ZONE}`);
   });
 
@@ -43,21 +72,25 @@ describe("defaultProxyDomainFor", () => {
   });
 });
 
-describe("subdomainOfDefaultZone", () => {
-  it("returns the single leftmost label for `<id>.${zone}`", () => {
-    expect(subdomainOfDefaultZone(`acme.${DEFAULT_PROXY_ZONE}`)).toBe("acme");
+describe("subdomainOfProxyZone", () => {
+  it("returns the single leftmost label for `<id>.${DEFAULT_PROXY_ZONE}`", () => {
+    expect(subdomainOfProxyZone(`acme.${DEFAULT_PROXY_ZONE}`)).toBe("acme");
+  });
+
+  it("returns the prefix on a non-default zone too", () => {
+    expect(subdomainOfProxyZone("acme.localsite.us.com")).toBe("acme");
   });
 
   it("returns the full multi-label prefix unchanged", () => {
-    expect(subdomainOfDefaultZone(`foo.bar.${DEFAULT_PROXY_ZONE}`)).toBe("foo.bar");
+    expect(subdomainOfProxyZone(`foo.bar.${DEFAULT_PROXY_ZONE}`)).toBe("foo.bar");
   });
 
-  it("returns null for a non-default-zone domain", () => {
-    expect(subdomainOfDefaultZone("client.example.com")).toBeNull();
+  it("returns null for a non-platform-zone domain", () => {
+    expect(subdomainOfProxyZone("client.example.com")).toBeNull();
   });
 
   it("returns null for the bare zone", () => {
-    expect(subdomainOfDefaultZone(DEFAULT_PROXY_ZONE)).toBeNull();
+    expect(subdomainOfProxyZone(DEFAULT_PROXY_ZONE)).toBeNull();
   });
 });
 

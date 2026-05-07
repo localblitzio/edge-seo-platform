@@ -1,42 +1,66 @@
 /**
- * Default proxy-zone constants and helpers.
+ * Proxy-zone constants and helpers.
  *
- * The platform reserves a single "default zone" — clients without a custom
- * domain are auto-served as `<client_id>.<zone>`. The zone is owned by the
- * platform operator (DNS + Worker route configured once), so no per-client
- * DNS/cert work is needed for the default-zone path.
+ * The platform owns one or more wildcard zones. Clients without a custom
+ * domain are auto-served as `<client_id>.<zone>` on one of these. Each
+ * zone has DNS + a Worker route configured once by the operator, so no
+ * per-client DNS/cert work is needed for the platform-zone path.
  *
  * Custom domains stay supported as an explicit override (operator points
  * external DNS at the worker, then adds a Worker route per zone).
  *
  * Why this lives in src/config/ rather than admin-worker/: the validator
  * uses the reserved-subdomain stoplist as a load-time invariant, and we
- * keep one place where the zone string is canonical.
+ * keep one place where the zone strings are canonical.
  */
+
+/**
+ * All wildcard zones the platform serves on. Each entry must have a
+ * matching `*.<zone>/*` Workers Route in `wrangler.toml` and a wildcard
+ * DNS A record on the zone (proxied = orange cloud).
+ *
+ * Order matters for UI defaults: PROXY_ZONES[0] is the default zone.
+ * Add new zones to the end of the array — never reorder, since the
+ * "default zone" semantics ripple through fixtures and templates.
+ */
+export const PROXY_ZONES = ["localpage.us.com", "localsite.us.com"] as const;
+
+export type ProxyZone = (typeof PROXY_ZONES)[number];
 
 /**
  * Default proxy zone for auto-derived client subdomains.
  *
- * Convention: `<client_id>.${DEFAULT_PROXY_ZONE}`. Change this string when
- * the operator wants to migrate to a different default zone (e.g. staging
- * vs production separation). Not env-aware on purpose — each Worker is
- * deployed against one zone, and the zone name lives in the worker's
- * own configuration via `wrangler.toml` routes anyway.
+ * Convention: `<client_id>.${DEFAULT_PROXY_ZONE}`. The default is the
+ * first entry in `PROXY_ZONES` — a UI/template convention only; the
+ * worker accepts any registered zone.
  */
-export const DEFAULT_PROXY_ZONE = "localpage.us.com";
+export const DEFAULT_PROXY_ZONE: ProxyZone = PROXY_ZONES[0];
 
 /**
- * Returns true if `proxy_domain` is a subdomain of the default zone.
+ * Returns the matching proxy zone for a domain, or null if it isn't on
+ * any registered zone. The check uses a leading dot so `fakelocalpage.us.com`
+ * doesn't match `localpage.us.com`.
  *
  * @param proxyDomain the proxy_domain string from a ClientConfig
- * @returns true if the host ends with `.${DEFAULT_PROXY_ZONE}`
+ * @returns the matching `ProxyZone` if `proxyDomain` ends with `.<zone>`,
+ *   otherwise null
  */
-export function isDefaultProxyZone(proxyDomain: string): boolean {
-  return proxyDomain.endsWith(`.${DEFAULT_PROXY_ZONE}`);
+export function matchProxyZone(proxyDomain: string): ProxyZone | null {
+  for (const zone of PROXY_ZONES) {
+    if (proxyDomain.endsWith(`.${zone}`)) return zone;
+  }
+  return null;
 }
 
 /**
- * Construct the default proxy domain for a given `client_id`.
+ * Returns true if `proxy_domain` is a subdomain of any registered proxy zone.
+ */
+export function isProxyZoneDomain(proxyDomain: string): boolean {
+  return matchProxyZone(proxyDomain) !== null;
+}
+
+/**
+ * Construct a proxy domain on the default zone for a given `client_id`.
  *
  * Pure string concatenation — caller is responsible for validating that
  * `client_id` is a DNS-safe label (RFC 1035 LDH, ≤63 chars).
@@ -46,27 +70,28 @@ export function defaultProxyDomainFor(clientId: string): string {
 }
 
 /**
- * Extract the leftmost label from a default-zone proxy domain.
+ * Extract the leftmost label(s) from a proxy-zone domain.
  *
  * @param proxyDomain the proxy_domain string
- * @returns the subdomain (e.g. "lantern-crest" for "lantern-crest.localpage.us.com"),
- *   or null if the domain is not on the default zone or has no leftmost label
+ * @returns the subdomain prefix (e.g. "lantern-crest" for
+ *   "lantern-crest.localpage.us.com"), or null if `proxyDomain` is not
+ *   on any registered zone, or has no leftmost label.
+ *
+ * Multi-label prefixes (e.g. "foo.bar.localpage.us.com") return the
+ * full prefix — caller can split on "." to get the leftmost label.
  */
-export function subdomainOfDefaultZone(proxyDomain: string): string | null {
-  if (!isDefaultProxyZone(proxyDomain)) return null;
-  const sub = proxyDomain.slice(0, -(DEFAULT_PROXY_ZONE.length + 1));
+export function subdomainOfProxyZone(proxyDomain: string): string | null {
+  const zone = matchProxyZone(proxyDomain);
+  if (!zone) return null;
+  const sub = proxyDomain.slice(0, -(zone.length + 1));
   // A bare zone domain ("localpage.us.com" itself) shouldn't be a valid
   // proxy_domain and would produce an empty string; reject by returning null.
   if (sub.length === 0) return null;
-  // Multi-label subdomains (e.g. "foo.bar.localpage.us.com") return the
-  // full prefix — caller can decide whether to treat that as one label or
-  // dotted. The reserved-subdomain check below only flags the FIRST label,
-  // so "foo.bar..." is treated as if its leftmost label is "foo".
   return sub;
 }
 
 /**
- * Reserved subdomain labels — refused as `client_id` for new default-zone
+ * Reserved subdomain labels — refused as `client_id` for new platform-zone
  * clients to avoid collisions with infrastructure subdomains operators
  * commonly reserve. Lowercase only (matches the tightened client_id regex).
  *

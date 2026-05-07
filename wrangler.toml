@@ -45,13 +45,21 @@ dataset = "edge_seo_metrics_local"
 name = "edge-seo-platform-staging"
 workers_dev = true
 
-# Default proxy zone routes — every client whose proxy_domain ends with
-# .localpage.us.com is dispatched to this worker. The wildcard DNS record
-# on the zone (set in Cloudflare DNS as `*` → 192.0.2.1, proxied) accepts
-# the traffic; this route hands it to the worker.
+# Platform proxy zone routes — every client whose proxy_domain ends with
+# one of these zones is dispatched to this worker. Each zone has a
+# wildcard DNS record (`*` → 192.0.2.1, proxied) that accepts the
+# traffic; the routes below hand it to the worker.
+#
+# Zone list is mirrored in src/config/proxy-zone.ts (PROXY_ZONES).
+# Adding a new zone requires: (1) DNS wildcard A on the zone,
+# (2) a route entry here, (3) appending to PROXY_ZONES.
 [[env.staging.routes]]
 pattern = "*.localpage.us.com/*"
 zone_name = "localpage.us.com"
+
+[[env.staging.routes]]
+pattern = "*.localsite.us.com/*"
+zone_name = "localsite.us.com"
 
 # In-place mode: 404-media.com client. Apex only — WordPress's
 # built-in www → apex redirect handles www traffic before it would
