@@ -63,6 +63,15 @@ zone_name = "localpage.us.com"
 pattern = "404-media.com/*"
 zone_name = "404-media.com"
 
+# In-place mode: seoinencinitas.com client. Pages-hosted (origin
+# fetched from seoinencinitas.pages.dev — no resolve_override
+# needed). Routes registered out-of-band via the admin auto-onboard
+# form get clobbered by `wrangler deploy` route reconciliation, so
+# every in_place client must also be listed here for persistence.
+[[env.staging.routes]]
+pattern = "seoinencinitas.com/*"
+zone_name = "seoinencinitas.com"
+
 [[env.staging.kv_namespaces]]
 binding = "CONFIG_KV"
 id = "dc95f90063cd4493bb3ea462759f4002"
