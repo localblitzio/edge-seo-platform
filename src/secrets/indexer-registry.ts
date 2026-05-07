@@ -19,6 +19,7 @@
 
 import { pingIndexNow } from "../sitemap/indexnow.js";
 import { pingPrimeIndexer } from "../sitemap/prime-indexer.js";
+import { pingSinbyte } from "../sitemap/sinbyte.js";
 
 /**
  * Result of a submission. `submitted` is the count of API calls
@@ -88,6 +89,24 @@ export const ACTIVE_INDEXERS: readonly IndexerEntry[] = [
           r.failed === 0
             ? `Prime Indexer: created ${r.ok} project${r.ok === 1 ? "" : "s"} with ${urls.length} URL${urls.length === 1 ? "" : "s"} (project ids: ${r.projectIds.join(", ") || "?"}).`
             : `Prime Indexer: ${r.failed}/${r.submitted} project${r.submitted === 1 ? "" : "s"} failed to submit.`,
+      };
+    },
+  },
+  {
+    slotKey: "SINBYTE_API_KEY",
+    label: "Sinbyte",
+    submit: async (key, urls, ctx) => {
+      const batchName = `${ctx.proxyDomain} ${new Date().toISOString()}`;
+      const r = await pingSinbyte(key, urls, batchName);
+      return {
+        ok: r.failed === 0 && r.ok > 0,
+        submitted: r.submitted,
+        successes: r.ok,
+        failures: r.failed,
+        message:
+          r.failed === 0
+            ? `Sinbyte: submitted ${r.ok} batch${r.ok === 1 ? "" : "es"} with ${urls.length} URL${urls.length === 1 ? "" : "s"} (method=tools, dripfeed enabled).`
+            : `Sinbyte: ${r.failed}/${r.submitted} batch${r.submitted === 1 ? "" : "es"} failed to submit.`,
       };
     },
   },
