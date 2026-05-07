@@ -75,7 +75,7 @@ export function buildSubmissions(
  */
 export async function submitToIndexNow(
   body: IndexNowSubmission,
-): Promise<{ ok: boolean; status: number }> {
+): Promise<{ ok: boolean; status: number; responseBody?: string }> {
   try {
     const resp = await fetch(INDEXNOW_ENDPOINT, {
       method: "POST",
@@ -85,7 +85,21 @@ export async function submitToIndexNow(
       },
       body: JSON.stringify(body),
     });
-    return { ok: resp.status === 200 || resp.status === 202, status: resp.status };
+    const ok = resp.status === 200 || resp.status === 202;
+    // Capture the response body on non-success so callers can show
+    // operators the actual reason IndexNow rejected the submission
+    // (the spec returns useful messages like "URL host does not match
+    // host" or "key contains invalid characters"). We cap at 2 KB so
+    // a misbehaving endpoint can't blow up our log line.
+    if (!ok) {
+      try {
+        const text = await resp.text();
+        return { ok, status: resp.status, responseBody: text.slice(0, 2048) };
+      } catch {
+        /* ignore body-read failures, fall through to no-body return */
+      }
+    }
+    return { ok, status: resp.status };
   } catch (e) {
     console.warn("indexnow: fetch failed", e);
     return { ok: false, status: 0 };

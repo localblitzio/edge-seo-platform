@@ -28,7 +28,12 @@ export interface Env {
   LOGS_R2: R2Bucket;
   METRICS: AnalyticsEngineDataset;
 
-  // Secrets (set via `wrangler secret put`):
+  // Legacy fallback secrets — preferred storage is the D1 `secrets`
+  // table edited from the Settings → API keys admin page. The Worker
+  // reads via `getSecret(env, KEY)` (src/secrets/store.ts) which
+  // checks KV → D1 → these env bindings in that order, so any value
+  // bound via `wrangler secret put` keeps working until the operator
+  // pastes it into the new UI and unsets the Worker secret.
   INDEXNOW_KEY?: string;
   GSC_SERVICE_ACCOUNT_JSON?: string;
 }

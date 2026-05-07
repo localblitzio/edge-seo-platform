@@ -209,11 +209,43 @@ function xmlEscape(value: string): string {
 export function collectSitemapUrls(config: ClientConfig): string[] {
   const candidates = collectCandidatePaths(config);
   const eligible = candidates.filter((p) => isPathSitemapEligible(p, config));
+
+  // seed_paths bypass the *default* canonical=origin (no rule
+  // matched), but an EXPLICIT canonicals[] rule still wins. They
+  // also respect noindex + redirect-source filters since those are
+  // active blockers.
+  const seedEligible = config.seed_paths.filter((p) => isPathSeedEligible(p, config));
+
+  // Merge + dedupe so seed_paths that overlap with literal-rule paths
+  // don't get double-listed.
+  const merged = Array.from(new Set([...eligible, ...seedEligible]));
   // Sort lexicographically so the output is deterministic (test-friendly
   // and easier on operators reading the XML).
-  eligible.sort();
+  merged.sort();
   const host = config.proxy_domain;
-  return eligible.map((path) => `https://${host}${path}`);
+  return merged.map((path) => `https://${host}${path}`);
+}
+
+/**
+ * Eligibility check for seed_paths. Seed declaration overrides only
+ * the *default* canonical=origin (no rule matched). An EXPLICIT
+ * canonicals[] rule still wins — operator wrote both, so the more
+ * specific signal (the canonical rule) takes priority.
+ *
+ * Always honours noindex + redirect-source filters (active blockers).
+ */
+function isPathSeedEligible(path: string, config: ClientConfig): boolean {
+  if (isNoindexed(path, config)) return false;
+  for (const r of config.redirects.static) {
+    if (r.from === path) return false;
+  }
+  // If an explicit canonical rule applies, defer to its strategy.
+  const explicitStrategy = canonicalStrategyForPath(path, config);
+  if (explicitStrategy !== null) {
+    return explicitStrategy === "self";
+  }
+  // No explicit rule → seed declaration overrides the default-origin fallthrough.
+  return true;
 }
 
 /**

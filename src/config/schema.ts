@@ -307,6 +307,35 @@ export const ClientConfig = z.object({
   caching: z.array(CacheRule).default([]),
   forms: z.array(FormHandling).default([]),
   /**
+   * Operator-pinned URL paths that should appear in this site's
+   * `/sitemap.xml` and get pinged via IndexNow on every config save.
+   *
+   * Use case: a wildcard-routed proxy site (e.g. `^/.*` → upstream
+   * Webflow) doesn't auto-enumerate any URLs in the sitemap. Adding
+   * the most important paths here advertises them to search engines
+   * even though there's no per-page rule for them.
+   *
+   * Each entry must be an absolute path on this proxy domain, starting
+   * with `/`. Stored as paths (not full URLs) since the host is
+   * implicit — the sitemap generator builds full URLs from
+   * `proxy_domain` + path.
+   *
+   * Operator declaration: presence in this list IS the assertion that
+   * this site is authoritative for the path (overrides the default
+   * `origin` canonical strategy for proxy routes). Indexation
+   * `noindex` rules and redirect-source paths still filter the URL out
+   * — those are active blockers, not defaults.
+   */
+  seed_paths: z
+    .array(
+      z
+        .string()
+        .min(1)
+        .max(2048)
+        .regex(/^\/[^\s]*$/, "must be an absolute path starting with /, no whitespace"),
+    )
+    .default([]),
+  /**
    * Schema version. Bumping requires: a discriminated union over
    * `schema_version` with both old and new variants, plus a migration
    * function applied on read. Never break-replace without migration coverage.

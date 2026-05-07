@@ -25,8 +25,9 @@ import { DEFAULT_PROXY_ZONE, PROXY_ZONES, matchProxyZone } from "../../src/confi
 import { ClientConfig } from "../../src/config/schema.js";
 import { assertConfigInvariants } from "../../src/config/validator.js";
 import { ConfigValidationError } from "../../src/lib/errors.js";
+import { ACTIVE_INDEXERS } from "../../src/secrets/indexer-registry.js";
+import { getSecret } from "../../src/secrets/store.js";
 import { collectSitemapUrls } from "../../src/sitemap/generator.js";
-import { pingIndexNow } from "../../src/sitemap/indexnow.js";
 import type { User } from "./auth.js";
 import { BUILD_VERSION } from "./build-version.js";
 import { LIST_EDITOR_JS } from "./list-editor-js.js";
@@ -62,12 +63,13 @@ export interface AppEnv {
    */
   PROXY_WORKER_SCRIPT?: string;
   /**
-   * IndexNow API key. When bound, admin write paths POST changed
-   * URLs to `https://api.indexnow.org/indexnow` so search engines
-   * (Bing, Yandex, Seznam, etc.) re-fetch the page promptly. The
-   * proxy worker also serves the verification file at
-   * `https://<host>/<INDEXNOW_KEY>.txt`. Off by default — set via
-   * `wrangler secret put INDEXNOW_KEY` to enable.
+   * Legacy fallback for the IndexNow API key — preferred storage is
+   * the D1 `secrets` table edited from the Settings → API keys admin
+   * page (see `src/secrets/store.ts`). The Worker reads via
+   * `getSecret(env, "INDEXNOW_KEY")` which checks KV → D1 → env in
+   * that order, so a value bound here keeps working until the
+   * operator pastes the same value into the UI and unsets the
+   * Worker secret.
    */
   INDEXNOW_KEY?: string;
 }
@@ -369,6 +371,8 @@ const NAV_ICONS: Record<string, string> = {
   "link-projects": `<svg ${NAV_SVG_ATTRS}><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`,
   // grid (Clusters — group of related sites)
   clusters: `<svg ${NAV_SVG_ATTRS}><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>`,
+  // key (Settings → API keys)
+  "settings:api-keys": `<svg ${NAV_SVG_ATTRS}><circle cx="7.5" cy="15.5" r="3.5"/><line x1="10" y1="13" x2="20" y2="3"/><line x1="16" y1="7" x2="19" y2="4"/><line x1="14" y1="9" x2="17" y2="6"/></svg>`,
   // shield-user (Super-admin Users)
   admin: `<svg ${NAV_SVG_ATTRS}><path d="M12 2l8 4v6c0 5-3.5 9-8 10-4.5-1-8-5-8-10V6z"/><circle cx="12" cy="10" r="2.5"/><path d="M8 16c1-1.5 2.5-2.5 4-2.5s3 1 4 2.5"/></svg>`,
   // globe (per-client row)
@@ -422,7 +426,9 @@ export function appSidebar(opts: { activeNav: string; clients: ClientRow[]; user
     .join("");
   const adminLink =
     opts.user.role === "super_admin"
-      ? `<div class="app-sidebar-section">Super-admin</div><a href="/admin/users"${opts.activeNav === "admin:users" ? ' class="active"' : ""}>${NAV_ICONS.admin}<span>Users</span></a>`
+      ? `<div class="app-sidebar-section">Super-admin</div>
+         <a href="/app/settings/api-keys"${opts.activeNav === "settings:api-keys" ? ' class="active"' : ""}>${NAV_ICONS["settings:api-keys"]}<span>API keys</span></a>
+         <a href="/admin/users"${opts.activeNav === "admin:users" ? ' class="active"' : ""}>${NAV_ICONS.admin}<span>Users</span></a>`
       : "";
   const clientList = ""; // Per-site sub-list dropped — see comment above.
   // Build version pinned at deploy time — operators use this to
@@ -1272,6 +1278,7 @@ function renderActionsRow(client: ClientRow): string {
   };
   return `<div class="actions-row">
     <a class="btn btn-primary" href="/app/clients/${esc(client.client_id)}/edit">Edit config</a>
+    <a class="btn" href="/app/clients/${esc(client.client_id)}/indexing">Indexing</a>
     <a class="btn" href="/app/clients/${esc(client.client_id)}/attest">Capture attestation</a>
     <form method="POST" action="/app/clients/${esc(client.client_id)}/cache-purge"><button class="btn" type="submit">Purge cache</button></form>
     ${statusBtn("active", "Activate", "btn-success", null)}
@@ -1914,7 +1921,7 @@ export async function handleNewClientPost(
     new_status: cfg.status,
     notes: null,
   });
-  await maybePingIndexNow(env, cfg);
+  await maybePingIndexers(env, cfg);
   return {
     response: flashRedirect(`/app/clients/${cfg.client_id}`, {
       text: `Created ${cfg.client_id}.`,
@@ -1924,24 +1931,41 @@ export async function handleNewClientPost(
 }
 
 /**
- * Ping IndexNow for every sitemap-eligible URL on this client.
+ * Notify all configured indexing services for a client save.
  *
- * Best-effort: no-op when `INDEXNOW_KEY` isn't bound, swallows network
- * errors. Search engines don't need a "diff" — pinging the full URL
- * list says "these are the canonical URLs on this site, please
- * refresh." A no-op when the config has no sitemap-eligible URLs (no
- * literal-path rules, or everything is filtered out by canonical /
- * indexation rules).
+ * Currently fans out to:
+ *   - IndexNow (Bing/Yandex/Seznam) — INDEXNOW_KEY
+ *   - Prime Indexer — PRIME_INDEXER_KEY (creates one project per save,
+ *     named `${proxy_domain} ${ISO timestamp}` so chunks group in the
+ *     operator's dashboard)
+ *
+ * Best-effort: each service is independent, no-op when its key is
+ * unbound, swallows network errors. A failed ping doesn't block the
+ * admin save. URL list comes from `collectSitemapUrls(cfg)` — same
+ * source as the per-domain `/sitemap.xml`.
+ *
+ * Future slots (Omega Indexer, Sinbyte) will plug in here once their
+ * API contracts are confirmed.
  */
-async function maybePingIndexNow(env: AppEnv, cfg: ClientConfig): Promise<void> {
-  if (!env.INDEXNOW_KEY) return;
+async function maybePingIndexers(env: AppEnv, cfg: ClientConfig): Promise<void> {
   const urls = collectSitemapUrls(cfg);
   if (urls.length === 0) return;
-  try {
-    await pingIndexNow(cfg.proxy_domain, env.INDEXNOW_KEY, urls);
-  } catch (e) {
-    console.warn("indexnow ping failed", e);
+  const sharedEnv = env as unknown as Parameters<typeof getSecret>[0];
+  // Look up every registered indexer's secret in parallel so slow
+  // KV/D1 reads don't serialize the rest.
+  const keys = await Promise.all(ACTIVE_INDEXERS.map((i) => getSecret(sharedEnv, i.slotKey)));
+  const tasks: Promise<unknown>[] = [];
+  for (let i = 0; i < ACTIVE_INDEXERS.length; i++) {
+    const indexer = ACTIVE_INDEXERS[i];
+    const key = keys[i];
+    if (!indexer || !key) continue;
+    tasks.push(
+      indexer
+        .submit(key, urls, { proxyDomain: cfg.proxy_domain })
+        .catch((e) => console.warn(`${indexer.slotKey} ping failed`, e)),
+    );
   }
+  await Promise.all(tasks);
 }
 
 export async function handleEditClientPost(
@@ -2003,7 +2027,7 @@ export async function handleEditClientPost(
     new_status: cfg.status,
     notes: null,
   });
-  await maybePingIndexNow(env, cfg);
+  await maybePingIndexers(env, cfg);
   return {
     response: flashRedirect(`/app/clients/${clientId}`, {
       text: `Saved. before=${beforeHash} → after=${afterHash}`,
