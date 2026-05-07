@@ -12,6 +12,13 @@
  *   - `domain:${proxy_domain}`
  *   - `config:${client_id}`
  *   - `redirects:${client_id}`
+ *   - `placements:${client_id}`
+ *
+ * Link-project placements (Slice 2B) are stored at `placements:${client_id}`
+ * as a JSON envelope of pre-synthesized ContentInjectRule entries. The
+ * loader reads this in parallel with the main config and appends the
+ * entries to `config.content_injections`. Operator-defined rules are
+ * preserved and run first; placement rules run after.
  *
  * On any validation failure, the loader throws ConfigValidationError. The
  * Worker continues serving the previously cached config (whatever is in
@@ -24,7 +31,7 @@ import type { ExecutionContext } from "@cloudflare/workers-types";
 
 import type { Env } from "../env.js";
 import { ConfigNotFoundError, ConfigValidationError } from "../lib/errors.js";
-import { ClientConfig } from "./schema.js";
+import { ClientConfig, type ContentInjectRule } from "./schema.js";
 import { assertConfigInvariants } from "./validator.js";
 
 /** TTL for write-through cache entries written by the Worker on D1 fallback. */
@@ -36,7 +43,8 @@ const KV_WRITETHROUGH_TTL_SECONDS = 60;
  * @param hostHeader the proxy domain from `request.headers.get("host")`
  * @param env Worker bindings (CONFIG_KV, CONFIG_DB)
  * @param ctx ExecutionContext for `waitUntil` write-through to KV
- * @returns the parsed and invariant-checked ClientConfig
+ * @returns the parsed and invariant-checked ClientConfig with link-project
+ *   placements (if any) merged into `content_injections`
  * @throws ConfigNotFoundError if no client maps to the given host
  * @throws ConfigValidationError if the stored config fails Zod or invariants
  */
@@ -48,11 +56,14 @@ export async function loadConfig(
   // 1. KV: domain → client_id
   const cachedClientId = await env.CONFIG_KV.get(`domain:${hostHeader}`);
 
-  // 2. KV: client_id → config_json
+  // 2. KV: client_id → config_json (and placements:client_id in parallel).
   if (cachedClientId !== null) {
-    const cachedConfig = await env.CONFIG_KV.get(`config:${cachedClientId}`);
+    const [cachedConfig, placementsRaw] = await Promise.all([
+      env.CONFIG_KV.get(`config:${cachedClientId}`),
+      env.CONFIG_KV.get(`placements:${cachedClientId}`),
+    ]);
     if (cachedConfig !== null) {
-      return parseAndValidate(cachedConfig);
+      return mergePlacements(parseAndValidate(cachedConfig), placementsRaw);
     }
   }
 
@@ -82,7 +93,56 @@ export async function loadConfig(
     ]),
   );
 
-  return validated;
+  // On D1 fallback we still want placements merged. Read from KV
+  // directly — placements are written by the admin pipeline, never
+  // backfilled from D1 here, so a cache miss just means "no placements
+  // for this client" which is the correct merge result.
+  const placementsRaw = await env.CONFIG_KV.get(`placements:${row.client_id}`);
+  return mergePlacements(validated, placementsRaw);
+}
+
+/**
+ * Merge link-project placements into the given config's
+ * `content_injections` list. Operator-defined rules run first; placement
+ * rules run after, so an operator's rule that targets the same selector
+ * wins on order-dependent semantics (later append still works since
+ * HTMLRewriter applies rules in attach order).
+ *
+ * Defensive: swallow JSON parse / shape errors. A malformed placements
+ * entry must NOT break HTML serving — we'd rather quietly skip the
+ * link injection than 500 the request. The admin write path validates
+ * before writing, so corruption only happens via direct KV edits.
+ */
+function mergePlacements(config: ClientConfig, placementsRaw: string | null): ClientConfig {
+  if (placementsRaw === null) return config;
+  let envelope: { content_injections?: unknown };
+  try {
+    envelope = JSON.parse(placementsRaw);
+  } catch (e) {
+    console.warn("loader: placements JSON parse failed, skipping merge", e);
+    return config;
+  }
+  const synth = envelope.content_injections;
+  if (!Array.isArray(synth) || synth.length === 0) return config;
+  // Shape-check each entry against ContentInjectRule before merging —
+  // a corrupt entry would fail in the rewriter at request time (worse
+  // than skipping silently here).
+  const valid: ContentInjectRule[] = [];
+  for (const item of synth) {
+    if (
+      typeof item !== "object" ||
+      item === null ||
+      typeof (item as Record<string, unknown>).match !== "string" ||
+      typeof (item as Record<string, unknown>).selector !== "string" ||
+      typeof (item as Record<string, unknown>).position !== "string" ||
+      typeof (item as Record<string, unknown>).html !== "string"
+    ) {
+      continue;
+    }
+    valid.push(item as ContentInjectRule);
+  }
+  if (valid.length === 0) return config;
+  return { ...config, content_injections: [...config.content_injections, ...valid] };
 }
 
 /**

@@ -37,14 +37,15 @@ async function callCf<T>(
   init?: { method?: string; body?: unknown },
 ): Promise<T> {
   const url = `${CF_API_BASE}${path}`;
-  const resp = await fetch(url, {
+  const fetchInit: RequestInit = {
     method: init?.method ?? "GET",
     headers: {
       Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
     },
-    body: init?.body ? JSON.stringify(init.body) : undefined,
-  });
+  };
+  if (init?.body) fetchInit.body = JSON.stringify(init.body);
+  const resp = await fetch(url, fetchInit);
   let json: { success?: boolean; result?: T; errors?: Array<{ code: number; message: string }> };
   try {
     json = await resp.json();

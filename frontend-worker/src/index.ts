@@ -85,6 +85,24 @@ import {
 } from "./auth.js";
 import { type EmailBinding, resetPasswordMessage, sendEmail } from "./email.js";
 import { inspectSourcePage } from "./inspector.js";
+import {
+  handleBulkPlacementPost,
+  handleCheckTargetPost,
+  handleDeletePlacementPost,
+  handleEditLinkProjectPost,
+  handleEditPlacementPost,
+  handleLinkProjectStatusPost,
+  handleNewLinkProjectPost,
+  handleNewPlacementPost,
+  loadProjectPageData,
+  loadVisibleLinkProject,
+  loadVisibleLinkProjects,
+  renderEditLinkProjectForm,
+  renderEditPlacementPage,
+  renderLinkProjectDetail,
+  renderLinkProjectsList,
+  renderNewLinkProjectForm,
+} from "./link-projects.js";
 import { LOGO_DATA_URL } from "./logo-data-url.js";
 
 interface Env {
@@ -1381,6 +1399,292 @@ export default {
           flash: null,
         }),
       );
+    }
+
+    /* ─── Link projects (Slice 1: read-only registry) ─── */
+
+    if (path === "/app/link-projects" && method === "GET") {
+      if (!user) return redirectToLogin(url);
+      const clients = await loadVisibleClients(env, user);
+      const rows = await loadVisibleLinkProjects(env, user);
+      return htmlResponse(
+        htmlPage({
+          title: "Link projects — Edge SEO Platform",
+          body: appLayout({
+            title: "Link projects",
+            content: renderLinkProjectsList(rows, user),
+            activeNav: "link-projects",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+      );
+    }
+
+    if (path === "/app/link-projects/new" && method === "GET") {
+      if (!user) return redirectToLogin(url);
+      const clients = await loadVisibleClients(env, user);
+      return htmlResponse(
+        htmlPage({
+          title: "New link project — Edge SEO Platform",
+          body: appLayout({
+            title: "New link project",
+            content: renderNewLinkProjectForm(null, []),
+            activeNav: "link-projects",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+      );
+    }
+
+    if (path === "/app/link-projects/new" && method === "POST") {
+      if (!user) return redirectToLogin(url);
+      const result = await handleNewLinkProjectPost(request, env, url, user);
+      if (result.response) return result.response;
+      const clients = await loadVisibleClients(env, user);
+      return htmlResponse(
+        htmlPage({
+          title: "New link project — Edge SEO Platform",
+          body: appLayout({
+            title: "New link project",
+            content: renderNewLinkProjectForm(
+              result.rerenderError?.prefill ?? null,
+              result.rerenderError?.errors ?? ["Unknown error"],
+            ),
+            activeNav: "link-projects",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+        { status: 400 },
+      );
+    }
+
+    if (path.startsWith("/app/link-projects/")) {
+      if (!user) return redirectToLogin(url);
+      const rest = path.slice("/app/link-projects/".length);
+      const slash = rest.indexOf("/");
+      const idStr = slash === -1 ? rest : rest.slice(0, slash);
+      const sub = slash === -1 ? "" : rest.slice(slash + 1);
+      const id = Number.parseInt(idStr, 10);
+      if (!Number.isFinite(id) || id <= 0) {
+        return new Response(null, { status: 303, headers: { location: "/app/link-projects" } });
+      }
+      const clients = await loadVisibleClients(env, user);
+      const row = await loadVisibleLinkProject(env, user, id);
+      if (!row) {
+        return htmlResponse(
+          htmlPage({
+            title: "Not found — Edge SEO Platform",
+            body: appLayout({
+              title: "Link project",
+              content:
+                '<h1>Not found</h1><div class="empty">No link project with that id, or you don\'t have access to it.</div>',
+              activeNav: "link-projects",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+          { status: 404 },
+        );
+      }
+
+      if (sub === "" && method === "GET") {
+        // Detail page bundles project + placements + visible clients
+        // so the "add placement" form can render with a populated
+        // <select>. loadProjectPageData runs the placement and client
+        // queries in parallel.
+        const data = await loadProjectPageData(env, user, id);
+        if (!data) {
+          // Project disappeared between the visibility check above and
+          // here — treat as not found.
+          return new Response(null, {
+            status: 303,
+            headers: { location: "/app/link-projects" },
+          });
+        }
+        return htmlResponse(
+          htmlPage({
+            title: `${row.label} — Edge SEO Platform`,
+            body: appLayout({
+              title: row.label,
+              content: renderLinkProjectDetail(data.project, data.placements, data.visibleClients),
+              activeNav: "link-projects",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+
+      if (sub === "placements/new" && method === "POST") {
+        return handleNewPlacementPost(request, env, url, user, id);
+      }
+
+      if (sub === "placements/bulk-new" && method === "POST") {
+        return handleBulkPlacementPost(request, env, url, user, id);
+      }
+
+      if (sub === "check-target" && method === "POST") {
+        return handleCheckTargetPost(request, env, url, user, id);
+      }
+
+      // /app/link-projects/:id/placements/:pid/edit and /delete
+      if (sub.startsWith("placements/") && (method === "POST" || method === "GET")) {
+        const placementRest = sub.slice("placements/".length);
+        const slash2 = placementRest.indexOf("/");
+        if (slash2 === -1) {
+          return new Response(null, {
+            status: 303,
+            headers: { location: `/app/link-projects/${id}` },
+          });
+        }
+        const placementIdStr = placementRest.slice(0, slash2);
+        const placementSub = placementRest.slice(slash2 + 1);
+        const placementId = Number.parseInt(placementIdStr, 10);
+        if (!Number.isFinite(placementId) || placementId <= 0) {
+          return new Response(null, {
+            status: 303,
+            headers: { location: `/app/link-projects/${id}` },
+          });
+        }
+
+        if (placementSub === "edit" && method === "GET") {
+          const data = await loadProjectPageData(env, user, id);
+          if (!data) {
+            return new Response(null, {
+              status: 303,
+              headers: { location: "/app/link-projects" },
+            });
+          }
+          const placement = data.placements.find((p) => p.id === placementId);
+          if (!placement) {
+            return new Response(null, {
+              status: 303,
+              headers: { location: `/app/link-projects/${id}` },
+            });
+          }
+          return htmlResponse(
+            htmlPage({
+              title: `Edit placement — ${row.label}`,
+              body: appLayout({
+                title: `Edit placement — ${row.label}`,
+                content: renderEditPlacementPage(
+                  data.project,
+                  placement,
+                  data.visibleClients,
+                  null,
+                  [],
+                ),
+                activeNav: "link-projects",
+                user,
+                flash,
+                clients,
+              }),
+              user,
+              flash: null,
+            }),
+          );
+        }
+
+        if (placementSub === "edit" && method === "POST") {
+          const result = await handleEditPlacementPost(request, env, url, user, id, placementId);
+          if (result.response) return result.response;
+          const re = result.rerenderError;
+          if (!re) return new Response("Internal error", { status: 500 });
+          return htmlResponse(
+            htmlPage({
+              title: `Edit placement — ${row.label}`,
+              body: appLayout({
+                title: `Edit placement — ${row.label}`,
+                content: renderEditPlacementPage(
+                  re.project,
+                  re.placement,
+                  re.visibleClients,
+                  re.prefill,
+                  re.errors,
+                ),
+                activeNav: "link-projects",
+                user,
+                flash,
+                clients,
+              }),
+              user,
+              flash: null,
+            }),
+            { status: 400 },
+          );
+        }
+
+        if (placementSub === "delete" && method === "POST") {
+          return handleDeletePlacementPost(request, env, url, user, id, placementId);
+        }
+      }
+
+      if (sub === "edit" && method === "GET") {
+        return htmlResponse(
+          htmlPage({
+            title: `Edit ${row.label} — Edge SEO Platform`,
+            body: appLayout({
+              title: `Edit ${row.label}`,
+              content: renderEditLinkProjectForm(row, null, []),
+              activeNav: "link-projects",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+
+      if (sub === "edit" && method === "POST") {
+        const result = await handleEditLinkProjectPost(request, env, url, user, id);
+        if (result.response) return result.response;
+        return htmlResponse(
+          htmlPage({
+            title: `Edit ${row.label} — Edge SEO Platform`,
+            body: appLayout({
+              title: `Edit ${row.label}`,
+              content: renderEditLinkProjectForm(
+                result.rerenderError?.row ?? row,
+                result.rerenderError?.prefill ?? null,
+                result.rerenderError?.errors ?? ["Unknown error"],
+              ),
+              activeNav: "link-projects",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+          { status: 400 },
+        );
+      }
+
+      if (sub === "status" && method === "POST") {
+        return handleLinkProjectStatusPost(request, env, url, user, id);
+      }
+
+      // Unknown sub-route — fall through to 404 below.
     }
 
     // /app/debug/cf-token — super-admin-only diagnostic. Reports

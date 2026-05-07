@@ -103,6 +103,11 @@ export function canReadFromCache(request: Request, rule: CacheRule): boolean {
  *   5. Bot UA → skip (don't cache bot-shaped variants for humans)
  *   - Bypass cookie present → skip (already not reading either)
  *   - 0-TTL CacheRule → skip
+ *   - content-length: 0 on a 200 → skip. Empty 200 bodies are almost
+ *     always either an aborted upstream stream or a misbehaving origin;
+ *     caching them poisons the URL for the rule's TTL (up to 4 hours)
+ *     and is invisible to operators since CF still reports HIT.
+ *     Observed in production after a redeploy/purge race condition.
  */
 export function canWriteToCache(request: Request, response: Response, rule: CacheRule): boolean {
   if (!canReadFromCache(request, rule)) return false;
@@ -110,6 +115,10 @@ export function canWriteToCache(request: Request, response: Response, rule: Cach
   if (response.headers.getSetCookie().length > 0) return false;
   const ua = request.headers.get("user-agent") ?? "";
   if (BOT_UA_RE.test(ua)) return false;
+  if (response.status === 200) {
+    const contentLength = response.headers.get("content-length");
+    if (contentLength === "0") return false;
+  }
   return true;
 }
 
