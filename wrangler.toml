@@ -53,14 +53,6 @@ workers_dev = true
 pattern = "*.localpage.us.com/*"
 zone_name = "localpage.us.com"
 
-# Second wildcard zone — *.site.localblitz.io. Same model as
-# localpage.us.com: every subdomain matched by the wildcard DNS
-# record is dispatched to this worker. Clients are addressed as
-# <client_id>.site.localblitz.io.
-[[env.staging.routes]]
-pattern = "*.site.localblitz.io/*"
-zone_name = "localblitz.io"
-
 # In-place mode: 404-media.com client. Apex only — WordPress's
 # built-in www → apex redirect handles www traffic before it would
 # reach our worker (since the loader looks up config by Host header
