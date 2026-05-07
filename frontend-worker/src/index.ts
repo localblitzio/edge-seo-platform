@@ -1839,7 +1839,13 @@ export default {
             title: `${row.label} — Edge SEO Platform`,
             body: appLayout({
               title: row.label,
-              content: renderLinkProjectDetail(data.project, data.placements, data.visibleClients),
+              content: renderLinkProjectDetail(
+                data.project,
+                data.placements,
+                data.visibleClients,
+                data.visibleClusters,
+                data.clusterMembers,
+              ),
               activeNav: "link-projects",
               user,
               flash,

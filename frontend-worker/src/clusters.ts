@@ -211,6 +211,37 @@ export async function loadClusterMemberCounts(
   return out;
 }
 
+/**
+ * Load the full set of (cluster_id → client_id[]) members for a list
+ * of clusters in one query. Used by the link-project bulk-apply
+ * "Pre-fill from cluster" picker so the JS can additively check the
+ * member sites without a server round-trip per cluster pick.
+ *
+ * Returned map is dense — every cluster_id in the input gets an
+ * entry, defaulting to [] when the cluster has no members.
+ */
+export async function loadAllClusterMembersByCluster(
+  env: AppEnv,
+  clusterIds: readonly number[],
+): Promise<Map<number, string[]>> {
+  const out = new Map<number, string[]>();
+  for (const id of clusterIds) out.set(id, []);
+  if (clusterIds.length === 0) return out;
+  const placeholders = clusterIds.map(() => "?").join(",");
+  const r = await env.CONFIG_DB.prepare(
+    `SELECT cluster_id, client_id FROM cluster_members
+     WHERE cluster_id IN (${placeholders})
+     ORDER BY cluster_id, client_id`,
+  )
+    .bind(...clusterIds)
+    .all<{ cluster_id: number; client_id: string }>();
+  for (const row of r.results ?? []) {
+    const list = out.get(row.cluster_id);
+    if (list) list.push(row.client_id);
+  }
+  return out;
+}
+
 async function insertCluster(env: AppEnv, ownerId: number, input: ClusterInput): Promise<number> {
   const result = await env.CONFIG_DB.prepare(
     `INSERT INTO clusters (owner_id, type, label, description, status)
