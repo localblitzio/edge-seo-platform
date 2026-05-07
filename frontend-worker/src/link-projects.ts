@@ -358,9 +358,10 @@ export function renderLinkProjectDetail(
   visibleClients: ClientRow[],
 ): string {
   const anchors = parseAnchorOptions(row.anchor_options);
+  const stats = aggregateProjectStats(placements);
   const anchorList =
     anchors.length === 0
-      ? '<span style="color:var(--fg-muted)">No anchor options yet — edit to add some.</span>'
+      ? '<span style="color:var(--fg-muted)">No anchor options yet — edit to add some. With multiple options, the synthesizer rotates across them deterministically per (placement, page-match).</span>'
       : `<ul style="margin:0;padding-left:1.2rem">${anchors.map((a) => `<li class="mono">${esc(a)}</li>`).join("")}</ul>`;
   const statusActions = LINK_PROJECT_STATUSES.filter((s) => s !== row.status)
     .map((s) => {
@@ -382,6 +383,16 @@ export function renderLinkProjectDetail(
       </form>`;
     })
     .join(" ");
+  // Stat-card row, mirroring the client-detail "stats" pattern. Numbers
+  // come from aggregateProjectStats, which is a pure derivation off the
+  // placements list — no extra DB roundtrip.
+  const statCard = (label: string, value: number | string, hint?: string) =>
+    `<div class="stat"><div class="label">${esc(label)}</div><div class="value">${esc(value)}</div>${hint ? `<div class="field-hint" style="margin-top:.2rem">${esc(hint)}</div>` : ""}</div>`;
+  const clientsHint =
+    stats.distinctClients.length === 0
+      ? "no placements yet"
+      : stats.distinctClients.slice(0, 3).join(", ") +
+        (stats.distinctClients.length > 3 ? ` +${stats.distinctClients.length - 3} more` : "");
   return `<div class="crumbs"><a href="/app/link-projects">← Link projects</a></div>
     <h1>${esc(row.label)}</h1>
     <p class="subtitle">${statusPill(row.status)} <span style="color:var(--fg-muted);margin-left:.5rem">id ${row.id} · created ${esc(row.created_at)} · updated ${esc(row.updated_at)}</span></p>
@@ -389,8 +400,19 @@ export function renderLinkProjectDetail(
       <a class="btn btn-primary" href="/app/link-projects/${row.id}/edit">Edit</a>
       ${statusActions}
     </div>
+    <div class="stats">
+      ${statCard("Placements", stats.totalPlacements)}
+      ${statCard("Active", stats.activePlacements, stats.pausedPlacements > 0 ? `${stats.pausedPlacements} paused` : undefined)}
+      ${statCard("Clients reached", stats.distinctClientCount, clientsHint)}
+      ${statCard("Anchor options", anchors.length, anchors.length > 1 ? "rotation enabled" : anchors.length === 1 ? "single anchor (no rotation)" : "none — using target_url")}
+    </div>
     <div class="card">
-      <h2 style="margin-top:0">Target</h2>
+      <h2 style="margin-top:0;display:flex;justify-content:space-between;align-items:center">
+        <span>Target</span>
+        <form method="POST" action="/app/link-projects/${row.id}/check-target" style="margin:0">
+          <button class="btn" type="submit" title="Probe target_url to verify it's still reachable. GETs the URL, follows redirects up to 10 hops, reports the final status.">Check target URL</button>
+        </form>
+      </h2>
       <dl class="kv">
         <dt>target_url</dt><dd><a href="${esc(row.target_url)}" target="_blank" rel="noopener noreferrer">${esc(row.target_url)}</a></dd>
         <dt>status</dt><dd>${statusPill(row.status)}</dd>
@@ -398,7 +420,7 @@ export function renderLinkProjectDetail(
     </div>
     <div class="card">
       <h2 style="margin-top:0">Anchor options</h2>
-      <p class="field-hint" style="font-size:.85rem;color:var(--fg-muted);margin:.2rem 0 .6rem">First entry is the default anchor for any placement that doesn't override it.</p>
+      <p class="field-hint" style="font-size:.85rem;color:var(--fg-muted);margin:.2rem 0 .6rem">When multiple options are set, the synthesizer rotates deterministically per (placement, page-match) so the same URL always shows the same anchor. <code>anchor_override</code> on a placement still pins a specific one.</p>
       ${anchorList}
     </div>
     ${
@@ -406,8 +428,7 @@ export function renderLinkProjectDetail(
         ? `<div class="card"><h2 style="margin-top:0">Notes</h2><p style="white-space:pre-wrap;margin:0">${esc(row.notes)}</p></div>`
         : ""
     }
-    ${renderPlacementsSection(row, placements, visibleClients)}
-    <p class="subtitle" style="font-size:.85rem;margin-top:1.5rem">Worker-side link injection lands in Slice 2B — placements created here become metadata until that ships.</p>`;
+    ${renderPlacementsSection(row, placements, visibleClients)}`;
 }
 
 interface FormPrefill {
@@ -1118,6 +1139,98 @@ function renderPlacementsSection(
       : projectAnchors.length === 1
         ? `Default anchor will be <code>${esc(projectAnchors[0] ?? "")}</code>.`
         : `Anchors rotate across the project's <strong>${projectAnchors.length}</strong> options deterministically (same URL always shows the same anchor; diversity emerges across placements). Set <code>anchor_override</code> on a placement to pin a specific anchor.`;
+  // Bulk apply lives in a collapsed <details> block so it doesn't
+  // clutter the single-add path. The form structure mirrors the single-
+  // add form one section at a time, with a checkbox grid replacing the
+  // single client picker.
+  const placedClients = new Set(placements.map((p) => p.client_id));
+  const bulkClientCheckboxes = visibleClients
+    .map((c) => {
+      const already = placedClients.has(c.client_id);
+      const note = already
+        ? ` <span style="color:var(--fg-muted);font-size:.7rem">(already has placement)</span>`
+        : "";
+      // Pre-check clients that DON'T already have a placement — that's
+      // usually what the operator wants when bulk-applying. They can
+      // still uncheck individuals.
+      const checked = already ? "" : " checked";
+      return `<label class="checkbox-inline" style="display:flex;gap:.4rem;align-items:center">
+        <input type="checkbox" name="client_ids" value="${esc(c.client_id)}"${checked}>
+        <span class="mono" style="font-size:.85rem">${esc(c.client_id)}</span>${note}
+      </label>`;
+    })
+    .join("");
+  const bulkPositionOptions = LINK_PROJECT_PLACEMENT_POSITIONS.map(
+    (p) => `<option value="${esc(p)}"${p === "after" ? " selected" : ""}>${esc(p)}</option>`,
+  ).join("");
+  const bulkStrategyOptions = LINK_PROJECT_PLACEMENT_STRATEGIES.map(
+    (s) => `<option value="${esc(s)}"${s === "footer" ? " selected" : ""}>${esc(s)}</option>`,
+  ).join("");
+  const bulkRelDatalist = REL_PRESETS.map((r) => `<option value="${esc(r)}">`).join("");
+  const bulkSection =
+    visibleClients.length < 2
+      ? "" // single-client owner — no point offering bulk
+      : `<details style="margin-top:1.25rem;background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius);padding:.75rem 1rem">
+          <summary style="cursor:pointer;font-weight:600">Bulk apply — create placements on multiple clients at once</summary>
+          <p class="field-hint" style="margin:.6rem 0 .8rem">Same defaults are applied to every selected client. Clients that already have a placement on this project are listed but unchecked by default — you can still re-add (each becomes its own row, useful for different page_matches).</p>
+          <form class="editor" method="POST" action="/app/link-projects/${project.id}/placements/bulk-new">
+            <div class="form-section">
+              <h2 style="margin-top:0">Clients</h2>
+              <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:.4rem">${bulkClientCheckboxes}</div>
+            </div>
+            <div class="form-section">
+              <h2 style="margin-top:0">Shared defaults</h2>
+              <div class="form-grid">
+                <div>
+                  <label for="bulk_strategy">strategy</label>
+                  <select id="bulk_strategy" name="strategy">${bulkStrategyOptions}</select>
+                </div>
+                <div>
+                  <label for="bulk_status">status</label>
+                  <select id="bulk_status" name="status"><option value="active" selected>active</option><option value="paused">paused</option></select>
+                </div>
+                <div class="full-width">
+                  <label for="bulk_page_match">page_match</label>
+                  <input id="bulk_page_match" name="page_match" type="text" value="^/.*">
+                </div>
+                <div class="full-width bulk-selector-fields" style="display:none">
+                  <label for="bulk_target_selector">target_selector</label>
+                  <input id="bulk_target_selector" name="target_selector" type="text" maxlength="256" placeholder="article p:first-of-type">
+                </div>
+                <div class="bulk-selector-fields" style="display:none">
+                  <label for="bulk_position">position</label>
+                  <select id="bulk_position" name="position">${bulkPositionOptions}</select>
+                </div>
+                <div>
+                  <label for="bulk_rel">rel attribute</label>
+                  <input id="bulk_rel" name="rel_attribute" type="text" list="bulk_rel_presets" value="noopener" maxlength="100">
+                  <datalist id="bulk_rel_presets">${bulkRelDatalist}</datalist>
+                </div>
+                <div class="full-width">
+                  <label for="bulk_anchor_override">anchor_override <span style="color:var(--fg-muted);font-weight:400">(optional — leave blank for rotation)</span></label>
+                  <input id="bulk_anchor_override" name="anchor_override" type="text" maxlength="200" placeholder="leave blank to rotate across the project's anchor_options">
+                </div>
+              </div>
+            </div>
+            <div class="form-actions">
+              <button class="btn btn-primary" type="submit">Create placements</button>
+            </div>
+          </form>
+          <script>
+          (function(){
+            var s = document.getElementById('bulk_strategy');
+            if (!s) return;
+            var fields = document.querySelectorAll('.bulk-selector-fields');
+            function sync(){
+              for (var i = 0; i < fields.length; i++) {
+                fields[i].style.display = s.value === 'selector' ? '' : 'none';
+              }
+            }
+            s.addEventListener('change', sync);
+            sync();
+          })();
+          </script>
+        </details>`;
   return `<div class="card">
     <h2 style="margin-top:0">Placements</h2>
     <p class="field-hint" style="margin:.2rem 0 .8rem">Each placement says "inject a link to <code>${esc(project.target_url)}</code> on this client's pages matching the regex." ${anchorBlurb}</p>
@@ -1130,6 +1243,7 @@ function renderPlacementsSection(
       errors: [],
       isEdit: false,
     })}
+    ${bulkSection}
   </div>`;
 }
 
@@ -1275,6 +1389,133 @@ export async function handleDeletePlacementPost(
   });
 }
 
+/**
+ * POST handler for the "Check target URL" button. Probes target_url,
+ * formats a one-line summary as flash, and redirects back to the
+ * detail page. Result isn't persisted — clicking again re-checks.
+ */
+export async function handleCheckTargetPost(
+  request: Request,
+  env: AppEnv,
+  url: URL,
+  user: User,
+  linkProjectId: number,
+): Promise<Response> {
+  const csrf = checkCsrf(request, url);
+  if (csrf) return csrf;
+  const project = await loadVisibleLinkProject(env, user, linkProjectId);
+  if (!project) return new Response("Not found", { status: 404 });
+  const result = await checkTargetUrl(project.target_url);
+  const summary = formatCheckResult(result, project.target_url);
+  const kind: FlashMessage["kind"] = result.reachable
+    ? "ok"
+    : result.error || result.status >= 400
+      ? "err"
+      : "warn";
+  return flashRedirect(`/app/link-projects/${linkProjectId}`, { text: summary, kind });
+}
+
+/** Format a target-check result as a flash-friendly one-line summary. */
+function formatCheckResult(result: TargetUrlCheckResult, requestedUrl: string): string {
+  if (result.error) {
+    return `Target check failed: ${result.error} (${result.durationMs}ms)`;
+  }
+  const ms = result.durationMs;
+  const hops = result.redirectCount;
+  const hopSuffix =
+    hops === 0 ? "" : ` after ${hops} redirect${hops === 1 ? "" : "s"} → ${result.finalUrl}`;
+  if (result.reachable) {
+    return `Target check: ${result.status} OK${hopSuffix} (${ms}ms)`;
+  }
+  return `Target check: HTTP ${result.status}${hopSuffix} — not 2xx (${ms}ms, requested ${requestedUrl})`;
+}
+
+/**
+ * POST handler for bulk-apply. Validates shared fields, then iterates
+ * over the selected client_ids creating one placement per client. KV
+ * compile + cache purge run once per affected client at the end.
+ *
+ * Skips clients that already have a placement on this project with the
+ * SAME page_match — adding the same placement twice would be a no-op
+ * at injection time but creates clutter in the table. Different
+ * page_match is fine (the operator might want one placement on the
+ * homepage and another on /blog/.*).
+ */
+export async function handleBulkPlacementPost(
+  request: Request,
+  env: AppEnv,
+  url: URL,
+  user: User,
+  linkProjectId: number,
+): Promise<Response> {
+  const csrf = checkCsrf(request, url);
+  if (csrf) return csrf;
+  const project = await loadVisibleLinkProject(env, user, linkProjectId);
+  if (!project) return new Response("Not found", { status: 404 });
+  const form = await request.formData();
+  const raw: Record<string, string> = {};
+  const selectedClientIds: string[] = [];
+  for (const [k, v] of form.entries()) {
+    if (typeof v !== "string") continue;
+    if (k === "client_ids") {
+      selectedClientIds.push(v);
+    } else {
+      raw[k] = v;
+    }
+  }
+  const visibleClients = await loadVisibleClients(env, user);
+  const validIds = new Set(visibleClients.map((c) => c.client_id));
+  const validation = validateBulkPlacementInput(raw, selectedClientIds, validIds);
+  if (!validation.ok) {
+    return flashRedirect(`/app/link-projects/${linkProjectId}`, {
+      text: `Bulk apply failed: ${validation.errors.join("; ")}`,
+      kind: "err",
+    });
+  }
+  // Skip client+page_match pairs that already exist (idempotent re-apply
+  // friendly). Lookup is one query against the in-memory placements list
+  // since we just loaded it would be cleaner — but bulk apply is rare,
+  // so a small targeted query is fine.
+  const existing = await env.CONFIG_DB.prepare(
+    "SELECT client_id FROM link_project_placements WHERE link_project_id = ? AND page_match = ?",
+  )
+    .bind(linkProjectId, validation.value.page_match)
+    .all<{ client_id: string }>();
+  const skipSet = new Set((existing.results ?? []).map((r) => r.client_id));
+  const toCreate = validation.value.client_ids.filter((c) => !skipSet.has(c));
+  if (toCreate.length === 0) {
+    return flashRedirect(`/app/link-projects/${linkProjectId}`, {
+      text: `No new placements created — every selected client already has a placement on this project for page_match "${validation.value.page_match}".`,
+      kind: "warn",
+    });
+  }
+  // Sequential inserts keep autoincrement IDs predictable in the
+  // audit log and avoid hammering D1 with parallel writes for what's
+  // typically a small N (<20 clients). KV compile happens once per
+  // client AFTER all inserts complete.
+  for (const clientId of toCreate) {
+    await insertPlacement(env, linkProjectId, {
+      client_id: clientId,
+      page_match: validation.value.page_match,
+      strategy: validation.value.strategy,
+      target_selector: validation.value.target_selector,
+      position: validation.value.position,
+      anchor_override: validation.value.anchor_override,
+      rel_attribute: validation.value.rel_attribute,
+      status: validation.value.status,
+    });
+  }
+  await invalidateAfterPlacementChange(env, toCreate);
+  const skippedNote =
+    skipSet.size > 0
+      ? ` (skipped ${skipSet.size} clients that already had a placement for that page_match)`
+      : "";
+  return flashRedirect(`/app/link-projects/${linkProjectId}`, {
+    text: `Created ${toCreate.length} placement${toCreate.length === 1 ? "" : "s"}: ${toCreate.join(", ")}${skippedNote}.`,
+    kind: "ok",
+  });
+}
+
 /** Loader used by the detail-page route — convenience wrapper. */
 export async function loadProjectPageData(
   env: AppEnv,
@@ -1292,6 +1533,218 @@ export async function loadProjectPageData(
     loadVisibleClients(env, user),
   ]);
   return { project, placements, visibleClients };
+}
+
+/* ─── Slice 4: reporting + broken-link check + bulk apply ─── */
+
+export interface ProjectStats {
+  totalPlacements: number;
+  activePlacements: number;
+  pausedPlacements: number;
+  /** Distinct client_ids appearing in placements (regardless of status). */
+  distinctClientCount: number;
+  /** Same set, as a sorted list — handy for the UI summary. */
+  distinctClients: string[];
+}
+
+/**
+ * Aggregate placement stats for a project. Pure derivation from the
+ * placements list, kept as a separate function so the detail-page
+ * route can compute it without re-querying D1 and so unit tests can
+ * exercise it directly.
+ */
+export function aggregateProjectStats(
+  placements: readonly LinkProjectPlacementRow[],
+): ProjectStats {
+  let active = 0;
+  let paused = 0;
+  const clients = new Set<string>();
+  for (const p of placements) {
+    clients.add(p.client_id);
+    if (p.status === "active") active += 1;
+    else if (p.status === "paused") paused += 1;
+  }
+  return {
+    totalPlacements: placements.length,
+    activePlacements: active,
+    pausedPlacements: paused,
+    distinctClientCount: clients.size,
+    distinctClients: Array.from(clients).sort(),
+  };
+}
+
+export interface TargetUrlCheckResult {
+  /** Final HTTP status after redirects, or 0 on network error. */
+  status: number;
+  /** True when status is 2xx and the redirect chain didn't loop. */
+  reachable: boolean;
+  /** Final URL after following redirects (== requested URL when no redirect). */
+  finalUrl: string;
+  /** Hop count (excludes the first request). 0 on direct hit. */
+  redirectCount: number;
+  /** Set when fetch threw or timed out. */
+  error: string | null;
+  /** Wall-clock duration in ms. */
+  durationMs: number;
+}
+
+const TARGET_CHECK_TIMEOUT_MS = 8_000;
+const TARGET_CHECK_MAX_REDIRECTS = 10;
+
+/**
+ * Probe the project's target URL to see if it's still reachable.
+ *
+ * Uses GET (not HEAD) because many CDNs and origins return 405 / 403
+ * for HEAD even when the resource is fine on GET. Follows redirects
+ * up to TARGET_CHECK_MAX_REDIRECTS hops, recording the final URL and
+ * hop count so the operator can see "redirects to https://other.com".
+ *
+ * Bounded by TARGET_CHECK_TIMEOUT_MS via AbortController so a slow
+ * origin can't pin a worker request. The handler treats a timeout as
+ * `reachable: false, error: "timeout"` rather than throwing.
+ *
+ * NOT cached — the operator clicks the button when they want a fresh
+ * check, and the result is shown via flash on the next page render.
+ */
+export async function checkTargetUrl(targetUrl: string): Promise<TargetUrlCheckResult> {
+  const start = Date.now();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TARGET_CHECK_TIMEOUT_MS);
+  try {
+    let currentUrl = targetUrl;
+    let redirectCount = 0;
+    let lastResponse: Response | null = null;
+    // Manual redirect loop so we can count hops + detect cycles. Native
+    // `redirect: 'follow'` doesn't expose the chain.
+    const visited = new Set<string>([currentUrl]);
+    while (redirectCount <= TARGET_CHECK_MAX_REDIRECTS) {
+      const resp = await fetch(currentUrl, {
+        method: "GET",
+        redirect: "manual",
+        signal: controller.signal,
+        headers: {
+          // Identify the worker so origin operators can recognise the
+          // probe in their logs (some block unknown bots aggressively).
+          "user-agent": "EdgeSEO-Platform/link-project-target-check (+https://edgeseo.app)",
+        },
+      });
+      lastResponse = resp;
+      if (resp.status >= 300 && resp.status < 400) {
+        const loc = resp.headers.get("location");
+        if (!loc) break; // 3xx without Location — treat as terminal.
+        const next = new URL(loc, currentUrl).toString();
+        if (visited.has(next)) {
+          // Redirect loop. Stop and report the loop status verbatim.
+          break;
+        }
+        visited.add(next);
+        currentUrl = next;
+        redirectCount += 1;
+        continue;
+      }
+      break;
+    }
+    clearTimeout(timer);
+    const status = lastResponse?.status ?? 0;
+    return {
+      status,
+      reachable: status >= 200 && status < 300,
+      finalUrl: currentUrl,
+      redirectCount,
+      error: null,
+      durationMs: Date.now() - start,
+    };
+  } catch (e) {
+    clearTimeout(timer);
+    const message =
+      e instanceof Error ? (e.name === "AbortError" ? "timeout" : e.message) : "unknown error";
+    return {
+      status: 0,
+      reachable: false,
+      finalUrl: targetUrl,
+      redirectCount: 0,
+      error: message,
+      durationMs: Date.now() - start,
+    };
+  }
+}
+
+export interface BulkPlacementInput {
+  /** client_ids to create placements on. Validated against owner's visible set. */
+  client_ids: string[];
+  /** Shared defaults applied to every new placement. */
+  page_match: string;
+  strategy: LinkProjectPlacementStrategy;
+  target_selector: string | null;
+  position: LinkProjectPlacementPosition | null;
+  anchor_override: string | null;
+  rel_attribute: string;
+  status: LinkProjectPlacementStatus;
+}
+
+/**
+ * Validate raw form input for the bulk-apply submission.
+ *
+ * The shared fields go through the same validation as the single-add
+ * path (target_selector + position required when strategy=selector,
+ * regex compile-check on page_match, etc.) — we just iterate the
+ * checked client_ids on top.
+ *
+ * `selectedClientIds` is whatever the form submitted under the
+ * `client_ids[]` (or `client_id` repeated) name. We dedupe + filter
+ * against `validClientIds` to keep super-admins from accidentally
+ * targeting orphaned client rows.
+ */
+export function validateBulkPlacementInput(
+  raw: Record<string, string | string[]>,
+  selectedClientIds: readonly string[],
+  validClientIds: ReadonlySet<string>,
+): { ok: true; value: BulkPlacementInput } | { ok: false; errors: string[] } {
+  const errors: string[] = [];
+
+  // Filter + dedupe the selected client list.
+  const dedupe = new Set<string>();
+  for (const id of selectedClientIds) {
+    const trimmed = id.trim();
+    if (trimmed.length === 0) continue;
+    if (!validClientIds.has(trimmed)) continue;
+    dedupe.add(trimmed);
+  }
+  const clientIds = Array.from(dedupe);
+  if (clientIds.length === 0) {
+    errors.push("Pick at least one client to apply this placement to");
+  }
+
+  // Run the shared-field validation by reusing the single-input
+  // validator with a dummy client_id (so the client_id check passes).
+  // The single validator's client_id is then ignored — we use clientIds
+  // above as the authoritative list.
+  const dummyRaw: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (typeof v === "string") dummyRaw[k] = v;
+  }
+  // Inject any first valid client_id so the visibility check passes.
+  // `clientIds[0]` is guaranteed valid since we filtered against validClientIds.
+  dummyRaw.client_id = clientIds[0] ?? Array.from(validClientIds)[0] ?? "x";
+  const single = validateLinkProjectPlacementInput(dummyRaw, validClientIds);
+  if (!single.ok) {
+    errors.push(...single.errors);
+  }
+
+  if (errors.length > 0 || !single.ok) return { ok: false, errors };
+  return {
+    ok: true,
+    value: {
+      client_ids: clientIds,
+      page_match: single.value.page_match,
+      strategy: single.value.strategy,
+      target_selector: single.value.target_selector,
+      position: single.value.position,
+      anchor_override: single.value.anchor_override,
+      rel_attribute: single.value.rel_attribute,
+      status: single.value.status,
+    },
+  };
 }
 
 /* ─── Slice 2B: KV compile + worker pipeline integration ─── */

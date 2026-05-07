@@ -7,9 +7,11 @@ import {
   LINK_PROJECT_STATUSES,
   type LinkProjectPlacementRow,
   type LinkProjectRow,
+  aggregateProjectStats,
   parseAnchorOptions,
   pickAnchor,
   synthesizePlacement,
+  validateBulkPlacementInput,
   validateLinkProjectInput,
   validateLinkProjectPlacementInput,
 } from "../../../frontend-worker/src/link-projects.js";
@@ -645,5 +647,110 @@ describe("validateLinkProjectPlacementInput — selector strategy (Slice 3)", ()
     );
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.errors.some((e) => /target_selector/.test(e))).toBe(true);
+  });
+});
+
+describe("aggregateProjectStats (Slice 4)", () => {
+  it("returns zeros for an empty placement list", () => {
+    const stats = aggregateProjectStats([]);
+    expect(stats.totalPlacements).toBe(0);
+    expect(stats.activePlacements).toBe(0);
+    expect(stats.pausedPlacements).toBe(0);
+    expect(stats.distinctClientCount).toBe(0);
+    expect(stats.distinctClients).toEqual([]);
+  });
+
+  it("counts active vs paused separately", () => {
+    const placements = [
+      makePlacement({ id: 1, client_id: "a", status: "active" }),
+      makePlacement({ id: 2, client_id: "b", status: "active" }),
+      makePlacement({ id: 3, client_id: "c", status: "paused" }),
+    ];
+    const stats = aggregateProjectStats(placements);
+    expect(stats.totalPlacements).toBe(3);
+    expect(stats.activePlacements).toBe(2);
+    expect(stats.pausedPlacements).toBe(1);
+  });
+
+  it("dedupes client_ids when one client has multiple placements", () => {
+    const placements = [
+      makePlacement({ id: 1, client_id: "acme", page_match: "^/$" }),
+      makePlacement({ id: 2, client_id: "acme", page_match: "^/blog/.*" }),
+      makePlacement({ id: 3, client_id: "other" }),
+    ];
+    const stats = aggregateProjectStats(placements);
+    expect(stats.totalPlacements).toBe(3);
+    expect(stats.distinctClientCount).toBe(2);
+    expect(stats.distinctClients).toEqual(["acme", "other"]);
+  });
+
+  it("returns distinctClients sorted", () => {
+    const placements = [
+      makePlacement({ id: 1, client_id: "zulu" }),
+      makePlacement({ id: 2, client_id: "alpha" }),
+      makePlacement({ id: 3, client_id: "mike" }),
+    ];
+    const stats = aggregateProjectStats(placements);
+    expect(stats.distinctClients).toEqual(["alpha", "mike", "zulu"]);
+  });
+});
+
+describe("validateBulkPlacementInput (Slice 4)", () => {
+  it("accepts a minimal valid bulk submission with multiple clients", () => {
+    const r = validateBulkPlacementInput({}, ["acme", "lantern-crest"], VALID_CLIENTS);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.value.client_ids).toEqual(["acme", "lantern-crest"]);
+      expect(r.value.strategy).toBe("footer");
+      expect(r.value.page_match).toBe("^/.*");
+      expect(r.value.status).toBe("active");
+    }
+  });
+
+  it("rejects when no clients are selected", () => {
+    const r = validateBulkPlacementInput({}, [], VALID_CLIENTS);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors.some((e) => /at least one client/i.test(e))).toBe(true);
+  });
+
+  it("filters out client_ids the operator can't see", () => {
+    const r = validateBulkPlacementInput(
+      {},
+      ["acme", "someone-elses-client", "404-media"],
+      VALID_CLIENTS,
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.client_ids).toEqual(["acme", "404-media"]);
+  });
+
+  it("dedupes duplicate client_ids in the form submission", () => {
+    const r = validateBulkPlacementInput(
+      {},
+      ["acme", "acme", "lantern-crest", "acme"],
+      VALID_CLIENTS,
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.client_ids).toEqual(["acme", "lantern-crest"]);
+  });
+
+  it("propagates shared-field validation errors (e.g. invalid regex)", () => {
+    const r = validateBulkPlacementInput({ page_match: "(unclosed" }, ["acme"], VALID_CLIENTS);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors.some((e) => /regex/i.test(e))).toBe(true);
+  });
+
+  it("requires target_selector + position when strategy=selector", () => {
+    const r = validateBulkPlacementInput({ strategy: "selector" }, ["acme"], VALID_CLIENTS);
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.errors.some((e) => /target_selector/.test(e))).toBe(true);
+      expect(r.errors.some((e) => /position/.test(e))).toBe(true);
+    }
+  });
+
+  it("rejects when ALL selected client_ids fail the visibility check (none remain)", () => {
+    const r = validateBulkPlacementInput({}, ["unknown-1", "unknown-2"], VALID_CLIENTS);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors.some((e) => /at least one client/i.test(e))).toBe(true);
   });
 });

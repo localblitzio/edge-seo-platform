@@ -86,6 +86,8 @@ import {
 import { type EmailBinding, resetPasswordMessage, sendEmail } from "./email.js";
 import { inspectSourcePage } from "./inspector.js";
 import {
+  handleBulkPlacementPost,
+  handleCheckTargetPost,
   handleDeletePlacementPost,
   handleEditLinkProjectPost,
   handleEditPlacementPost,
@@ -1533,6 +1535,14 @@ export default {
 
       if (sub === "placements/new" && method === "POST") {
         return handleNewPlacementPost(request, env, url, user, id);
+      }
+
+      if (sub === "placements/bulk-new" && method === "POST") {
+        return handleBulkPlacementPost(request, env, url, user, id);
+      }
+
+      if (sub === "check-target" && method === "POST") {
+        return handleCheckTargetPost(request, env, url, user, id);
       }
 
       // /app/link-projects/:id/placements/:pid/edit and /delete
