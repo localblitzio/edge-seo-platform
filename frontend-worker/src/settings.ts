@@ -30,9 +30,9 @@ import {
   type TestResult,
   testGscServiceAccount,
   testIndexNowKey,
+  testOmegaIndexerKey,
   testPrimeIndexerKey,
   testSinbyteKey,
-  testStubIndexerKey,
 } from "../../src/secrets/tester.js";
 
 export type SettingsEnv = AppEnv;
@@ -254,8 +254,10 @@ async function runTest(
     }
     case "GSC_SERVICE_ACCOUNT_JSON":
       return testGscServiceAccount(value);
-    case "OMEGA_INDEXER_KEY":
-      return testStubIndexerKey(value, "Omega Indexer");
+    case "OMEGA_INDEXER_KEY": {
+      const host = await pickIndexNowTestHost(env, user);
+      return testOmegaIndexerKey(value, host ?? "");
+    }
     case "SINBYTE_API_KEY": {
       const host = await pickIndexNowTestHost(env, user);
       return testSinbyteKey(value, host ?? "");

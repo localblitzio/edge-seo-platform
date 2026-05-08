@@ -18,6 +18,7 @@
  */
 
 import { pingIndexNow } from "../sitemap/indexnow.js";
+import { pingOmegaIndexer } from "../sitemap/omega-indexer.js";
 import { pingPrimeIndexer } from "../sitemap/prime-indexer.js";
 import { pingSinbyte } from "../sitemap/sinbyte.js";
 
@@ -52,6 +53,13 @@ export interface IndexerEntry {
   slotKey: string;
   /** Short label for the UI button ("Submit to IndexNow"). */
   label: string;
+  /**
+   * Brand-ish background colour for the per-indexer Submit button on
+   * the Indexing page. Each integration gets a distinct hue so
+   * operators can tell at a glance which service a button targets.
+   * Use a colour with WCAG-AA contrast against white text (#fff).
+   */
+  color: string;
   /** Live submit. */
   submit: IndexerPing;
 }
@@ -60,6 +68,7 @@ export const ACTIVE_INDEXERS: readonly IndexerEntry[] = [
   {
     slotKey: "INDEXNOW_KEY",
     label: "IndexNow",
+    color: "#2563eb", // blue — Microsoft/Bing-ish
     submit: async (key, urls, ctx) => {
       const r = await pingIndexNow(ctx.proxyDomain, key, urls);
       return {
@@ -77,6 +86,7 @@ export const ACTIVE_INDEXERS: readonly IndexerEntry[] = [
   {
     slotKey: "PRIME_INDEXER_KEY",
     label: "Prime Indexer",
+    color: "#ea580c", // orange — distinct from the blue accent
     submit: async (key, urls, ctx) => {
       const projectName = `${ctx.proxyDomain} ${new Date().toISOString()}`;
       const r = await pingPrimeIndexer(key, urls, projectName);
@@ -95,6 +105,7 @@ export const ACTIVE_INDEXERS: readonly IndexerEntry[] = [
   {
     slotKey: "SINBYTE_API_KEY",
     label: "Sinbyte",
+    color: "#0d9488", // teal
     submit: async (key, urls, ctx) => {
       const batchName = `${ctx.proxyDomain} ${new Date().toISOString()}`;
       const r = await pingSinbyte(key, urls, batchName);
@@ -110,9 +121,93 @@ export const ACTIVE_INDEXERS: readonly IndexerEntry[] = [
       };
     },
   },
+  {
+    slotKey: "OMEGA_INDEXER_KEY",
+    label: "Omega Indexer",
+    color: "#7c3aed", // purple
+    submit: async (key, urls, ctx) => {
+      const campaignName = `${ctx.proxyDomain} ${new Date().toISOString()}`;
+      const r = await pingOmegaIndexer(key, urls, campaignName);
+      return {
+        ok: r.failed === 0 && r.ok > 0,
+        submitted: r.submitted,
+        successes: r.ok,
+        failures: r.failed,
+        message:
+          r.failed === 0
+            ? `Omega Indexer: submitted ${r.ok} campaign${r.ok === 1 ? "" : "s"} with ${urls.length} URL${urls.length === 1 ? "" : "s"}.`
+            : `Omega Indexer: ${r.failed}/${r.submitted} campaign${r.submitted === 1 ? "" : "s"} failed to submit.`,
+      };
+    },
+  },
 ];
 
 /** Look up an indexer entry by slot key. Returns undefined when not registered. */
 export function findIndexer(slotKey: string): IndexerEntry | undefined {
   return ACTIVE_INDEXERS.find((i) => i.slotKey === slotKey);
+}
+
+/** Per-indexer outcome — pairs the registry entry with the submit result. */
+export interface ConfiguredIndexerResult {
+  slotKey: string;
+  label: string;
+  result: IndexerSubmitResult;
+}
+
+/**
+ * Fan out a URL list to every active indexer whose secret is bound,
+ * in parallel. Returns one result per indexer that ran (skipped
+ * indexers with unbound keys). Never throws — each submission is
+ * independent and any error is captured in its `result.message`.
+ *
+ * Used by both the save-time auto-ping (`maybePingIndexers` in
+ * app.ts, fire-and-forget — caller ignores results) AND the manual
+ * "Reindex now" button on the Indexing page (renders results to the
+ * operator).
+ */
+export async function pingAllConfiguredIndexers(
+  env: {
+    CONFIG_KV: import("@cloudflare/workers-types").KVNamespace;
+    CONFIG_DB: import("@cloudflare/workers-types").D1Database;
+  },
+  urls: readonly string[],
+  context: { proxyDomain: string },
+): Promise<ConfiguredIndexerResult[]> {
+  // Lazy import to avoid a circular dep with src/secrets/store.ts
+  // (the store imports from sitemap modules transitively).
+  const { getSecret } = await import("./store.js");
+  const sharedEnv = env as unknown as Parameters<typeof getSecret>[0];
+  const keys = await Promise.all(ACTIVE_INDEXERS.map((i) => getSecret(sharedEnv, i.slotKey)));
+  const tasks: Promise<ConfiguredIndexerResult | null>[] = [];
+  for (let i = 0; i < ACTIVE_INDEXERS.length; i++) {
+    const indexer = ACTIVE_INDEXERS[i];
+    const key = keys[i];
+    if (!indexer || !key) continue;
+    tasks.push(
+      indexer
+        .submit(key, urls, context)
+        .then(
+          (result): ConfiguredIndexerResult => ({
+            slotKey: indexer.slotKey,
+            label: indexer.label,
+            result,
+          }),
+        )
+        .catch(
+          (e): ConfiguredIndexerResult => ({
+            slotKey: indexer.slotKey,
+            label: indexer.label,
+            result: {
+              ok: false,
+              submitted: 0,
+              successes: 0,
+              failures: 0,
+              message: `${indexer.label}: threw — ${e instanceof Error ? e.message : String(e)}`,
+            },
+          }),
+        ),
+    );
+  }
+  const settled = await Promise.all(tasks);
+  return settled.filter((r): r is ConfiguredIndexerResult => r !== null);
 }

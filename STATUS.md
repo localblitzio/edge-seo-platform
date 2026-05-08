@@ -4,7 +4,11 @@
 **Phase:** 1 (foundation) shipped + Phase 2 (admin editor) shipped + Phases A–E
 of the frontend-worker rewrite shipped + Link Projects (Slices 1–4) shipped +
 Clusters (Slices A–C) shipped + bulk-create + Sites page filters + the
-Clients → Proxied sites rename.
+Clients → Proxied sites rename + **Settings → API keys (D1-backed secret store)
++ four indexer integrations (IndexNow, Prime Indexer, Sinbyte, Omega Indexer)
++ per-site Indexing page with diagnostics, Reindex-now, and live HTTP probe +
+upstream sitemap ingestion + StoryBrand homepage rewrite + new wordmark logo +
+favicon**.
 **Production:** not yet — all live infrastructure is staging.
 
 This file is your at-a-glance "where are we" reminder. [CHANGELOG.md](CHANGELOG.md)
@@ -35,8 +39,13 @@ context for the next coding session; this is the operator's pinboard.
 
 **Worker secrets** (set via `wrangler secret put`):
 - `CF_API_TOKEN` — used by auto-onboarding + cache-purge buttons + link-project HTTP cache invalidation + cluster cross-link invalidation. Scope: All zones from the account, with Workers Scripts/KV/Routes:Edit, DNS:Edit, Cache Purge:Purge.
-- `INDEXNOW_KEY` — bound, IndexNow integration not yet wired
-- `GSC_SERVICE_ACCOUNT_JSON` — bound, GSC integration not yet wired
+- *(legacy fallback)* `INDEXNOW_KEY`, `GSC_SERVICE_ACCOUNT_JSON` — preferred storage is now D1-backed (see "Operator-managed secrets" below).
+
+**Operator-managed secrets** (D1-backed, edited via [Settings → API keys](https://edgeseo.app/app/settings/api-keys), super-admin only):
+- `secrets` D1 table (migration 0008), KV-cached at `secret:<KEY>` (60s TTL)
+- Read order: KV → D1 → env fallback (so existing Worker secrets keep working)
+- Slots: `INDEXNOW_KEY`, `PRIME_INDEXER_KEY`, `SINBYTE_API_KEY`, `OMEGA_INDEXER_KEY`, `GSC_SERVICE_ACCOUNT_JSON`
+- Each slot has a **Test** button — Prime uses a free `/balance` read; IndexNow / Sinbyte / Omega submit one URL (costs 1 entry); GSC is shape-only (integration deferred)
 
 ---
 
@@ -92,6 +101,8 @@ UI calls these "Proxied sites." DB column stays `client_id` (FK on many tables) 
 | Inspector (find CSS selectors on the source) | Form section on the site edit page → "Inspect page on source" |
 | Audit log | https://edgeseo.app/app/audit |
 | Purge a site's cache (KV + CF HTTP) | "Purge cache" button on the site detail page |
+| **API keys** (IndexNow / Prime / Sinbyte / Omega / GSC) | https://edgeseo.app/app/settings/api-keys (super-admin) |
+| **Indexing**: per-site URL diagnostics, per-indexer Submit, Reindex-now, live HTTP Probe | "Indexing" button on a site detail page → `/app/clients/:id/indexing` |
 
 ---
 
@@ -145,6 +156,8 @@ KV keyspace (everything in CONFIG_KV):
 - `config:<client_id>` → JSON `ClientConfig` (the operator-defined config)
 - `placements:<client_id>` → JSON `{ compiled_at, content_injections[] }` (link-project placements; written by frontend-worker on placement / project edits)
 - `cluster_links:<client_id>` → JSON `{ compiled_at, content_injections[] }` (cluster cross-linking; written on cluster edit when `cross_link_enabled=1`)
+- `secret:<KEY>` → string (operator-managed API keys; 60s TTL; backed by D1 `secrets` table)
+- `upstream_sitemap:<client_id>` → JSON `{ urls, fetched_at }` (1h TTL; written by proxy worker on `/sitemap.xml` request when `ingest_upstream_sitemap: true`)
 
 Both `placements:*` and `cluster_links:*` use the same envelope shape and merge into `config.content_injections` in the loader. Order: operator rules → placement rules → cluster-link rules.
 
@@ -188,10 +201,18 @@ All milestones from `docs/tech-spec.md` §15:
 - **Bulk-create proxied sites** — two-step paste-URLs flow that turns 1–100 source URLs into proxied sites in one go (subdomain_proxy mode, single zone + single batch attestation, optional cluster auto-assignment)
 - **Sites page filters** — search + status + zone + cluster filters with client-side JS, "N of M sites" live counter, scales the page to 100s of sites
 - **Clients → Proxied sites rename** — UI terminology cleanup; per-site sidebar sub-list dropped (couldn't scale past ~25 sites and the new filter card replaced it)
+- **Per-site `/sitemap.xml` + `/<key>.txt` IndexNow verification** — proxy worker auto-serves both on every proxy domain
+- **Settings → API keys** — D1-backed secret store with KV cache + env fallback, super-admin-only, per-slot Test buttons (real where APIs allow, shape-check otherwise)
+- **Four indexer integrations end-to-end** — IndexNow (free), Prime Indexer (`x-api-key` header, `/balance` test), Sinbyte (`apikey` body field, plugin-source contract), Omega Indexer (form-encoded body, `|`-separated URLs). All four auto-fire on save via the indexer registry; all four appear as colour-coded Submit buttons on the per-site Indexing page when bound.
+- **Per-site Indexing page** — diagnostic table (path / source / canonical / robots / verdict), three-state Select-all, blocked-row override, **Reindex now** button (fan-out to all configured indexers), per-row **Probe** button (live HTTP fetch through proxy → status / title / meta description / canonical / robots / X-Robots-Tag rendered inline)
+- **`seed_paths` config field** — operator-pinned URLs that flow into `/sitemap.xml` + IndexNow auto-ping; bypasses the default-origin canonical filter (explicit canonical rules still win)
+- **Upstream sitemap ingestion** — `ingest_upstream_sitemap: true` makes the proxy worker fetch the origin's sitemap, host-rewrite each URL, merge with operator-pinned URLs in `/sitemap.xml`. KV-cached 1h, sitemap-index follow one level deep (capped at 50 children, 50k URLs), foreign URLs dropped.
+- **StoryBrand homepage** — landing copy at edgeseo.app rewritten with hero/problem/guide/plan/stakes/success structure
+- **New wordmark logo + favicon** — transparent backgrounds, sized for visibility (4.9rem topbar height), favicon for tab + auth-card icon
 
 ### Test surface
 
-**577 unit tests passing** repo-wide. Coverage targets met on the high-risk modules:
+**742 unit tests passing** repo-wide. Coverage targets met on the high-risk modules:
 - `src/config/`: 100% statements / branches / functions / lines (incl. loader's `placements` + `cluster_links` merge paths)
 - `src/redirects/`: 100% / 100% / 100% / 97%
 - `src/canonical/`: 100% / 100% / 100% / 94%
@@ -199,6 +220,8 @@ All milestones from `docs/tech-spec.md` §15:
 - `frontend-worker/src/link-projects.ts`: comprehensive (validation, synthesizer, rotation, stats, bulk validation)
 - `frontend-worker/src/clusters.ts`: validation + member-list + cross-link synthesizer
 - `frontend-worker/src/bulk-clients.ts`: URL parsing, hostname extraction, client_id derivation, conflict resolution, validation, config build
+- `src/secrets/`: store (KV/D1/env precedence + write-through + delete + rejecting unknown slots), tester (every active slot's tester)
+- `src/sitemap/`: generator (operator-pinned + seed_paths + filters), diagnostics (per-path verdict + reason), upstream (extract / index follow / host rewrite / KV cache), indexnow (chunking + verification path matching), prime-indexer (balance + chunked submit), sinbyte (form-encoded body shape), omega-indexer (form-encoded `|`-separated URLs)
 
 ### Live verified end-to-end
 
@@ -217,10 +240,11 @@ All milestones from `docs/tech-spec.md` §15:
 3. **Integration test runner unstable on Windows.** `tests/integration/pipeline.test.ts` has 15 §12.2 scenarios written, but `@cloudflare/vitest-pool-workers` on wrangler 3.114 hangs mid-suite. Unit tests cover the same logic. Re-attempt after wrangler 4 + vitest-pool-workers upgrade.
 4. **Phase F not started.** `/admin/users` super-admin CRUD (invite / edit / delete / force-reset) is the next planned phase per [HANDOFF.md](HANDOFF.md).
 5. **Phase G not started.** `edge-seo-admin` worker is legacy + slated for deletion once /app/* parity confirmed.
-6. **IndexNow + sitemap generation not wired.** Secrets bound, code skeleton in `src/sitemap/`, no implementation.
+6. **GSC integration deferred (PRD §7.8).** Slot exists in Settings → API keys, JSON shape is validated, but no live OAuth / URL Inspection API submission yet. Real Google indexing requires this.
 7. **mTLS origin auth has a code path** but the per-client cert binding workflow isn't documented end-to-end.
 8. **Form submissions** — D1 table exists, no read/write code in the worker.
 9. **CI `deploy-production` job fails on every main push** — there's no production env yet. Easy fix in a small PR — guard behind a `workflow_dispatch` input or environment label. Mentioned in earlier handoff but unaddressed.
+10. **CI `CLOUDFLARE_API_TOKEN` GitHub-secret is missing D1:Edit scope.** Causes `db:migrate:staging` and `db:migrate:production` jobs to fail with "Authentication error 10000" on every main push. Workaround: apply migrations manually via the MCP D1 tool (or `wrangler d1 migrations apply` from a machine with proper auth). Real fix: add D1:Edit + D1 query permission to the existing GitHub Secret token.
 
 ---
 
@@ -231,7 +255,8 @@ Pick any.
 | Option | Why | Effort |
 | --- | --- | --- |
 | **Phase F — super-admin user CRUD** | Already in HANDOFF.md as planned next. Lets others admin sites — foundational for agency tooling. | ~2 hr |
-| **SEO operational tools — IndexNow + sitemap generation** | Highest direct SEO value. Pings search engines on content changes; generates sitemaps from per-client routing config. Secrets already bound. | ~4 hr |
+| **GSC service-account integration** | Biggest impact on actual Google indexing (IndexNow doesn't reach Google). Slot already exists; need OAuth/JWT auth + URL Inspection API + per-site GSC property verification. | ~6 hr |
+| **Fix CI `CLOUDFLARE_API_TOKEN` D1 scope** | One-line GitHub Secret update. Unblocks auto-migrate-on-merge so future migrations don't need MCP/manual intervention. | ~10 min |
 | **Production deploy** | First paying customer trigger. Needs new CF resources, secrets, DNS. | ~4 hr |
 | **Operational dashboards** | Read Workers Analytics Engine: p95 latency, error rate, cache hit ratio per site. PRD §10. | ~3 hr |
 | **Cluster Slice D — reporting** | Combined stats across cluster members (placement counts, traffic, broken-link health). Lower priority than B but rounds out the cluster product. | ~2 hr |
@@ -259,7 +284,8 @@ src/
   attestation/                     ← D1 attestation recorder
   cache/                           ← Response cache + §9.1 invariants (incl. 0-byte poison guard)
   indexation/                      ← X-Robots-Tag header
-  sitemap/                         ← Skeleton (not yet built)
+  sitemap/                         ← Operator-pinned + seed_paths sitemap, upstream ingestion, IndexNow + Prime + Sinbyte + Omega clients, per-path diagnostics, live URL probe
+  secrets/                         ← D1-backed secret store, slot definitions, per-slot testers, indexer registry (auto-fan-out helper)
   lib/                             ← Errors, headers
   observability/                   ← Logger, metrics, log shipper
 frontend-worker/                   ← edgeseo.app worker
@@ -275,6 +301,9 @@ frontend-worker/                   ← edgeseo.app worker
   src/zip-extractor.ts             ← Static-site ZIP upload
   src/list-editor-js.ts            ← Client-side JS for rich list editors
   src/build-version.ts             ← Stamped at deploy time
+  src/settings.ts                  ← Settings → API keys page (D1 secret store CRUD + per-slot Test results)
+  src/indexing.ts                  ← Per-site Indexing page: diagnostic table, per-indexer Submit, Reindex-now, live HTTP Probe
+  src/logo-data-url.ts, src/favicon-data-url.ts ← Generated by scripts/regen-logo-data-url.mjs from assets/edgeseo-{logo,favicon}.png
 admin-worker/                      ← Legacy basic-auth dashboard (slated for deletion in Phase G)
 admin-ui/                          ← Local read-only inspector (legacy of admin-worker)
 config/
@@ -298,6 +327,7 @@ migrations/
   0005_link_project_placement_selector.sql ← Slice 3: target_selector + position columns, broaden strategy CHECK
   0006_clusters.sql                ← Cluster Slice A: clusters + cluster_members tables
   0007_cluster_cross_linking.sql   ← Cluster Slice C: cross_link_enabled column on clusters
+  0008_secrets.sql                 ← Operator-managed API keys table (Settings → API keys)
 wrangler.toml                      ← Main worker bindings + multi-zone routes
 frontend-worker/wrangler.toml      ← edge-seo-frontend bindings + edgeseo.app route
 admin-worker/wrangler.toml         ← Legacy admin worker bindings

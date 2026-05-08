@@ -22,14 +22,94 @@
 /** Default human-traffic sample rate (§6.7). Override per env in future. */
 export const DEFAULT_HUMAN_SAMPLE_RATE = 0.05;
 
-/** UA-class strings that bypass sampling (always logged). */
-const BOT_UA_CLASSES: ReadonlySet<string> = new Set([
-  "googlebot",
-  "bingbot",
-  "perplexitybot",
-  "claudebot",
-  "gptbot",
-]);
+/**
+ * Higher-level grouping for the per-site Bot activity dashboard. Each
+ * known bot family is tagged with one of these so the UI can show:
+ * "AI training crawlers: 4,329 hits in 24h" without listing every UA.
+ */
+export type BotCategory =
+  | "search-engine" // Google, Bing, DuckDuckGo, Yandex, Baidu — index our pages for users
+  | "ai-training" // GPTBot, ClaudeBot, CCBot, Google-Extended (Gemini), Bytespider — train LLMs
+  | "ai-search" // PerplexityBot, ChatGPT-User, OAI-SearchBot — answer-engine retrieval
+  | "social" // Facebook, Twitter/X, LinkedIn, Slack, Pinterest — link previews
+  | "monitoring" // UptimeRobot, Pingdom, etc. — operator-installed
+  | "other-bot" // Anything bot-shaped we don't recognise
+  | "human";
+
+/**
+ * Per-family classifier table. Each entry maps a UA substring (lowercase)
+ * to a stable `family` identifier and a `category`. First match wins —
+ * order matters: more-specific patterns first (e.g. "googlebot-image"
+ * before "googlebot"). Patterns are checked with `String.includes`,
+ * lowercased before comparison.
+ *
+ * Extending this table is the only safe way to add a new bot — every
+ * other code path keys off `family`. Don't introduce new `category`
+ * values without updating the dashboard renderer.
+ */
+const BOT_PATTERNS: ReadonlyArray<{
+  pattern: string;
+  family: string;
+  category: BotCategory;
+}> = [
+  // Google variants — order: more-specific first.
+  { pattern: "google-extended", family: "google-extended", category: "ai-training" },
+  { pattern: "googlebot-image", family: "googlebot-image", category: "search-engine" },
+  { pattern: "googlebot-mobile", family: "googlebot-mobile", category: "search-engine" },
+  { pattern: "adsbot-google", family: "adsbot-google", category: "search-engine" },
+  { pattern: "mediapartners-google", family: "mediapartners-google", category: "search-engine" },
+  { pattern: "googlebot", family: "googlebot", category: "search-engine" },
+
+  // AI training crawlers (LLM training data).
+  { pattern: "gptbot", family: "gptbot", category: "ai-training" },
+  { pattern: "ccbot", family: "ccbot", category: "ai-training" },
+  { pattern: "bytespider", family: "bytespider", category: "ai-training" },
+  { pattern: "applebot-extended", family: "applebot-extended", category: "ai-training" },
+  { pattern: "claudebot", family: "claudebot", category: "ai-training" },
+  { pattern: "claude-web", family: "claude-web", category: "ai-training" },
+  { pattern: "anthropic-ai", family: "anthropic-ai", category: "ai-training" },
+  { pattern: "meta-externalagent", family: "meta-externalagent", category: "ai-training" },
+
+  // AI answer-engine fetchers (run inline when a user asks a question).
+  { pattern: "perplexitybot", family: "perplexitybot", category: "ai-search" },
+  { pattern: "perplexity-user", family: "perplexity-user", category: "ai-search" },
+  { pattern: "chatgpt-user", family: "chatgpt-user", category: "ai-search" },
+  { pattern: "oai-searchbot", family: "oai-searchbot", category: "ai-search" },
+  { pattern: "youbot", family: "youbot", category: "ai-search" },
+
+  // Other major search engines.
+  { pattern: "bingbot", family: "bingbot", category: "search-engine" },
+  { pattern: "duckduckbot", family: "duckduckbot", category: "search-engine" },
+  { pattern: "yandexbot", family: "yandexbot", category: "search-engine" },
+  { pattern: "baiduspider", family: "baiduspider", category: "search-engine" },
+  { pattern: "applebot", family: "applebot", category: "search-engine" }, // bare Applebot (not -Extended)
+  { pattern: "seznambot", family: "seznambot", category: "search-engine" },
+
+  // Social link previewers.
+  {
+    pattern: "facebookexternalhit",
+    family: "facebookexternalhit",
+    category: "social",
+  },
+  { pattern: "facebookbot", family: "facebookbot", category: "social" },
+  { pattern: "twitterbot", family: "twitterbot", category: "social" },
+  { pattern: "linkedinbot", family: "linkedinbot", category: "social" },
+  { pattern: "slackbot", family: "slackbot", category: "social" },
+  { pattern: "pinterestbot", family: "pinterestbot", category: "social" },
+  { pattern: "discordbot", family: "discordbot", category: "social" },
+  { pattern: "telegrambot", family: "telegrambot", category: "social" },
+  { pattern: "whatsapp", family: "whatsapp", category: "social" },
+
+  // Operator-installed monitoring.
+  { pattern: "uptimerobot", family: "uptimerobot", category: "monitoring" },
+  { pattern: "pingdom", family: "pingdom", category: "monitoring" },
+  { pattern: "statuscake", family: "statuscake", category: "monitoring" },
+];
+
+/** UA-class strings that bypass sampling (always logged). Computed
+ *  from the BOT_PATTERNS table above so adding a new bot doesn't
+ *  require updating two places. */
+const BOT_UA_CLASSES: ReadonlySet<string> = new Set(BOT_PATTERNS.map((p) => p.family));
 
 const SENSITIVE_QUERY_PARAM_RE = /^(token|key|password|auth|secret|api)/i;
 const REDACTED = "REDACTED";
@@ -84,26 +164,26 @@ export function isBotUserAgentClass(uaClass: string): boolean {
 }
 
 /**
- * Classify a User-Agent string into one of the known classes.
+ * Detailed classification — returns both the family (for deduping +
+ * dashboard grouping) and the higher-level category. Use this when
+ * you need the category (e.g. the bot_hits write path); use
+ * `classifyUserAgent` when you just need the family string for
+ * logging.
  *
- * Heuristic substring match. Future bots are added to this function
- * (config-driven classifier registry is a future improvement; the
- * `user_agent_class` field is intentionally `string`, not an enum,
- * to allow that without a schema bump).
- *
- * @param userAgent the raw `User-Agent` header value, or null
- * @returns one of "googlebot" | "bingbot" | "perplexitybot" | "claudebot"
- *   | "gptbot" | "human" | "other"
- * @throws never
+ * Heuristic substring match against BOT_PATTERNS — first match wins.
+ * Lowercased before comparison.
  */
-export function classifyUserAgent(userAgent: string | null | undefined): string {
-  if (!userAgent) return "other";
+export function classifyUserAgentDetailed(userAgent: string | null | undefined): {
+  family: string;
+  category: BotCategory;
+} {
+  if (!userAgent) return { family: "other", category: "other-bot" };
   const ua = userAgent.toLowerCase();
-  if (ua.includes("googlebot")) return "googlebot";
-  if (ua.includes("bingbot")) return "bingbot";
-  if (ua.includes("perplexitybot")) return "perplexitybot";
-  if (ua.includes("claudebot") || ua.includes("claude-")) return "claudebot";
-  if (ua.includes("gptbot") || ua.includes("oai-searchbot")) return "gptbot";
+  for (const entry of BOT_PATTERNS) {
+    if (ua.includes(entry.pattern)) {
+      return { family: entry.family, category: entry.category };
+    }
+  }
   // Generic browser detection — anything claiming to be Mozilla or naming
   // a major rendering engine is treated as human traffic for sampling.
   if (
@@ -112,9 +192,25 @@ export function classifyUserAgent(userAgent: string | null | undefined): string 
     ua.includes("chrome/") ||
     ua.includes("firefox/")
   ) {
-    return "human";
+    return { family: "human", category: "human" };
   }
-  return "other";
+  // Unknown bot-shaped UA (curl, wget, libraries, custom scrapers).
+  return { family: "other", category: "other-bot" };
+}
+
+/**
+ * Classify a User-Agent string into one of the known classes.
+ *
+ * Returns just the family identifier — the value placed in
+ * `LogEntry.user_agent_class`. Use `classifyUserAgentDetailed` when
+ * you also need the BotCategory for grouping/dashboards.
+ *
+ * @param userAgent the raw `User-Agent` header value, or null
+ * @returns the bot family ("googlebot", "gptbot", etc.), "human", or "other"
+ * @throws never
+ */
+export function classifyUserAgent(userAgent: string | null | undefined): string {
+  return classifyUserAgentDetailed(userAgent).family;
 }
 
 /**
