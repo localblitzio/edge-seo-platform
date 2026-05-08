@@ -105,7 +105,13 @@ import {
 } from "./clusters.js";
 import { type EmailBinding, resetPasswordMessage, sendEmail } from "./email.js";
 import { FAVICON_DATA_URL } from "./favicon-data-url.js";
-import { handleIndexingSubmit, loadIndexingPageData, renderIndexingPage } from "./indexing.js";
+import {
+  handleIndexingSubmit,
+  handleProbeUrl,
+  handleReindexAll,
+  loadIndexingPageData,
+  renderIndexingPage,
+} from "./indexing.js";
 import { inspectSourcePage } from "./inspector.js";
 import {
   handleBulkPlacementPost,
@@ -1132,6 +1138,24 @@ export default {
       // Cache purge (POST only)
       if (sub === "cache-purge" && method === "POST") {
         return handleCachePurgePost(request, env, url, user, id);
+      }
+
+      // Per-site "Reindex now" — fan-out to every configured indexer
+      // using the full eligible-URL list (no per-row selection).
+      // Equivalent to a save-time auto-ping but on demand.
+      if (sub === "indexing/reindex" && method === "POST") {
+        const csrf = checkCsrf(request, url);
+        if (csrf) return csrf;
+        return handleReindexAll(env, user, id);
+      }
+
+      // Per-row live HTTP probe — fetched by the Indexing page's
+      // inline JS to render SEO diagnostics inline (status, title,
+      // canonical, meta description, robots).
+      if (sub === "indexing/probe" && method === "POST") {
+        const csrf = checkCsrf(request, url);
+        if (csrf) return csrf;
+        return handleProbeUrl(request, env, user, id);
       }
 
       // Per-site Indexing page: GET renders the diagnostic table +

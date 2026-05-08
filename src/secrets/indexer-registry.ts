@@ -146,3 +146,68 @@ export const ACTIVE_INDEXERS: readonly IndexerEntry[] = [
 export function findIndexer(slotKey: string): IndexerEntry | undefined {
   return ACTIVE_INDEXERS.find((i) => i.slotKey === slotKey);
 }
+
+/** Per-indexer outcome — pairs the registry entry with the submit result. */
+export interface ConfiguredIndexerResult {
+  slotKey: string;
+  label: string;
+  result: IndexerSubmitResult;
+}
+
+/**
+ * Fan out a URL list to every active indexer whose secret is bound,
+ * in parallel. Returns one result per indexer that ran (skipped
+ * indexers with unbound keys). Never throws — each submission is
+ * independent and any error is captured in its `result.message`.
+ *
+ * Used by both the save-time auto-ping (`maybePingIndexers` in
+ * app.ts, fire-and-forget — caller ignores results) AND the manual
+ * "Reindex now" button on the Indexing page (renders results to the
+ * operator).
+ */
+export async function pingAllConfiguredIndexers(
+  env: {
+    CONFIG_KV: import("@cloudflare/workers-types").KVNamespace;
+    CONFIG_DB: import("@cloudflare/workers-types").D1Database;
+  },
+  urls: readonly string[],
+  context: { proxyDomain: string },
+): Promise<ConfiguredIndexerResult[]> {
+  // Lazy import to avoid a circular dep with src/secrets/store.ts
+  // (the store imports from sitemap modules transitively).
+  const { getSecret } = await import("./store.js");
+  const sharedEnv = env as unknown as Parameters<typeof getSecret>[0];
+  const keys = await Promise.all(ACTIVE_INDEXERS.map((i) => getSecret(sharedEnv, i.slotKey)));
+  const tasks: Promise<ConfiguredIndexerResult | null>[] = [];
+  for (let i = 0; i < ACTIVE_INDEXERS.length; i++) {
+    const indexer = ACTIVE_INDEXERS[i];
+    const key = keys[i];
+    if (!indexer || !key) continue;
+    tasks.push(
+      indexer
+        .submit(key, urls, context)
+        .then(
+          (result): ConfiguredIndexerResult => ({
+            slotKey: indexer.slotKey,
+            label: indexer.label,
+            result,
+          }),
+        )
+        .catch(
+          (e): ConfiguredIndexerResult => ({
+            slotKey: indexer.slotKey,
+            label: indexer.label,
+            result: {
+              ok: false,
+              submitted: 0,
+              successes: 0,
+              failures: 0,
+              message: `${indexer.label}: threw — ${e instanceof Error ? e.message : String(e)}`,
+            },
+          }),
+        ),
+    );
+  }
+  const settled = await Promise.all(tasks);
+  return settled.filter((r): r is ConfiguredIndexerResult => r !== null);
+}

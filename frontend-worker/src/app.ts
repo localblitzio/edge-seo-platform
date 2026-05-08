@@ -25,8 +25,7 @@ import { DEFAULT_PROXY_ZONE, PROXY_ZONES, matchProxyZone } from "../../src/confi
 import { ClientConfig } from "../../src/config/schema.js";
 import { assertConfigInvariants } from "../../src/config/validator.js";
 import { ConfigValidationError } from "../../src/lib/errors.js";
-import { ACTIVE_INDEXERS } from "../../src/secrets/indexer-registry.js";
-import { getSecret } from "../../src/secrets/store.js";
+import { pingAllConfiguredIndexers } from "../../src/secrets/indexer-registry.js";
 import { collectSitemapUrls } from "../../src/sitemap/generator.js";
 import type { User } from "./auth.js";
 import { BUILD_VERSION } from "./build-version.js";
@@ -1950,22 +1949,20 @@ export async function handleNewClientPost(
 async function maybePingIndexers(env: AppEnv, cfg: ClientConfig): Promise<void> {
   const urls = collectSitemapUrls(cfg);
   if (urls.length === 0) return;
-  const sharedEnv = env as unknown as Parameters<typeof getSecret>[0];
-  // Look up every registered indexer's secret in parallel so slow
-  // KV/D1 reads don't serialize the rest.
-  const keys = await Promise.all(ACTIVE_INDEXERS.map((i) => getSecret(sharedEnv, i.slotKey)));
-  const tasks: Promise<unknown>[] = [];
-  for (let i = 0; i < ACTIVE_INDEXERS.length; i++) {
-    const indexer = ACTIVE_INDEXERS[i];
-    const key = keys[i];
-    if (!indexer || !key) continue;
-    tasks.push(
-      indexer
-        .submit(key, urls, { proxyDomain: cfg.proxy_domain })
-        .catch((e) => console.warn(`${indexer.slotKey} ping failed`, e)),
-    );
+  // Same fan-out helper the manual "Reindex now" button uses; we just
+  // ignore the per-indexer results here (fire-and-forget). Failed
+  // submissions surface in the indexer's `result.message`, which we
+  // log for visibility. The unknown-cast bridges frontend-worker's
+  // AppEnv shape to the registry's structural type — the underlying
+  // CONFIG_KV / CONFIG_DB bindings are identical.
+  const results = await pingAllConfiguredIndexers(
+    env as unknown as Parameters<typeof pingAllConfiguredIndexers>[0],
+    urls,
+    { proxyDomain: cfg.proxy_domain },
+  );
+  for (const r of results) {
+    if (!r.result.ok) console.warn(`indexer ${r.slotKey} reported failure:`, r.result.message);
   }
-  await Promise.all(tasks);
 }
 
 export async function handleEditClientPost(

@@ -15,9 +15,11 @@
  * push it to the engines now" workflow without leaving the admin UI.
  */
 
-import { ACTIVE_INDEXERS } from "../../src/secrets/indexer-registry.js";
+import { ACTIVE_INDEXERS, pingAllConfiguredIndexers } from "../../src/secrets/indexer-registry.js";
 import { getSecret } from "../../src/secrets/store.js";
 import { type PathDiagnostic, computePathDiagnostics } from "../../src/sitemap/diagnostics.js";
+import { collectSitemapUrls } from "../../src/sitemap/generator.js";
+import { probeUrl } from "../../src/sitemap/probe.js";
 
 import type { AppEnv, ClientRow, FlashMessage } from "./app.js";
 import { canSeeAllClients, esc } from "./app.js";
@@ -122,13 +124,17 @@ function renderRow(diag: PathDiagnostic): string {
   const isInclude = diag.verdict.kind === "include";
   const checkbox = `<input type="checkbox" name="path" value="${esc(diag.path)}" data-eligible="${isInclude ? "1" : "0"}"${isInclude ? " checked" : ""} aria-label="Include ${esc(diag.path)} in submission">`;
   const rowClass = isInclude ? "" : ' class="row-blocked"';
-  return `<tr${rowClass}>
+  // Probe button — JS handler fetches the URL through the proxy and
+  // injects a sub-row with HTTP status + title + meta + canonical.
+  const probeBtn = `<button type="button" class="probe-btn" data-path="${esc(diag.path)}" title="Fetch this URL through the proxy and show live SEO diagnostics">Probe</button>`;
+  return `<tr${rowClass} data-path-row="${esc(diag.path)}">
     <td>${checkbox}</td>
     <td><a href="${esc(diag.url)}" target="_blank" rel="noopener noreferrer" class="mono small">${esc(diag.path)}</a></td>
     <td class="muted small">${esc(sources) || "—"}</td>
     <td class="small">${canonicalCell}</td>
     <td class="small">${robotsCell}</td>
     <td>${renderVerdict(diag)}</td>
+    <td>${probeBtn}</td>
   </tr>`;
 }
 
@@ -156,6 +162,17 @@ const INDEXING_CSS = `
 .indexing-actions .submit-row button.indexer-btn:hover{filter:brightness(1.1);color:#fff!important}
 .indexing-actions .empty{color:var(--fg-muted);font-size:.9rem;margin:0}
 .indexing-actions .empty a{color:var(--accent)}
+.probe-btn{font:inherit;font-size:.78rem;padding:.2rem .55rem;border:1px solid var(--border-strong);background:var(--bg-elevated);color:var(--fg);border-radius:.35rem;cursor:pointer}
+.probe-btn:hover{border-color:var(--accent);color:var(--accent)}
+.probe-btn[disabled]{opacity:.6;cursor:wait}
+.probe-result{background:var(--bg-code,#f4f4f5);font-size:.82rem;padding:.6rem .9rem;border-top:2px solid var(--accent)}
+.probe-result dl{margin:0;display:grid;grid-template-columns:auto 1fr;gap:.25rem .9rem}
+.probe-result dt{color:var(--fg-muted);font-weight:600;font-size:.72rem;text-transform:uppercase;letter-spacing:.04em;align-self:center}
+.probe-result dd{margin:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.82rem;word-break:break-word;align-self:center}
+.probe-result .status-ok{color:var(--green)}
+.probe-result .status-err{color:var(--red)}
+.probe-result .status-warn{color:var(--amber)}
+.probe-result .empty-val{color:var(--fg-muted);font-style:italic}
 `;
 
 /* ─── Render ─── */
@@ -172,7 +189,7 @@ export function renderIndexingPage(opts: {
 
   const tableRows = diagnostics.length
     ? diagnostics.map(renderRow).join("")
-    : `<tr><td colspan="6" class="muted small" style="text-align:center;padding:1.25rem">No paths pinned. Add per-page rules or <code>seed_paths</code> entries in this site's config to start indexing.</td></tr>`;
+    : `<tr><td colspan="7" class="muted small" style="text-align:center;padding:1.25rem">No paths pinned. Add per-page rules or <code>seed_paths</code> entries in this site's config to start indexing.</td></tr>`;
 
   const indexerButtons = configuredIndexers.length
     ? configuredIndexers
@@ -194,7 +211,16 @@ export function renderIndexingPage(opts: {
     <h2 style="margin:0">Indexing — ${esc(client.client_id)}</h2>
     <p class="muted small" style="margin:.25rem 0 0">${esc(client.proxy_domain)}</p>
   </div>
-  <a href="/app/clients/${esc(client.client_id)}" class="btn">← Back to site</a>
+  <div style="display:flex;gap:.5rem;align-items:center">
+    ${
+      configuredIndexers.length > 0 && includeCount > 0
+        ? `<form method="post" action="/app/clients/${esc(client.client_id)}/indexing/reindex" style="margin:0">
+            <button type="submit" class="btn-primary" title="Submit every eligible URL to all configured indexers — no per-row selection needed">Reindex now (${configuredIndexers.length} service${configuredIndexers.length === 1 ? "" : "s"})</button>
+          </form>`
+        : ""
+    }
+    <a href="/app/clients/${esc(client.client_id)}" class="btn">← Back to site</a>
+  </div>
 </header>
 
 <div class="indexing-summary">
@@ -215,6 +241,7 @@ export function renderIndexingPage(opts: {
       <th>Canonical</th>
       <th>Robots</th>
       <th>Verdict</th>
+      <th style="width:5.5rem">Probe</th>
     </tr>
   </thead>
   <tbody>${tableRows}</tbody>
@@ -255,6 +282,99 @@ export function renderIndexingPage(opts: {
       master.checked = stage !== 0;
       master.indeterminate = stage === 1
         && document.querySelectorAll('input[name="path"][data-eligible="0"]').length > 0;
+    });
+  })();
+
+  // Per-row Probe — POST /probe with the path, render JSON result
+  // as a sub-row below the original row.
+  (function() {
+    const csrf = (function() {
+      const m = document.cookie.match(/(?:^|; )csrf_token=([^;]*)/);
+      return m ? decodeURIComponent(m[1]) : "";
+    })();
+    function fmt(v) {
+      if (v === undefined || v === null || v === "") {
+        return '<span class="empty-val">(none)</span>';
+      }
+      return String(v).replace(/[&<>]/g, function(c) {
+        return c === "&" ? "&amp;" : c === "<" ? "&lt;" : "&gt;";
+      });
+    }
+    function statusClass(status) {
+      if (typeof status !== "number") return "status-err";
+      if (status >= 200 && status < 300) return "status-ok";
+      if (status >= 300 && status < 400) return "status-warn";
+      return "status-err";
+    }
+    function renderResult(r) {
+      if (!r.ok && r.error) {
+        return '<dl><dt>Error</dt><dd class="status-err">' + fmt(r.error) + '</dd></dl>';
+      }
+      const rows = [];
+      rows.push('<dt>Status</dt><dd class="' + statusClass(r.status) + '">' + fmt(r.status ?? "?") + '</dd>');
+      if (r.finalUrl) rows.push('<dt>Final URL</dt><dd>' + fmt(r.finalUrl) + '</dd>');
+      rows.push('<dt>Title</dt><dd>' + fmt(r.title) + '</dd>');
+      rows.push('<dt>Description</dt><dd>' + fmt(r.description) + '</dd>');
+      rows.push('<dt>Canonical</dt><dd>' + fmt(r.canonical) + '</dd>');
+      rows.push('<dt>Meta robots</dt><dd>' + fmt(r.robots) + '</dd>');
+      rows.push('<dt>X-Robots-Tag</dt><dd>' + fmt(r.xRobotsTag) + '</dd>');
+      if (r.error) rows.push('<dt>Note</dt><dd class="status-warn">' + fmt(r.error) + '</dd>');
+      return '<dl>' + rows.join('') + '</dl>';
+    }
+    document.querySelectorAll(".probe-btn").forEach(function(btn) {
+      btn.addEventListener("click", async function() {
+        const path = btn.getAttribute("data-path");
+        if (!path) return;
+        const row = btn.closest("tr");
+        if (!row) return;
+        // Tear down any previous result row.
+        const existing = row.nextElementSibling;
+        if (existing && existing.classList.contains("probe-result-row")) {
+          existing.remove();
+          if (btn.dataset.openState === "1") {
+            btn.dataset.openState = "0";
+            btn.textContent = "Probe";
+            return;
+          }
+        }
+        btn.disabled = true;
+        btn.textContent = "Probing…";
+        try {
+          const fd = new FormData();
+          fd.set("path", path);
+          const action = window.location.pathname + "/probe";
+          const resp = await fetch(action, {
+            method: "POST",
+            body: fd,
+            credentials: "same-origin",
+          });
+          let result;
+          try { result = await resp.json(); }
+          catch { result = { ok: false, error: "Probe endpoint returned non-JSON (HTTP " + resp.status + ")." }; }
+          const tr = document.createElement("tr");
+          tr.className = "probe-result-row";
+          const td = document.createElement("td");
+          td.colSpan = 7;
+          td.className = "probe-result";
+          td.innerHTML = renderResult(result);
+          tr.appendChild(td);
+          row.insertAdjacentElement("afterend", tr);
+          btn.dataset.openState = "1";
+          btn.textContent = "Hide";
+        } catch (e) {
+          const tr = document.createElement("tr");
+          tr.className = "probe-result-row";
+          const td = document.createElement("td");
+          td.colSpan = 7;
+          td.className = "probe-result";
+          td.innerHTML = '<dl><dt>Error</dt><dd class="status-err">' + fmt(String(e)) + '</dd></dl>';
+          tr.appendChild(td);
+          row.insertAdjacentElement("afterend", tr);
+          btn.textContent = "Retry";
+        } finally {
+          btn.disabled = false;
+        }
+      });
     });
   })();
 </script>`;
@@ -317,6 +437,103 @@ export async function handleIndexingSubmit(
   return flashRedirect(`/app/clients/${clientId}/indexing`, {
     text: result.message,
     kind: result.ok ? "ok" : "err",
+  });
+}
+
+/**
+ * Handle the Reindex-now POST: fan out the full eligible-URL list to
+ * every configured indexer in parallel, no per-row selection needed.
+ *
+ * Mirrors the save-time auto-ping (`maybePingIndexers` in app.ts) —
+ * uses `collectSitemapUrls(cfg)` as the URL source so behaviour is
+ * identical to "I just hit Save again." Returns a flash redirect
+ * with a per-indexer summary so the operator sees what fired.
+ */
+export async function handleReindexAll(
+  env: AppEnv,
+  user: User,
+  clientId: string,
+): Promise<Response> {
+  const loaded = await loadClientForIndexing(env, user, clientId);
+  if (!loaded) {
+    return new Response("Not found", { status: 404 });
+  }
+  const urls = collectSitemapUrls(loaded.config);
+  if (urls.length === 0) {
+    return flashRedirect(`/app/clients/${clientId}/indexing`, {
+      text: "No eligible URLs to submit. Add per-page rules or seed_paths first.",
+      kind: "warn",
+    });
+  }
+  const results = await pingAllConfiguredIndexers(
+    env as unknown as Parameters<typeof pingAllConfiguredIndexers>[0],
+    urls,
+    { proxyDomain: loaded.config.proxy_domain },
+  );
+  if (results.length === 0) {
+    return flashRedirect(`/app/clients/${clientId}/indexing`, {
+      text: "No indexers configured. Bind an API key in Settings → API keys first.",
+      kind: "warn",
+    });
+  }
+  // Compose a per-indexer summary, joined with "; " so operators see
+  // each service's outcome in one flash banner.
+  const summary = results.map((r) => r.result.message).join(" | ");
+  const allOk = results.every((r) => r.result.ok);
+  const allFailed = results.every((r) => !r.result.ok);
+  const kind: "ok" | "warn" | "err" = allOk ? "ok" : allFailed ? "err" : "warn";
+  return flashRedirect(`/app/clients/${clientId}/indexing`, {
+    text: `Reindex (${urls.length} URL${urls.length === 1 ? "" : "s"}): ${summary}`,
+    kind,
+  });
+}
+
+/**
+ * Handle the per-row Probe POST: fetch one URL through the proxy and
+ * return SEO diagnostics as JSON. The Indexing page's inline JS
+ * renders the result into the row.
+ *
+ * Form body: `path` — the path to probe, must be one of the rows in
+ * computePathDiagnostics (defensive — prevents using this endpoint
+ * to fetch arbitrary URLs).
+ */
+export async function handleProbeUrl(
+  request: Request,
+  env: AppEnv,
+  user: User,
+  clientId: string,
+): Promise<Response> {
+  const form = await request.formData();
+  const path = String(form.get("path") ?? "");
+  if (!path.startsWith("/")) {
+    return new Response(JSON.stringify({ ok: false, error: "Invalid path" }), {
+      status: 400,
+      headers: { "content-type": "application/json" },
+    });
+  }
+  const loaded = await loadClientForIndexing(env, user, clientId);
+  if (!loaded) {
+    return new Response(JSON.stringify({ ok: false, error: "Not found" }), {
+      status: 404,
+      headers: { "content-type": "application/json" },
+    });
+  }
+  // Defensive: only allow probing paths the diagnostics surface.
+  // Stops anyone from using this endpoint to fetch arbitrary URLs
+  // (the backend has more bandwidth than the operator's IP).
+  const diagnostics = computePathDiagnostics(loaded.config);
+  const validPaths = new Set(diagnostics.map((d) => d.path));
+  if (!validPaths.has(path)) {
+    return new Response(JSON.stringify({ ok: false, error: "Path not in diagnostics" }), {
+      status: 400,
+      headers: { "content-type": "application/json" },
+    });
+  }
+  const targetUrl = `https://${loaded.config.proxy_domain}${path}`;
+  const result = await probeUrl(targetUrl);
+  return new Response(JSON.stringify(result), {
+    status: 200,
+    headers: { "content-type": "application/json" },
   });
 }
 
