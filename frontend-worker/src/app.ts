@@ -1000,6 +1000,39 @@ export async function renderClientDetail(env: AppEnv, user: User, id: string): P
     (rr, i) =>
       `<tr><td>${i}</td><td class="mono">${esc(rr.match)}</td><td class="mono">${esc(rr.ttl_seconds)}</td></tr>`,
   );
+  const audienceRows = arr("audience_rules").map((rr, i) => {
+    const aud = rr.audience as Record<string, unknown> | undefined;
+    const audType = String(aud?.type ?? "?");
+    let audLabel: string;
+    if (audType === "human") {
+      audLabel = "Human";
+    } else if (audType === "bot") {
+      const cat = aud?.category as string | undefined;
+      const fam = aud?.family as string | undefined;
+      const bits = ["bot"];
+      if (cat) bits.push(`category=${cat}`);
+      if (fam) bits.push(`family=${fam}`);
+      audLabel = bits.join(", ");
+    } else {
+      audLabel = audType;
+    }
+    const act = rr.action as Record<string, unknown> | undefined;
+    const actType = String(act?.type ?? "?");
+    let actLabel: string;
+    if (actType === "redirect") {
+      actLabel = `redirect ${esc(act?.status ?? "302")} → <span class="mono">${esc(act?.url)}</span>`;
+    } else if (actType === "block") {
+      actLabel = `block ${esc(act?.status ?? "410")}`;
+    } else if (actType === "custom_page") {
+      actLabel = `custom_page → <span class="mono">${esc(act?.custom_page_key)}</span>`;
+    } else {
+      actLabel = actType;
+    }
+    const note = rr.note
+      ? `<div class="muted small" style="margin-top:.2rem">${esc(rr.note)}</div>`
+      : "";
+    return `<tr><td>${i}</td><td class="mono">${esc(rr.match)}</td><td>${audLabel}</td><td>${actLabel}${note}</td></tr>`;
+  });
 
   const mode = (cfg.mode as string | undefined) ?? "subdomain_proxy";
   const modePill =
@@ -1034,6 +1067,7 @@ export async function renderClientDetail(env: AppEnv, user: User, id: string): P
     ${section("Schema injections", schemaRows.length, rulesTable(["#", "match", "schema_type", "position"], schemaRows))}
     ${section("Indexation", indexRows.length, rulesTable(["#", "match", "robots"], indexRows))}
     ${section("Caching", cacheRows.length, rulesTable(["#", "match", "ttl_seconds"], cacheRows))}
+    ${section("Audience steering", audienceRows.length, rulesTable(["#", "match", "audience", "action"], audienceRows))}
     <details class="section"><summary>Raw ClientConfig <span class="count">json</span></summary><div class="body"><div class="json-block">${jsonHtml(cfg)}</div></div></details>`;
 }
 
