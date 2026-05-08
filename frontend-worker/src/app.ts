@@ -1278,6 +1278,7 @@ function renderActionsRow(client: ClientRow): string {
   return `<div class="actions-row">
     <a class="btn btn-primary" href="/app/clients/${esc(client.client_id)}/edit">Edit config</a>
     <a class="btn" href="/app/clients/${esc(client.client_id)}/indexing">Indexing</a>
+    <a class="btn" href="/app/clients/${esc(client.client_id)}/bots">Bot activity</a>
     <a class="btn" href="/app/clients/${esc(client.client_id)}/attest">Capture attestation</a>
     <form method="POST" action="/app/clients/${esc(client.client_id)}/cache-purge"><button class="btn" type="submit">Purge cache</button></form>
     ${statusBtn("active", "Activate", "btn-success", null)}

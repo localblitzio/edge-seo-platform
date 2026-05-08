@@ -35,6 +35,7 @@ import {
   rewriteCookieDomain,
   rewriteRedirectLocation,
 } from "./lib/headers.js";
+import { recordBotHit } from "./observability/bot-hits.js";
 import { type LogEntry, classifyUserAgent, logRequest } from "./observability/logger.js";
 import { emitRequestCounter } from "./observability/metrics.js";
 import { fetchFromOrigin } from "./proxy/index.js";
@@ -103,7 +104,7 @@ const handler: ExportedHandler<Env> = {
       ctx.waitUntil(writeCache(request, response.clone(), rctx.config).catch(() => undefined));
     }
 
-    finalize(rctx, response, env);
+    finalize(rctx, response, env, ctx);
 
     return response;
   },
@@ -354,9 +355,17 @@ function classifyContentType(contentType: string | null): string {
   return "other";
 }
 
-function finalize(rctx: RequestContext, response: Response, env: Env): void {
+function finalize(rctx: RequestContext, response: Response, env: Env, ctx: ExecutionContext): void {
   const duration_ms = Date.now() - rctx.startTime;
-  const userAgentClass = classifyUserAgent(rctx.request.headers.get("user-agent"));
+  const userAgent = rctx.request.headers.get("user-agent");
+  const userAgentClass = classifyUserAgent(userAgent);
+
+  // Record per-(client × bot family × hour) hit counts for the Bot
+  // activity dashboard. Fire-and-forget so the D1 write doesn't add
+  // latency. recordBotHit is itself a no-op for human traffic.
+  if (rctx.client_id) {
+    ctx.waitUntil(recordBotHit(env.CONFIG_DB, rctx.client_id, userAgent));
+  }
 
   logRequest({
     timestamp: new Date(rctx.startTime).toISOString(),

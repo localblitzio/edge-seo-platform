@@ -83,6 +83,7 @@ import {
   setPassword as setUserPassword,
   verifyPassword,
 } from "./auth.js";
+import { loadBotActivityData, renderBotActivityPage } from "./bot-activity.js";
 import {
   handleBulkConfirmPost,
   handleBulkPreviewPost,
@@ -1156,6 +1157,29 @@ export default {
         const csrf = checkCsrf(request, url);
         if (csrf) return csrf;
         return handleProbeUrl(request, env, user, id);
+      }
+
+      // Per-site Bot activity dashboard: search engine + AI bot crawl counts.
+      if (sub === "bots" && method === "GET") {
+        const data = await loadBotActivityData(env, user, id);
+        if (!data) {
+          return new Response("Not found", { status: 404 });
+        }
+        return htmlResponse(
+          htmlPage({
+            title: `Bots — ${id} — Edge SEO Platform`,
+            body: appLayout({
+              title: `Bots — ${id}`,
+              content: renderBotActivityPage(data),
+              activeNav: `client:${id}`,
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
       }
 
       // Per-site Indexing page: GET renders the diagnostic table +
