@@ -17,6 +17,7 @@
 
 import type { ExecutionContext } from "@cloudflare/workers-types";
 
+import { applyAudienceAction, classifyAudience, matchAudienceRule } from "./audience/index.js";
 import { readCache, writeCache } from "./cache/index.js";
 import { resolveCanonical } from "./canonical/index.js";
 import { loadConfig } from "./config/loader.js";
@@ -141,6 +142,22 @@ async function runPipeline(
   // headers can drive their own freshness.
   const sitemapResponse = await maybeServeSitemapOrIndexNow(rctx, config, env, ctx);
   if (sitemapResponse) return sitemapResponse;
+
+  // Audience-aware steering — fires BEFORE the regular redirect /
+  // route resolution pipeline so rules like "redirect humans to the
+  // money site, let bots see the original" or "block AI training
+  // crawlers" win over normal routing. First-match-wins; non-matching
+  // requests fall through to the regular pipeline.
+  const audience = classifyAudience(rctx.request.headers.get("user-agent"));
+  const audienceMatch = matchAudienceRule(rctx.url.pathname, audience, config);
+  if (audienceMatch) {
+    rctx.pipeline_stage =
+      audienceMatch.action.type === "custom_page" ? "custom_page" : "redirect_static";
+    if (audienceMatch.action.type === "redirect") {
+      rctx.redirect_destination = audienceMatch.action.url;
+    }
+    return applyAudienceAction(audienceMatch.action, rctx.url, config, env);
+  }
 
   // §5 step 11 (early lookup): on HTML cache hit short-circuit
   // steps 3-10. Per §9.1 invariants, the lookup is gated on

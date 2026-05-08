@@ -165,6 +165,86 @@ export const IndexationRule = z.object({
     .default([]),
 });
 
+/**
+ * Audience-aware steering: per-(path × audience) routing rules that
+ * fire BEFORE the regular redirect/route resolution pipeline (§5.3).
+ * Lets operators serve different content to humans vs bots, or to
+ * specific bot families/categories.
+ *
+ * Use cases:
+ *   - Redirect humans on a lander to the money site, but let
+ *     search-engine bots see the lander itself for indexing
+ *   - Block AI training crawlers (GPTBot, ClaudeBot, CCBot, etc.)
+ *     while allowing search-engine + AI-search crawlers
+ *   - Serve a JSON-LD-rich custom page to AI answer-engines
+ *     (Perplexity, ChatGPT-User) for better AEO surfacing
+ *
+ * Cloaking caveat: serving substantially DIFFERENT content to bots
+ * vs humans is "cloaking" per Google's webmaster guidelines and can
+ * trigger manual penalties. Legitimate uses (paywalls, A/B tests,
+ * AEO-targeted structured data, opting out specific AI bots) exist —
+ * the operator decides per rule.
+ */
+
+const BotCategoryEnum = z.enum([
+  "search-engine",
+  "ai-training",
+  "ai-search",
+  "social",
+  "monitoring",
+  "other-bot",
+]);
+
+export const AudienceMatch = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("human") }),
+  z.object({
+    type: z.literal("bot"),
+    /** Optional category narrowing — `search-engine`, `ai-training`, etc. */
+    category: BotCategoryEnum.optional(),
+    /**
+     * Optional family narrowing — e.g. `gptbot`, `googlebot`, `claudebot`.
+     * Must match a family produced by `classifyUserAgentDetailed`.
+     * If both `family` and `category` are set, BOTH must match (AND).
+     */
+    family: z.string().min(1).max(64).optional(),
+  }),
+]);
+
+export const AudienceAction = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("redirect"),
+    /** Absolute URL or path. Path → relative redirect on this proxy domain. */
+    url: z.string().min(1).max(2048),
+    status: z.enum(["301", "302", "303", "307", "308"]).default("302"),
+  }),
+  z.object({
+    type: z.literal("block"),
+    status: z.enum(["403", "410"]).default("410"),
+  }),
+  z.object({
+    type: z.literal("custom_page"),
+    /**
+     * Key into the operator's custom_page R2/KV store. Lets the
+     * operator author bot-specific content (e.g. an AEO-optimised
+     * variant) without changing the regular routing rules.
+     */
+    custom_page_key: z.string().min(1).max(256),
+  }),
+]);
+
+export const AudienceRule = z.object({
+  /** Path regex, anchored as the operator wants. */
+  match: z.string().min(1).max(512),
+  audience: AudienceMatch,
+  action: AudienceAction,
+  /**
+   * Optional human-readable note shown in the admin UI alongside the
+   * rule. Useful for documenting *why* this rule exists, especially
+   * for cloaking-adjacent rules a future reviewer might question.
+   */
+  note: z.string().max(512).optional(),
+});
+
 export const OriginAuth = z.discriminatedUnion("type", [
   z.object({ type: z.literal("none") }),
   z.object({ type: z.literal("aop") }),
@@ -307,6 +387,13 @@ export const ClientConfig = z.object({
   caching: z.array(CacheRule).default([]),
   forms: z.array(FormHandling).default([]),
   /**
+   * Audience-aware steering rules. See AudienceRule above. Evaluated
+   * by the worker between auth (§5.2) and redirect resolution (§5.3),
+   * first-match-wins. When a rule matches, its action is the terminal
+   * response — the regular pipeline is short-circuited.
+   */
+  audience_rules: z.array(AudienceRule).default([]),
+  /**
    * Operator-pinned URL paths that should appear in this site's
    * `/sitemap.xml` and get pinged via IndexNow on every config save.
    *
@@ -367,6 +454,9 @@ export const ClientConfig = z.object({
 });
 
 export type ClientConfig = z.infer<typeof ClientConfig>;
+export type AudienceRule = z.infer<typeof AudienceRule>;
+export type AudienceMatch = z.infer<typeof AudienceMatch>;
+export type AudienceAction = z.infer<typeof AudienceAction>;
 export type StaticRedirect = z.infer<typeof StaticRedirect>;
 export type PatternRedirect = z.infer<typeof PatternRedirect>;
 export type ConditionalRedirect = z.infer<typeof ConditionalRedirect>;
