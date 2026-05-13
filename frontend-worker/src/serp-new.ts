@@ -381,10 +381,33 @@ export function renderSerpNewForm(opts: {
         </label>
       </div>
       <div class="form-actions">
-        <button class="btn btn-primary" type="submit">Fetch SERP →</button>
+        <button class="btn btn-primary" type="submit" id="serp-fetch-btn">Fetch SERP →</button>
         <a class="btn" href="/app/clients">Cancel</a>
       </div>
-    </form>`;
+    </form>
+    <style>
+      @keyframes serp-spin { to { transform: rotate(360deg); } }
+      .serp-spinner { display: inline-block; width: .85em; height: .85em; margin-right: .45em; vertical-align: -.1em; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: serp-spin .8s linear infinite; }
+      .serp-progress-bar { position: fixed; top: 0; left: 0; right: 0; height: 3px; background: linear-gradient(90deg, transparent, var(--primary, #4f8cff), transparent); background-size: 50% 100%; background-repeat: no-repeat; animation: serp-progress 1.2s ease-in-out infinite; z-index: 9999; display: none; }
+      @keyframes serp-progress { 0% { background-position: -50% 0; } 100% { background-position: 150% 0; } }
+      .serp-progress-bar.active { display: block; }
+    </style>
+    <div class="serp-progress-bar" id="serp-progress-bar"></div>
+    <script>
+      (function() {
+        var form = document.querySelector('form.editor');
+        if (!form) return;
+        form.addEventListener('submit', function() {
+          var btn = document.getElementById('serp-fetch-btn');
+          var bar = document.getElementById('serp-progress-bar');
+          if (btn) {
+            btn.disabled = true;
+            btn.innerHTML = '<span class="serp-spinner"></span>Fetching SERP results — this can take 5–15 seconds…';
+          }
+          if (bar) bar.classList.add('active');
+        });
+      })();
+    </script>`;
 }
 
 export function renderSerpPicker(opts: {
@@ -430,17 +453,61 @@ export function renderSerpPicker(opts: {
       ${hidden}
       <input type="hidden" name="result_count" value="${opts.results.length}">
       <div class="form-section">
-        <p class="field-hint" style="margin:0 0 .6rem">Uncheck results you don't want to proxy. Next step lets you tweak <code>client_id</code> + zone per row.</p>
+        <p class="field-hint" style="margin:0 0 .6rem">Uncheck results you don't want to proxy. Use the header checkbox to select/deselect all. Next step lets you tweak <code>client_id</code> + zone per row.</p>
         <table class="data" style="margin:0">
-          <thead><tr><th style="width:2.5rem"></th><th style="width:3rem">#</th><th>title / domain</th><th>snippet</th></tr></thead>
+          <thead><tr>
+            <th style="width:2.5rem">
+              <input type="checkbox" id="serp-select-all" checked title="Select / deselect all">
+            </th>
+            <th style="width:3rem">#</th>
+            <th>title / domain</th>
+            <th>snippet</th>
+          </tr></thead>
           <tbody>${rows}</tbody>
         </table>
+        <div class="field-hint" style="margin:.6rem 0 0">
+          <span id="serp-pick-count">${opts.results.length}</span> of ${opts.results.length} selected
+        </div>
       </div>
       <div class="form-actions">
         <button class="btn btn-primary" type="submit">Preview selected →</button>
         <a class="btn" href="/app/clients/serp-new">← Back</a>
       </div>
-    </form>`;
+    </form>
+    <script>
+      (function() {
+        var master = document.getElementById('serp-select-all');
+        var counter = document.getElementById('serp-pick-count');
+        if (!master) return;
+        function pickBoxes() {
+          return Array.prototype.slice.call(document.querySelectorAll('input[type=checkbox][name^="pick_"]'));
+        }
+        function updateCounter() {
+          if (!counter) return;
+          var boxes = pickBoxes();
+          var checked = boxes.filter(function(b) { return b.checked; }).length;
+          counter.textContent = String(checked);
+        }
+        function syncMaster() {
+          var boxes = pickBoxes();
+          if (boxes.length === 0) return;
+          var checkedCount = boxes.filter(function(b) { return b.checked; }).length;
+          master.checked = checkedCount === boxes.length;
+          master.indeterminate = checkedCount > 0 && checkedCount < boxes.length;
+          updateCounter();
+        }
+        master.addEventListener('change', function() {
+          var boxes = pickBoxes();
+          boxes.forEach(function(b) { b.checked = master.checked; });
+          master.indeterminate = false;
+          updateCounter();
+        });
+        pickBoxes().forEach(function(b) {
+          b.addEventListener('change', syncMaster);
+        });
+        syncMaster();
+      })();
+    </script>`;
 }
 
 /* ─── POST handlers ─── */
