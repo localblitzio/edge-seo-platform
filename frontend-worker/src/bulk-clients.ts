@@ -569,10 +569,25 @@ export function renderBulkPreview(opts: {
   rows: readonly BulkPreviewRow[];
   settings: BulkFormSettings;
   clusterLabel: string | null;
+  /**
+   * Clusters the operator can choose from in the editable picker on
+   * the preview page. When omitted, the picker is hidden and the
+   * step-1 cluster selection is preserved as a hidden input (back-
+   * compat for callers that haven't been updated yet).
+   */
+  visibleClusters?: readonly ClusterRow[];
   errors: string[];
 }): string {
   const errBox =
     opts.errors.length > 0 ? `<div class="error-box">${opts.errors.map(esc).join("\n")}</div>` : "";
+  // When visibleClusters is supplied we render the cluster picker
+  // inline and DROP the cluster_id hidden field (the picker's <select>
+  // posts the field instead). Otherwise keep the hidden input so the
+  // step-1 cluster selection still rides through.
+  const clusterIdHidden =
+    opts.visibleClusters !== undefined
+      ? ""
+      : `<input type="hidden" name="cluster_id" value="${opts.settings.cluster_id ?? ""}">`;
   const settingsHidden = `
     <input type="hidden" name="zone" value="${esc(opts.settings.zone)}">
     <input type="hidden" name="zone_strategy" value="${esc(opts.settings.zone_strategy)}">
@@ -581,8 +596,28 @@ export function renderBulkPreview(opts: {
     <input type="hidden" name="attested_by_email" value="${esc(opts.settings.attested_by_email)}">
     <input type="hidden" name="attested_ip" value="${esc(opts.settings.attested_ip)}">
     <input type="hidden" name="scope" value="${esc(opts.settings.scope)}">
-    <input type="hidden" name="cluster_id" value="${opts.settings.cluster_id ?? ""}">
+    ${clusterIdHidden}
     <input type="hidden" name="status" value="${esc(opts.settings.status)}">`;
+  const clusterPicker =
+    opts.visibleClusters !== undefined
+      ? (() => {
+          const options = [
+            `<option value=""${opts.settings.cluster_id == null ? " selected" : ""}>— don't add to a cluster —</option>`,
+            ...opts.visibleClusters.map(
+              (c) =>
+                `<option value="${c.id}"${opts.settings.cluster_id === c.id ? " selected" : ""}>${esc(c.label)} (${esc(c.type)})</option>`,
+            ),
+          ].join("");
+          return `<div class="form-section">
+        <label for="preview_cluster" style="display:block;font-weight:500;margin-bottom:.35rem">Add all created sites to cluster <span style="color:var(--fg-muted);font-weight:400">(optional)</span></label>
+        <div style="display:flex;gap:.6rem;align-items:center;flex-wrap:wrap">
+          <select id="preview_cluster" name="cluster_id" style="flex:1;min-width:240px">${options}</select>
+          <a class="btn" href="/app/clusters/new" target="_blank" rel="noopener" title="Opens cluster-creation page in a new tab; reload this page after creating to pick it.">+ New cluster ↗</a>
+        </div>
+        <div class="field-hint" style="margin-top:.4rem">Created a new cluster in the other tab? Reload this preview page (your row selections will reset) and pick it from the list.</div>
+      </div>`;
+        })()
+      : "";
   const mixedZones = opts.settings.zone_strategy === "mixed";
   const zoneCell = (r: BulkPreviewRow, i: number): string => {
     if (!mixedZones) {
@@ -626,6 +661,7 @@ export function renderBulkPreview(opts: {
     <form class="editor" method="POST" action="/app/clients/bulk-new/confirm">
       ${settingsHidden}
       <input type="hidden" name="row_count" value="${opts.rows.length}">
+      ${clusterPicker}
       <div class="form-section">
         <p class="field-hint" style="margin:0 0 .6rem">Uncheck rows you don't want to create. Override <code>client_id</code> if the auto-derived value isn't what you want — must be lowercase letters, digits, or hyphens.</p>
         <table class="data" style="margin:0">
@@ -687,6 +723,7 @@ export async function handleBulkPreviewPost(
     rows: BulkPreviewRow[];
     settings: BulkFormSettings;
     clusterLabel: string | null;
+    visibleClusters: readonly ClusterRow[];
   };
   response?: Response;
 }> {
@@ -774,7 +811,7 @@ export async function handleBulkPreviewPost(
       error: err ?? null,
     };
   });
-  return { step2Render: { rows, settings, clusterLabel } };
+  return { step2Render: { rows, settings, clusterLabel, visibleClusters } };
 }
 
 export async function handleBulkConfirmPost(

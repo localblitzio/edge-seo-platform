@@ -606,6 +606,7 @@ export async function handleSerpPickPost(
     rows: BulkPreviewRow[];
     settings: BulkFormSettings;
     clusterLabel: string | null;
+    visibleClusters: readonly ClusterRow[];
   };
   response?: Response;
 }> {
@@ -685,7 +686,7 @@ export async function handleSerpPickPost(
     if (c) clusterLabel = c.label;
   }
 
-  return { step2Render: { rows, settings, clusterLabel } };
+  return { step2Render: { rows, settings, clusterLabel, visibleClusters } };
 }
 
 // Re-export `renderBulkPreview` so the index router can call a single
