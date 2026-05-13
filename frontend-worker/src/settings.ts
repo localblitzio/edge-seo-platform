@@ -100,10 +100,14 @@ function renderSlotRow(
     ? `<a href="${esc(slot.docs_url)}" target="_blank" rel="noopener noreferrer">Docs ↗</a>`
     : "";
   const masked = esc(maskSecret(value));
+  const reveal =
+    value !== null && value.length > 0
+      ? `<details class="reveal"><summary>Show</summary><code class="mono reveal-value">${esc(value)}</code></details>`
+      : "";
   const inputField =
     inputType === "textarea"
-      ? `<textarea id="${esc(fieldId)}" name="value" rows="6" placeholder="Paste new value to update; leave blank to clear" autocomplete="off"></textarea>`
-      : `<input id="${esc(fieldId)}" type="password" name="value" placeholder="Paste new value to update; leave blank to clear" autocomplete="off">`;
+      ? `<textarea id="${esc(fieldId)}" name="value" rows="6" placeholder="Paste new value to update; leave blank to test/clear saved" autocomplete="off"></textarea>`
+      : `<input id="${esc(fieldId)}" type="password" name="value" placeholder="Paste new value to update; leave blank to test/clear saved" autocomplete="off">`;
   const resultBlock = testResult ? renderTestResult(testResult) : "";
   return `<section class="section settings-slot">
   <header class="settings-slot-header">
@@ -111,12 +115,13 @@ function renderSlotRow(
     ${docsLink}
   </header>
   <p class="settings-slot-desc">${esc(slot.description)}</p>
-  <div class="settings-slot-current"><strong>Current:</strong> <code class="mono">${masked}</code></div>
+  <div class="settings-slot-current"><strong>Current:</strong> <code class="mono">${masked}</code> ${reveal}</div>
   ${meta}
   <form method="post" action="/app/settings/api-keys" class="settings-slot-form">
     <input type="hidden" name="key" value="${esc(slot.key)}">
     <label for="${esc(fieldId)}" class="visually-hidden">${esc(slot.label)}</label>
     ${inputField}
+    <p class="settings-test-hint">Tip: leave the field blank and click Test to verify the saved value.</p>
     <div class="form-actions">
       <button type="submit" name="action" value="save" class="btn-primary">Save</button>
       <button type="submit" name="action" value="test" class="btn-secondary">Test</button>
@@ -149,6 +154,12 @@ const SETTINGS_CSS = `
 .settings-test-err strong{background:var(--red);color:#fff}
 .settings-test-details{margin:.4rem 0 0;padding:.5rem;background:var(--bg);border-radius:var(--radius);font-size:.8rem;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;color:var(--fg)}
 .visually-hidden{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+.settings-slot .reveal{display:inline}
+.settings-slot .reveal>summary{display:inline-block;cursor:pointer;font-size:.75rem;color:var(--fg-muted);margin-left:.4rem;user-select:none}
+.settings-slot .reveal>summary:hover{color:var(--fg)}
+.settings-slot .reveal[open]>summary{color:var(--fg)}
+.settings-slot .reveal-value{display:inline-block;margin-left:.4rem;padding:.1rem .35rem;background:var(--bg-elevated,var(--bg));border:1px dashed var(--border);border-radius:var(--radius);font-size:.8rem;word-break:break-all}
+.settings-test-hint{margin:.35rem 0 .55rem;color:var(--fg-muted);font-size:.78rem}
 `;
 
 /**
@@ -179,6 +190,14 @@ function renderDataForSeoPairCard(
 ): string {
   const maskedLogin = esc(maskSecret(loginValue));
   const maskedPassword = esc(maskSecret(passwordValue));
+  const revealLogin =
+    loginValue && loginValue.length > 0
+      ? `<details class="reveal"><summary>Show</summary><code class="mono reveal-value">${esc(loginValue)}</code></details>`
+      : "";
+  const revealPassword =
+    passwordValue && passwordValue.length > 0
+      ? `<details class="reveal"><summary>Show</summary><code class="mono reveal-value">${esc(passwordValue)}</code></details>`
+      : "";
   const lastUpdated =
     loginRow || passwordRow
       ? `<div class="meta">Last updated ${esc(
@@ -197,16 +216,17 @@ function renderDataForSeoPairCard(
   </header>
   <p class="settings-slot-desc">Login + API password used together (HTTP Basic auth). Both required for the Create-from-SERP flow. Get the API password from app.dataforseo.com → API Dashboard — it's separate from your account login password.</p>
   <div class="settings-slot-current">
-    <div><strong>Login:</strong> <code class="mono">${maskedLogin}</code></div>
-    <div><strong>API password:</strong> <code class="mono">${maskedPassword}</code></div>
+    <div><strong>Login:</strong> <code class="mono">${maskedLogin}</code> ${revealLogin}</div>
+    <div><strong>API password:</strong> <code class="mono">${maskedPassword}</code> ${revealPassword}</div>
   </div>
   ${lastUpdated}
   <form method="post" action="/app/settings/api-keys" class="settings-slot-form">
     <input type="hidden" name="pair" value="${DATAFORSEO_PAIR}">
     <label for="dataforseo-login" class="visually-hidden">DataForSEO login</label>
-    <input id="dataforseo-login" name="login" type="text" placeholder="DataForSEO login (email)" autocomplete="off">
+    <input id="dataforseo-login" name="login" type="text" placeholder="DataForSEO login (email) — leave blank to keep saved" autocomplete="off">
     <label for="dataforseo-password" class="visually-hidden">DataForSEO API password</label>
-    <input id="dataforseo-password" name="password" type="password" placeholder="DataForSEO API password" autocomplete="off">
+    <input id="dataforseo-password" name="password" type="password" placeholder="DataForSEO API password — leave blank to keep saved" autocomplete="off">
+    <p class="settings-test-hint">Tip: leave both fields blank and click Test to verify the saved credentials.</p>
     <div class="form-actions">
       <button type="submit" name="action" value="save_pair" class="btn-primary">Save both</button>
       <button type="submit" name="action" value="test_pair" class="btn-secondary">Test</button>
@@ -399,8 +419,23 @@ async function handleDataForSeoPairPost(
 }
 
 /**
+ * Resolve the value to test: if the form value is non-empty use it,
+ * otherwise fall back to the saved secret value. Lets the operator
+ * leave the input blank and click Test to verify what's stored.
+ */
+async function effectiveTestValue(
+  env: SettingsEnv,
+  key: string,
+  formValue: string,
+): Promise<string> {
+  if (formValue.trim().length > 0) return formValue;
+  return (await getSecret(env, key)) ?? "";
+}
+
+/**
  * Dispatch table — given a slot key + form value, run the matching
- * tester. Unknown keys return a generic error.
+ * tester. When the form value is blank, falls back to the saved
+ * value so "Test" verifies the stored secret.
  */
 async function runTest(
   env: SettingsEnv,
@@ -411,30 +446,39 @@ async function runTest(
   switch (key) {
     case "INDEXNOW_KEY": {
       const host = await pickIndexNowTestHost(env, user);
-      return testIndexNowKey(value, host ?? "");
+      const v = await effectiveTestValue(env, key, value);
+      return testIndexNowKey(v, host ?? "");
     }
-    case "GSC_SERVICE_ACCOUNT_JSON":
-      return testGscServiceAccount(value);
+    case "GSC_SERVICE_ACCOUNT_JSON": {
+      const v = await effectiveTestValue(env, key, value);
+      return testGscServiceAccount(v);
+    }
     case "OMEGA_INDEXER_KEY": {
       const host = await pickIndexNowTestHost(env, user);
-      return testOmegaIndexerKey(value, host ?? "");
+      const v = await effectiveTestValue(env, key, value);
+      return testOmegaIndexerKey(v, host ?? "");
     }
     case "SINBYTE_API_KEY": {
       const host = await pickIndexNowTestHost(env, user);
-      return testSinbyteKey(value, host ?? "");
+      const v = await effectiveTestValue(env, key, value);
+      return testSinbyteKey(v, host ?? "");
     }
-    case "PRIME_INDEXER_KEY":
-      return testPrimeIndexerKey(value);
+    case "PRIME_INDEXER_KEY": {
+      const v = await effectiveTestValue(env, key, value);
+      return testPrimeIndexerKey(v);
+    }
     case "DATAFORSEO_LOGIN": {
       // Pair the form value with the saved password. Operator must
       // save the password first if they're updating both — the form
       // only POSTs the single tested row's value.
+      const effLogin = await effectiveTestValue(env, "DATAFORSEO_LOGIN", value);
       const savedPassword = (await getSecret(env, "DATAFORSEO_PASSWORD")) ?? "";
-      return testDataForSeoCredentials(value, savedPassword);
+      return testDataForSeoCredentials(effLogin, savedPassword);
     }
     case "DATAFORSEO_PASSWORD": {
       const savedLogin = (await getSecret(env, "DATAFORSEO_LOGIN")) ?? "";
-      return testDataForSeoCredentials(savedLogin, value);
+      const effPassword = await effectiveTestValue(env, "DATAFORSEO_PASSWORD", value);
+      return testDataForSeoCredentials(savedLogin, effPassword);
     }
     default:
       return { kind: "err", message: `No tester defined for slot "${key}".` };
