@@ -64,6 +64,20 @@ export const SECRET_SLOTS: readonly SecretSlot[] = [
       "Submits URLs to Prime Indexer's bulk-submission service. Triggered alongside IndexNow on every config save. API integration pending — slot reserved.",
     docs_url: "https://www.theprimeindexer.com/",
   },
+  {
+    key: "DATAFORSEO_LOGIN",
+    label: "DataForSEO login (email)",
+    description:
+      "DataForSEO API account login (the email you sign in with). Used by the Create-from-SERP flow to fetch Google organic results for a keyword. Paired with DATAFORSEO_PASSWORD via HTTP basic auth.",
+    docs_url: "https://docs.dataforseo.com/v3/auth/",
+  },
+  {
+    key: "DATAFORSEO_PASSWORD",
+    label: "DataForSEO password (API key)",
+    description:
+      "DataForSEO API password. Find it on the API Dashboard once logged in. Used together with DATAFORSEO_LOGIN to authenticate SERP fetches.",
+    docs_url: "https://docs.dataforseo.com/v3/auth/",
+  },
 ] as const;
 
 /** Lookup by key. Returns undefined when the key isn't a known slot. */

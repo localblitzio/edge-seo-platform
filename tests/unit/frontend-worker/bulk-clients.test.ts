@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   MAX_BULK_BATCH_SIZE,
   buildBulkClientConfigJson,
+  canonicalRuleForMode,
+  defaultZoneForRow,
   deriveClientIdFromHostname,
   hostnameFromUrl,
   parseSourceUrls,
@@ -287,9 +289,12 @@ describe("validateBulkFormSettings — sad paths", () => {
 describe("buildBulkClientConfigJson", () => {
   const settings = {
     zone: "localpage.us.com" as const,
+    zone_strategy: "single" as const,
     attested_by_email: "ops@example.com",
     attested_ip: "1.2.3.4",
     scope: "full_site" as const,
+    bypass_attestation: false,
+    canonical_mode: "none" as const,
     cluster_id: null,
     status: "active" as const,
   };
@@ -299,6 +304,7 @@ describe("buildBulkClientConfigJson", () => {
     client_id: "acme-com",
     renamed_from_collision: false,
     include: true,
+    zone: "localpage.us.com" as const,
     proxy_domain: "acme-com.localpage.us.com",
     error: null,
   };
@@ -326,6 +332,150 @@ describe("buildBulkClientConfigJson", () => {
       buildBulkClientConfigJson(row, { ...settings, status: "paused" }, "2026-05-07T00:00:00Z"),
     );
     expect(cfg.status).toBe("paused");
+  });
+
+  it("injects a wildcard self-canonical rule when canonical_mode=self", () => {
+    const cfg = JSON.parse(
+      buildBulkClientConfigJson(
+        row,
+        { ...settings, canonical_mode: "self" },
+        "2026-05-07T00:00:00Z",
+      ),
+    );
+    expect(cfg.canonicals).toHaveLength(1);
+    expect(cfg.canonicals[0]).toMatchObject({
+      match: "^/.*",
+      strategy: { type: "self" },
+      sync_og_url: true,
+      sync_twitter_url: true,
+      sync_jsonld_url: true,
+    });
+  });
+
+  it("injects an origin-canonical rule when canonical_mode=origin", () => {
+    const cfg = JSON.parse(
+      buildBulkClientConfigJson(
+        row,
+        { ...settings, canonical_mode: "origin" },
+        "2026-05-07T00:00:00Z",
+      ),
+    );
+    expect(cfg.canonicals[0].strategy.type).toBe("origin");
+  });
+
+  it("uses bypass_actor_email for authorization when bypass=true", () => {
+    const cfg = JSON.parse(
+      buildBulkClientConfigJson(
+        row,
+        { ...settings, bypass_attestation: true, attested_by_email: "ignored@example.com" },
+        "2026-05-07T00:00:00Z",
+        "operator@platform.test",
+      ),
+    );
+    expect(cfg.authorization.attested_by_email).toBe("operator@platform.test");
+  });
+
+  it("falls back to settings.attested_by_email when bypass + no actor passed", () => {
+    const cfg = JSON.parse(
+      buildBulkClientConfigJson(
+        row,
+        { ...settings, bypass_attestation: true },
+        "2026-05-07T00:00:00Z",
+      ),
+    );
+    expect(cfg.authorization.attested_by_email).toBe("ops@example.com");
+  });
+});
+
+describe("canonicalRuleForMode", () => {
+  it("returns null for none", () => {
+    expect(canonicalRuleForMode("none")).toBeNull();
+  });
+
+  it("returns self-strategy wildcard for self", () => {
+    expect(canonicalRuleForMode("self")).toEqual({
+      match: "^/.*",
+      strategy: { type: "self" },
+      sync_og_url: true,
+      sync_twitter_url: true,
+      sync_jsonld_url: true,
+    });
+  });
+
+  it("returns origin-strategy wildcard for origin", () => {
+    expect(canonicalRuleForMode("origin")).toMatchObject({
+      strategy: { type: "origin" },
+    });
+  });
+});
+
+describe("defaultZoneForRow", () => {
+  it("alternates between registered zones", () => {
+    expect(defaultZoneForRow(0)).toBe("localpage.us.com");
+    expect(defaultZoneForRow(1)).toBe("localsite.us.com");
+    expect(defaultZoneForRow(2)).toBe("localpage.us.com");
+    expect(defaultZoneForRow(3)).toBe("localsite.us.com");
+  });
+});
+
+describe("validateBulkFormSettings — new fields", () => {
+  it("defaults canonical_mode to 'none' when absent", () => {
+    const r = validateBulkFormSettings({
+      zone: "localpage.us.com",
+      attested_by_email: "ops@example.com",
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.canonical_mode).toBe("none");
+  });
+
+  it("accepts canonical_mode=self", () => {
+    const r = validateBulkFormSettings({
+      zone: "localpage.us.com",
+      attested_by_email: "ops@example.com",
+      canonical_mode: "self",
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.canonical_mode).toBe("self");
+  });
+
+  it("rejects unknown canonical_mode", () => {
+    const r = validateBulkFormSettings({
+      zone: "localpage.us.com",
+      attested_by_email: "ops@example.com",
+      canonical_mode: "everywhere",
+    });
+    expect(r.ok).toBe(false);
+  });
+
+  it("defaults zone_strategy to 'single' when absent", () => {
+    const r = validateBulkFormSettings({
+      zone: "localpage.us.com",
+      attested_by_email: "ops@example.com",
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.zone_strategy).toBe("single");
+  });
+
+  it("accepts zone_strategy=mixed", () => {
+    const r = validateBulkFormSettings({
+      zone: "localpage.us.com",
+      attested_by_email: "ops@example.com",
+      zone_strategy: "mixed",
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.zone_strategy).toBe("mixed");
+  });
+
+  it("skips attested_by_email requirement when bypass_attestation=1", () => {
+    // Without bypass + no email → rejected. With bypass + no email → accepted.
+    const without = validateBulkFormSettings({ zone: "localpage.us.com" });
+    expect(without.ok).toBe(false);
+    const withBypass = validateBulkFormSettings({
+      zone: "localpage.us.com",
+      bypass_attestation: "1",
+    });
+    expect(withBypass.ok).toBe(true);
+    if (withBypass.ok) expect(withBypass.value.bypass_attestation).toBe(true);
   });
 });
 

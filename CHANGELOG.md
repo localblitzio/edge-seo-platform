@@ -4,6 +4,39 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [SemVer](https://semver.org/).
 
+## [Unreleased] — SERP-driven bulk create
+
+**Added — `/app/clients/serp-new` flow.**
+
+Operators can paste a Google keyword, run a SERP fetch via DataForSEO, pick
+which organic results to proxy, and create up to 25 proxied sites in one
+batch. Reuses the existing bulk-create preview/confirm pipeline so the
+codepath after the SERP step is the paste-URLs path.
+
+- New module [frontend-worker/src/dataforseo.ts](frontend-worker/src/dataforseo.ts):
+  thin client for `/v3/serp/google/organic/live/advanced`. Pure
+  `parseSerpResponse` + `buildSerpRequestBody` helpers for unit-tested
+  parsing without network IO; `fetchSerpResults` is the wrapper that
+  reads credentials from the secret store and hits the API.
+- New module [frontend-worker/src/serp-new.ts](frontend-worker/src/serp-new.ts):
+  3-step flow (query → picker → preview). `serpResultsToPreviewRows`
+  is the pure SERP→bulk-rows transform, exercised in unit tests.
+- New secret slots `DATAFORSEO_LOGIN` + `DATAFORSEO_PASSWORD` in
+  [src/secrets/slots.ts](src/secrets/slots.ts).
+- Existing bulk-create form gains three shared-settings options that
+  the SERP flow also uses:
+  - `canonical_mode` — `none` | `self` | `origin`. Injects a wildcard
+    `^/.*` canonical rule into every created config. SERP flow defaults
+    to `self`; paste-URLs flow defaults to `none`.
+  - `zone_strategy` — `single` | `mixed`. `mixed` round-robins between
+    the registered `PROXY_ZONES` (localpage.us.com / localsite.us.com)
+    and exposes a per-row zone selector in the preview table.
+  - `bypass_attestation` — operator self-attests instead of capturing
+    third-party permission. Audit log records `config_create_bypass`
+    with `bypass=true` in `notes`. The created config still has a
+    valid `authorization` field (operator's email + now + full_site
+    scope) so the schema requirement is satisfied.
+
 ## [Unreleased] — Phase 2 admin editor
 
 **Added — write surface on the admin worker.**

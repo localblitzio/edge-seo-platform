@@ -573,6 +573,12 @@ export function renderClusterDetail(
   row: ClusterRow,
   members: ClusterMemberRow[],
   visibleClients: ClientRow[],
+  /**
+   * Optional extra HTML to append after the main "Member sites" card.
+   * Used to inject the "Submit cluster to indexers" form block from
+   * embeds.ts without making clusters.ts depend on embeds.ts.
+   */
+  extras?: string,
 ): string {
   const visibleIds = new Set(visibleClients.map((c) => c.client_id));
   const visibleClientById = new Map(visibleClients.map((c) => [c.client_id, c]));
@@ -612,6 +618,7 @@ export function renderClusterDetail(
     <div class="actions-row">
       <a class="btn btn-primary" href="/app/clusters/${row.id}/edit">Edit</a>
       <a class="btn" href="/app/clients/bulk-new?cluster_id=${row.id}" title="Open the bulk-create form with this cluster pre-selected — every site you create joins this cluster">+ Bulk-create sites for this cluster</a>
+      <a class="btn" href="/app/embeds" title="Pick an embed from the library, then apply it to this cluster">Apply embed</a>
       ${statusActions}
     </div>
     ${
@@ -630,6 +637,7 @@ export function renderClusterDetail(
             </table>`
       }
     </div>
+    ${extras ?? ""}
     <p class="subtitle" style="font-size:.85rem;margin-top:1.5rem">Slice A — registry only. Subsequent slices will let this cluster drive link-project bulk-apply, auto-schema injection, and cross-linking between member sites.</p>`;
 }
 

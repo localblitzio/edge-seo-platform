@@ -165,6 +165,65 @@ export interface ConfiguredIndexerResult {
  * "Reindex now" button on the Indexing page (renders results to the
  * operator).
  */
+/**
+ * Same as `pingAllConfiguredIndexers` but restricted to a subset of
+ * slot keys the caller picked (e.g. operator-selected checkboxes at
+ * embed-apply time). Unknown / unbound slot keys are skipped, NOT
+ * errors. Use this when "submit to ALL indexers" is too expensive
+ * and the operator wants to spend credits selectively.
+ *
+ * @param selectedSlotKeys subset of `slotKey` values to dispatch to;
+ *   anything not in `ACTIVE_INDEXERS` is ignored.
+ */
+export async function pingSelectedIndexers(
+  env: {
+    CONFIG_KV: import("@cloudflare/workers-types").KVNamespace;
+    CONFIG_DB: import("@cloudflare/workers-types").D1Database;
+  },
+  urls: readonly string[],
+  context: { proxyDomain: string },
+  selectedSlotKeys: readonly string[],
+): Promise<ConfiguredIndexerResult[]> {
+  const allowed = new Set(selectedSlotKeys);
+  const { getSecret } = await import("./store.js");
+  const sharedEnv = env as unknown as Parameters<typeof getSecret>[0];
+  const indexers = ACTIVE_INDEXERS.filter((i) => allowed.has(i.slotKey));
+  if (indexers.length === 0) return [];
+  const keys = await Promise.all(indexers.map((i) => getSecret(sharedEnv, i.slotKey)));
+  const tasks: Promise<ConfiguredIndexerResult | null>[] = [];
+  for (let i = 0; i < indexers.length; i++) {
+    const indexer = indexers[i];
+    const key = keys[i];
+    if (!indexer || !key) continue;
+    tasks.push(
+      indexer
+        .submit(key, urls, context)
+        .then(
+          (result): ConfiguredIndexerResult => ({
+            slotKey: indexer.slotKey,
+            label: indexer.label,
+            result,
+          }),
+        )
+        .catch(
+          (e): ConfiguredIndexerResult => ({
+            slotKey: indexer.slotKey,
+            label: indexer.label,
+            result: {
+              ok: false,
+              submitted: 0,
+              successes: 0,
+              failures: 0,
+              message: `${indexer.label}: threw — ${e instanceof Error ? e.message : String(e)}`,
+            },
+          }),
+        ),
+    );
+  }
+  const settled = await Promise.all(tasks);
+  return settled.filter((r): r is ConfiguredIndexerResult => r !== null);
+}
+
 export async function pingAllConfiguredIndexers(
   env: {
     CONFIG_KV: import("@cloudflare/workers-types").KVNamespace;
