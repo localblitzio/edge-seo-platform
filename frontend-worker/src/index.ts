@@ -108,6 +108,7 @@ import {
 } from "./clusters.js";
 import { type EmailBinding, resetPasswordMessage, sendEmail } from "./email.js";
 import {
+  type PlacementFilters,
   handleClusterSubmitIndexersPost,
   handleEmbedApplyConfirmPost,
   handleEmbedApplyPost,
@@ -115,9 +116,11 @@ import {
   handleEmbedEditPost,
   handleEmbedNewPost,
   handleEmbedReapplyPost,
+  handlePlacementRemovePost,
   loadPlacementsForEmbed,
   loadVisibleEmbed,
   loadVisibleEmbeds,
+  loadVisiblePlacements,
   renderClusterSubmitIndexersFormBlock,
   renderClusterSubmitResult,
   renderEmbedApplyForm,
@@ -126,6 +129,7 @@ import {
   renderEmbedDetail,
   renderEmbedForm,
   renderEmbedsList,
+  renderPlacementsList,
 } from "./embeds.js";
 import { FAVICON_DATA_URL } from "./favicon-data-url.js";
 import {
@@ -1855,6 +1859,51 @@ export default {
       );
     }
 
+    // Placements analytics — MUST come before the /app/embeds/:id catch-all.
+    if (path === "/app/embeds/placements" && method === "GET") {
+      if (!user) return redirectToLogin(url);
+      const clients = await loadVisibleClients(env, user);
+      const filters: PlacementFilters = {};
+      const embedIdRaw = url.searchParams.get("embed_id");
+      if (embedIdRaw) {
+        const n = Number.parseInt(embedIdRaw, 10);
+        if (Number.isFinite(n) && n > 0) filters.embed_id = n;
+      }
+      const clusterIdRaw = url.searchParams.get("cluster_id");
+      if (clusterIdRaw) {
+        const n = Number.parseInt(clusterIdRaw, 10);
+        if (Number.isFinite(n) && n > 0) filters.cluster_id = n;
+      }
+      const search = url.searchParams.get("client_search");
+      if (search && search.trim().length > 0) filters.client_search = search;
+      const [rows, embeds, allClusters] = await Promise.all([
+        loadVisiblePlacements(env, user, filters),
+        loadVisibleEmbeds(env, user),
+        loadVisibleClusters(env, user),
+      ]);
+      return htmlResponse(
+        htmlPage({
+          title: "Embed placements — Edge SEO Platform",
+          body: appLayout({
+            title: "Embed placements",
+            content: renderPlacementsList({
+              rows,
+              embeds,
+              clusters: allClusters,
+              filters,
+              user,
+            }),
+            activeNav: "embeds",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+      );
+    }
+
     if (path.startsWith("/app/embeds/")) {
       if (!user) return redirectToLogin(url);
       const rest = path.slice("/app/embeds/".length);
@@ -2025,6 +2074,12 @@ export default {
             flash: null,
           }),
         );
+      }
+
+      if (sub.startsWith("remove/") && method === "POST") {
+        const clientId = decodeURIComponent(sub.slice("remove/".length));
+        if (!clientId) return new Response("Missing client_id", { status: 400 });
+        return handlePlacementRemovePost(request, env, url, user, embedId, clientId);
       }
 
       if (sub === "reapply" && method === "POST") {
