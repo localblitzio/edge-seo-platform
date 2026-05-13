@@ -255,6 +255,98 @@ export async function testOmegaIndexerKey(value: string, testHost: string): Prom
 }
 
 /**
+ * Test DataForSEO credentials by calling /v3/appendix/user_data — a
+ * read-only endpoint that returns account info (money balance, rates,
+ * timezone) and costs nothing. Surfaces the live balance so the
+ * operator gets useful confirmation beyond "credentials valid."
+ *
+ * Both halves of the credential are required — DataForSEO uses HTTP
+ * Basic auth. The caller passes both values (one from the form being
+ * tested, one from the saved secret store); if either is empty, the
+ * test fails with a clear "save the other first" message.
+ *
+ * @param login DataForSEO account email
+ * @param password DataForSEO API password (the one from the dashboard,
+ *   NOT the account login password)
+ */
+export async function testDataForSeoCredentials(
+  login: string,
+  password: string,
+): Promise<TestResult> {
+  const l = login.trim();
+  const p = password.trim();
+  if (!l || !p) {
+    return {
+      kind: "err",
+      message:
+        "DataForSEO needs BOTH login and password to verify. Save the other field first (Save button on that row), then click Test on either — it will pair the form value with the saved counterpart.",
+    };
+  }
+  const auth = `Basic ${btoa(`${l}:${p}`)}`;
+  let res: Response;
+  try {
+    res = await fetch("https://api.dataforseo.com/v3/appendix/user_data", {
+      headers: { authorization: auth },
+    });
+  } catch (e) {
+    return {
+      kind: "err",
+      message: "Network error reaching api.dataforseo.com. Check edge connectivity and retry.",
+      details: e instanceof Error ? e.message : String(e),
+    };
+  }
+  if (res.status === 401 || res.status === 403) {
+    const body = await res.text().catch(() => "");
+    return {
+      kind: "err",
+      message: `DataForSEO rejected the credentials (HTTP ${res.status}). Verify the login email and API password (separate from your account login) on app.dataforseo.com → API Dashboard.`,
+      ...(body ? { details: body.slice(0, 500) } : {}),
+    };
+  }
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    return {
+      kind: "warn",
+      message: `Unexpected HTTP ${res.status} from DataForSEO. Credentials may still be valid — retry in a few minutes.`,
+      ...(body ? { details: body.slice(0, 500) } : {}),
+    };
+  }
+  const json = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+  if (json && typeof json.status_code === "number" && json.status_code >= 40000) {
+    const msg = typeof json.status_message === "string" ? json.status_message : "DataForSEO error";
+    return {
+      kind: "err",
+      message: `DataForSEO error ${json.status_code}: ${msg}`,
+    };
+  }
+  // Parse the user_data payload to surface the money balance.
+  // Shape: { tasks: [{ result: [{ money: { balance: 12.34, currency: "USD" }, ... }] }] }
+  let balanceText = "";
+  if (json && Array.isArray(json.tasks) && json.tasks.length > 0) {
+    const t = json.tasks[0];
+    if (t && typeof t === "object" && Array.isArray((t as Record<string, unknown>).result)) {
+      const r = (t as Record<string, unknown>).result as unknown[];
+      const first = r[0];
+      if (first && typeof first === "object") {
+        const money = (first as Record<string, unknown>).money;
+        if (money && typeof money === "object") {
+          const m = money as Record<string, unknown>;
+          const balance = typeof m.balance === "number" ? m.balance : null;
+          const currency = typeof m.currency === "string" ? m.currency : "";
+          if (balance !== null) {
+            balanceText = ` Current balance: ${balance.toFixed(2)} ${currency}.`;
+          }
+        }
+      }
+    }
+  }
+  return {
+    kind: "ok",
+    message: `Credentials valid (HTTP ${res.status}).${balanceText}`,
+  };
+}
+
+/**
  * Stub tester — kept for any future indexer slot whose API contract
  * isn't yet wired. All current indexers (IndexNow, Prime, Sinbyte,
  * Omega) have real testers above; this is the fallback for new slots.

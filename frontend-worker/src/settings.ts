@@ -22,12 +22,14 @@ import { SECRET_SLOTS, type SecretSlot } from "../../src/secrets/slots.js";
 import {
   type SecretRow,
   getAllSlotValues,
+  getSecret,
   listSecretRows,
   maskSecret,
   setSecret,
 } from "../../src/secrets/store.js";
 import {
   type TestResult,
+  testDataForSeoCredentials,
   testGscServiceAccount,
   testIndexNowKey,
   testOmegaIndexerKey,
@@ -264,6 +266,17 @@ async function runTest(
     }
     case "PRIME_INDEXER_KEY":
       return testPrimeIndexerKey(value);
+    case "DATAFORSEO_LOGIN": {
+      // Pair the form value with the saved password. Operator must
+      // save the password first if they're updating both — the form
+      // only POSTs the single tested row's value.
+      const savedPassword = (await getSecret(env, "DATAFORSEO_PASSWORD")) ?? "";
+      return testDataForSeoCredentials(value, savedPassword);
+    }
+    case "DATAFORSEO_PASSWORD": {
+      const savedLogin = (await getSecret(env, "DATAFORSEO_LOGIN")) ?? "";
+      return testDataForSeoCredentials(savedLogin, value);
+    }
     default:
       return { kind: "err", message: `No tester defined for slot "${key}".` };
   }
