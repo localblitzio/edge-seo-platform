@@ -92,6 +92,13 @@ import {
   renderBulkResult,
 } from "./bulk-clients.js";
 import {
+  defaultSerpPrefill,
+  handleSerpPickPost,
+  handleSerpQueryPost,
+  renderSerpNewForm,
+  renderSerpPicker,
+} from "./serp-new.js";
+import {
   handleClusterStatusPost,
   handleEditClusterPost,
   handleNewClusterPost,
@@ -953,9 +960,12 @@ export default {
             content: renderBulkNewForm({
               prefill: {
                 zone: "localpage.us.com",
+                zone_strategy: "single",
                 attested_by_email: user.email,
                 attested_ip: "",
                 scope: "full_site",
+                bypass_attestation: false,
+                canonical_mode: "none",
                 cluster_id: preselectedClusterId,
                 status: "active",
                 raw_urls: "",
@@ -1029,6 +1039,103 @@ export default {
           body: appLayout({
             title: "Bulk-create result",
             content: renderBulkResult(result.result),
+            activeNav: "clients",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+      );
+    }
+
+    /* ─── Create sites from SERP (/app/clients/serp-new) ─── */
+    /* MUST come before the catch-all "/app/clients/<id>" route below. */
+
+    if (path === "/app/clients/serp-new" && method === "GET") {
+      if (!user) return redirectToLogin(url);
+      const clients = await loadVisibleClients(env, user);
+      const visibleClusters = await loadVisibleClusters(env, user);
+      return htmlResponse(
+        htmlPage({
+          title: "Create sites from SERP — Edge SEO Platform",
+          body: appLayout({
+            title: "Create sites from SERP",
+            content: renderSerpNewForm({
+              prefill: defaultSerpPrefill(),
+              visibleClusters,
+              errors: [],
+            }),
+            activeNav: "clients",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+      );
+    }
+
+    if (path === "/app/clients/serp-new/preview" && method === "POST") {
+      if (!user) return redirectToLogin(url);
+      const result = await handleSerpQueryPost(request, env, url, user);
+      if (result.response) return result.response;
+      const clients = await loadVisibleClients(env, user);
+      if (result.formRender) {
+        return htmlResponse(
+          htmlPage({
+            title: "Create sites from SERP — Edge SEO Platform",
+            body: appLayout({
+              title: "Create sites from SERP",
+              content: renderSerpNewForm(result.formRender),
+              activeNav: "clients",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+          { status: 400 },
+        );
+      }
+      if (result.pickerRender) {
+        return htmlResponse(
+          htmlPage({
+            title: "SERP results — Edge SEO Platform",
+            body: appLayout({
+              title: "SERP results",
+              content: renderSerpPicker({ ...result.pickerRender, errors: [] }),
+              activeNav: "clients",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+      return new Response("Internal error", { status: 500 });
+    }
+
+    if (path === "/app/clients/serp-new/preview-pick" && method === "POST") {
+      if (!user) return redirectToLogin(url);
+      const result = await handleSerpPickPost(request, env, url, user);
+      if (result.response) return result.response;
+      if (!result.step2Render) return new Response("Internal error", { status: 500 });
+      const clients = await loadVisibleClients(env, user);
+      // Render the preview via the existing bulk preview template —
+      // confirm POST goes to /app/clients/bulk-new/confirm which is
+      // the same final step as the paste-URLs flow.
+      return htmlResponse(
+        htmlPage({
+          title: "Preview — SERP create — Edge SEO Platform",
+          body: appLayout({
+            title: "Preview — SERP create",
+            content: renderBulkPreview({ ...result.step2Render, errors: [] }),
             activeNav: "clients",
             user,
             flash,

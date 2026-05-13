@@ -32,6 +32,18 @@ const CLIENT_ID_PATTERN = /^[a-z0-9-]+$/;
 const ATTEST_SCOPES = ["full_site", "specified_paths"] as const;
 type AttestScope = (typeof ATTEST_SCOPES)[number];
 
+/**
+ * Canonical-tag policy applied to every site created in the batch.
+ *   - `none`: don't inject any canonical rule (operator can add later)
+ *   - `self`: inject a wildcard rule with strategy `self` — proxy is
+ *     the canonical URL. SEO-aggressive; the standard duplicate-
+ *     content risk PRD §13 calls out
+ *   - `origin`: inject a wildcard rule with strategy `origin` — points
+ *     back at the source domain. The safe default for proxies
+ */
+export const CANONICAL_MODES = ["none", "self", "origin"] as const;
+export type CanonicalMode = (typeof CANONICAL_MODES)[number];
+
 export interface BulkPreviewRow {
   /** The original URL the operator pasted (post-trim, post-scheme-prepend). */
   source_url: string;
@@ -43,6 +55,12 @@ export interface BulkPreviewRow {
   renamed_from_collision: boolean;
   /** True when the row should be created (operator can uncheck in preview). */
   include: boolean;
+  /**
+   * Per-row proxy zone — set explicitly when the form's `zone_strategy`
+   * is `mixed` (operator can override per row in the preview table).
+   * For `single` mode this is always the batch-level zone.
+   */
+  zone: ProxyZone;
   /** Computed proxy domain — `<client_id>.<zone>`. */
   proxy_domain: string;
   /** Per-row validation problem (e.g. malformed URL); rows with errors auto-uncheck. */
@@ -50,10 +68,31 @@ export interface BulkPreviewRow {
 }
 
 export interface BulkFormSettings {
+  /** Batch-level zone; in `mixed` strategy this is the default for new rows. */
   zone: ProxyZone;
+  /**
+   * `single` — every row uses `zone`. `mixed` — preview shows a
+   * per-row zone selector; rows alternate between the registered
+   * zones by default.
+   */
+  zone_strategy: "single" | "mixed";
   attested_by_email: string;
   attested_ip: string;
   scope: AttestScope;
+  /**
+   * When true, the operator skips capturing third-party attestation
+   * (the source-domain owner's permission) and takes responsibility
+   * themselves. The created config still has an `authorization`
+   * field — populated with the operator's own email + the current
+   * timestamp — so the schema requirement (§4) is satisfied and the
+   * Worker's authorization check (§5.2) passes.
+   *
+   * Audit-log entries created with this flag include `bypass=true` in
+   * `notes` so the trail clearly records who took the risk.
+   */
+  bypass_attestation: boolean;
+  /** Canonical-tag policy injected into every created config. */
+  canonical_mode: CanonicalMode;
   /** When non-null, every created site is also added to this cluster (id). */
   cluster_id: number | null;
   /** Initial status applied to every created site. */
@@ -184,11 +223,15 @@ export function validateBulkFormSettings(
     zone = zoneRaw as ProxyZone;
   }
 
+  const bypass = raw.bypass_attestation === "1" || raw.bypass_attestation === "true";
+
   const email = (raw.attested_by_email ?? "").trim();
-  if (email.length === 0) {
-    errors.push("attested_by_email is required");
-  } else if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
-    errors.push("attested_by_email must look like an email address");
+  if (!bypass) {
+    if (email.length === 0) {
+      errors.push("attested_by_email is required");
+    } else if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+      errors.push("attested_by_email must look like an email address");
+    }
   }
 
   const ip = (raw.attested_ip ?? "0.0.0.0").trim() || "0.0.0.0";
@@ -199,6 +242,22 @@ export function validateBulkFormSettings(
     errors.push(`scope must be one of: ${ATTEST_SCOPES.join(", ")}`);
   } else {
     scope = scopeRaw as AttestScope;
+  }
+
+  const canonicalRaw = (raw.canonical_mode ?? "none").trim();
+  let canonical_mode: CanonicalMode = "none";
+  if ((CANONICAL_MODES as readonly string[]).includes(canonicalRaw)) {
+    canonical_mode = canonicalRaw as CanonicalMode;
+  } else {
+    errors.push(`canonical_mode must be one of: ${CANONICAL_MODES.join(", ")}`);
+  }
+
+  const strategyRaw = (raw.zone_strategy ?? "single").trim();
+  let zone_strategy: BulkFormSettings["zone_strategy"] = "single";
+  if (strategyRaw === "single" || strategyRaw === "mixed") {
+    zone_strategy = strategyRaw;
+  } else {
+    errors.push("zone_strategy must be 'single' or 'mixed'");
   }
 
   let cluster_id: number | null = null;
@@ -225,12 +284,47 @@ export function validateBulkFormSettings(
     ok: true,
     value: {
       zone,
+      zone_strategy,
       attested_by_email: email,
       attested_ip: ip,
       scope,
+      bypass_attestation: bypass,
+      canonical_mode,
       cluster_id,
       status,
     },
+  };
+}
+
+/**
+ * Default zone for the i-th row in a `mixed` batch — round-robins
+ * through the registered `PROXY_ZONES`. Operators can override per
+ * row in the preview table.
+ */
+export function defaultZoneForRow(index: number): ProxyZone {
+  // PROXY_ZONES has length ≥ 1 (compile-time tuple), so the modulo
+  // access is always defined — the `?? PROXY_ZONES[0]` satisfies
+  // `noUncheckedIndexedAccess` without changing behavior.
+  return PROXY_ZONES[index % PROXY_ZONES.length] ?? PROXY_ZONES[0];
+}
+
+/**
+ * Build the wildcard canonical rule the bulk path injects for
+ * `canonical_mode = self | origin`. Returns null for `none`.
+ *
+ * Wildcard `^/.*` is intentional: bulk-created sites usually proxy
+ * a whole upstream domain, so one rule covers every path. Operators
+ * can layer per-page canonicals later without conflict (rules later
+ * in the array override earlier ones for matching paths).
+ */
+export function canonicalRuleForMode(mode: CanonicalMode): Record<string, unknown> | null {
+  if (mode === "none") return null;
+  return {
+    match: "^/.*",
+    strategy: { type: mode },
+    sync_og_url: true,
+    sync_twitter_url: true,
+    sync_jsonld_url: true,
   };
 }
 
@@ -245,14 +339,26 @@ export function buildBulkClientConfigJson(
   row: BulkPreviewRow,
   settings: BulkFormSettings,
   attested_at: string,
+  /**
+   * Email to record on the authorization object when
+   * `bypass_attestation` is true — the schema requires a valid email
+   * and we use the operator's own as the self-attestation marker.
+   * Optional; falls back to `settings.attested_by_email` (which the
+   * non-bypass path validates as a real email anyway).
+   */
+  bypass_actor_email?: string,
 ): string {
+  const auth_email = settings.bypass_attestation
+    ? (bypass_actor_email ?? settings.attested_by_email)
+    : settings.attested_by_email;
+  const canonicalRule = canonicalRuleForMode(settings.canonical_mode);
   return JSON.stringify({
     client_id: row.client_id,
     proxy_domain: row.proxy_domain,
     source_domain: row.source_domain,
     mode: "subdomain_proxy",
     authorization: {
-      attested_by_email: settings.attested_by_email,
+      attested_by_email: auth_email,
       attested_at,
       attested_ip: settings.attested_ip,
       scope: settings.scope,
@@ -268,7 +374,7 @@ export function buildBulkClientConfigJson(
       },
     ],
     redirects: { static: [], patterns: [], conditional: [] },
-    canonicals: [],
+    canonicals: canonicalRule === null ? [] : [canonicalRule],
     schema_injections: [],
     link_rewrites: [],
     element_removals: [],
@@ -323,7 +429,7 @@ function actorIp(request: Request): string {
 
 /* ─── Renderers ─── */
 
-interface BulkFormPrefill extends BulkFormSettings {
+export interface BulkFormPrefill extends BulkFormSettings {
   raw_urls: string;
 }
 
@@ -332,9 +438,14 @@ function rawToBulkFormPrefill(raw: Record<string, string>, rawUrls: string): Bul
     zone: (PROXY_ZONES as readonly string[]).includes(raw.zone ?? "")
       ? (raw.zone as ProxyZone)
       : PROXY_ZONES[0],
+    zone_strategy: raw.zone_strategy === "mixed" ? "mixed" : "single",
     attested_by_email: raw.attested_by_email ?? "",
     attested_ip: raw.attested_ip ?? "",
     scope: raw.scope === "specified_paths" || raw.scope === "full_site" ? raw.scope : "full_site",
+    bypass_attestation: raw.bypass_attestation === "1" || raw.bypass_attestation === "true",
+    canonical_mode: (CANONICAL_MODES as readonly string[]).includes(raw.canonical_mode ?? "")
+      ? (raw.canonical_mode as CanonicalMode)
+      : "none",
     cluster_id:
       raw.cluster_id && raw.cluster_id !== "0" ? Number.parseInt(raw.cluster_id, 10) : null,
     status: raw.status === "paused" ? "paused" : "active",
@@ -354,6 +465,22 @@ export function renderBulkNewForm(opts: {
       `<label class="proxy-radio">
         <input type="radio" name="zone" value="${esc(z)}"${z === opts.prefill.zone ? " checked" : ""} id="bulk_zone_${i}">
         <span>*.${esc(z)}</span>
+      </label>`,
+  ).join("");
+  const zoneStrategyRadios = `
+    <label class="proxy-radio">
+      <input type="radio" name="zone_strategy" value="single"${opts.prefill.zone_strategy === "single" ? " checked" : ""}>
+      <span>single zone (use the one above)</span>
+    </label>
+    <label class="proxy-radio">
+      <input type="radio" name="zone_strategy" value="mixed"${opts.prefill.zone_strategy === "mixed" ? " checked" : ""}>
+      <span>mixed (alternate between registered zones; override per row in preview)</span>
+    </label>`;
+  const canonicalRadios = CANONICAL_MODES.map(
+    (m) =>
+      `<label class="proxy-radio">
+        <input type="radio" name="canonical_mode" value="${esc(m)}"${m === opts.prefill.canonical_mode ? " checked" : ""}>
+        <span>${esc(m)}</span>
       </label>`,
   ).join("");
   const clusterOptions = [
@@ -381,6 +508,16 @@ export function renderBulkNewForm(opts: {
             <div class="proxy-mode">${zoneRadios}</div>
             <div class="field-hint">Every site in this batch gets a subdomain on the chosen zone. Use the single-add form if you need <code>in_place</code> mode or a custom domain.</div>
           </div>
+          <div class="full-width">
+            <label>zone strategy</label>
+            <div class="proxy-mode">${zoneStrategyRadios}</div>
+            <div class="field-hint"><code>mixed</code> alternates between the registered zones (round-robin) and lets you override per row in the preview.</div>
+          </div>
+          <div class="full-width">
+            <label>canonical_mode <span style="color:var(--fg-muted);font-weight:400">(injects a wildcard canonical rule into every site)</span></label>
+            <div class="proxy-mode">${canonicalRadios}</div>
+            <div class="field-hint"><code>none</code>: no rule — add canonicals later. <code>self</code>: proxy is canonical (max SEO aggression — duplicate-content risk). <code>origin</code>: source domain is canonical (safe default for proxies).</div>
+          </div>
           <div>
             <label for="bulk_status">status</label>
             <select id="bulk_status" name="status">
@@ -398,10 +535,15 @@ export function renderBulkNewForm(opts: {
       <div class="form-section">
         <h2 style="margin-top:0">Permission attestation</h2>
         <p class="field-hint" style="margin:0 0 .6rem">One attestation captures permission for every site in this batch.</p>
+        <label class="proxy-radio" style="margin-bottom:.6rem">
+          <input type="checkbox" name="bypass_attestation" value="1"${opts.prefill.bypass_attestation ? " checked" : ""}>
+          <span><strong>Bypass attestation</strong> — I take responsibility for proxying these sites without third-party permission. The created sites will be self-attested (operator email + now).</span>
+        </label>
         <div class="form-grid">
           <div>
             <label for="bulk_email">attested_by_email</label>
-            <input id="bulk_email" name="attested_by_email" type="email" required value="${esc(opts.prefill.attested_by_email)}">
+            <input id="bulk_email" name="attested_by_email" type="email" value="${esc(opts.prefill.attested_by_email)}">
+            <div class="field-hint">Ignored when <code>bypass</code> is checked.</div>
           </div>
           <div>
             <label for="bulk_ip">attested_ip <span style="color:var(--fg-muted);font-weight:400">(optional)</span></label>
@@ -433,16 +575,31 @@ export function renderBulkPreview(opts: {
     opts.errors.length > 0 ? `<div class="error-box">${opts.errors.map(esc).join("\n")}</div>` : "";
   const settingsHidden = `
     <input type="hidden" name="zone" value="${esc(opts.settings.zone)}">
+    <input type="hidden" name="zone_strategy" value="${esc(opts.settings.zone_strategy)}">
+    <input type="hidden" name="canonical_mode" value="${esc(opts.settings.canonical_mode)}">
+    <input type="hidden" name="bypass_attestation" value="${opts.settings.bypass_attestation ? "1" : "0"}">
     <input type="hidden" name="attested_by_email" value="${esc(opts.settings.attested_by_email)}">
     <input type="hidden" name="attested_ip" value="${esc(opts.settings.attested_ip)}">
     <input type="hidden" name="scope" value="${esc(opts.settings.scope)}">
     <input type="hidden" name="cluster_id" value="${opts.settings.cluster_id ?? ""}">
     <input type="hidden" name="status" value="${esc(opts.settings.status)}">`;
+  const mixedZones = opts.settings.zone_strategy === "mixed";
+  const zoneCell = (r: BulkPreviewRow, i: number): string => {
+    if (!mixedZones) {
+      return `<input type="hidden" name="zone_${i}" value="${esc(r.zone)}">`;
+    }
+    const opts2 = PROXY_ZONES.map(
+      (z) => `<option value="${esc(z)}"${z === r.zone ? " selected" : ""}>${esc(z)}</option>`,
+    ).join("");
+    return `<select name="zone_${i}" style="font-family:var(--mono);font-size:.78rem;padding:.25rem .35rem;width:100%;box-sizing:border-box">${opts2}</select>`;
+  };
+  const zoneHeader = mixedZones ? "<th>zone</th>" : "";
   const tbody = opts.rows
     .map((r, i) => {
       const errCell = r.error
-        ? `<td colspan="3" style="color:var(--red);font-style:italic">${esc(r.error)}</td>`
+        ? `<td colspan="${mixedZones ? 4 : 3}" style="color:var(--red);font-style:italic">${esc(r.error)}</td>`
         : `<td><input type="text" name="client_id_${i}" value="${esc(r.client_id)}" pattern="[a-z0-9-]+" maxlength="63" style="font-family:var(--mono);font-size:.82rem;padding:.3rem .5rem;width:100%;box-sizing:border-box">${r.renamed_from_collision ? `<div style="color:var(--amber);font-size:.7rem;margin-top:.15rem">renamed (id was taken)</div>` : ""}</td>
+            ${mixedZones ? `<td>${zoneCell(r, i)}</td>` : zoneCell(r, i)}
             <td class="mono" style="font-size:.8rem;color:var(--fg-muted)">${esc(r.proxy_domain)}</td>
             <td class="mono" style="font-size:.8rem;color:var(--fg-muted)">${esc(r.source_domain)}</td>`;
       const checked = r.include && !r.error ? " checked" : "";
@@ -455,9 +612,10 @@ export function renderBulkPreview(opts: {
     .join("");
   const settingsSummary = `
     <p class="subtitle">
-      Zone: <code>${esc(opts.settings.zone)}</code> ·
+      Zone: <code>${esc(opts.settings.zone)}</code>${opts.settings.zone_strategy === "mixed" ? " (mixed)" : ""} ·
+      Canonical: <code>${esc(opts.settings.canonical_mode)}</code> ·
       Status: <code>${esc(opts.settings.status)}</code> ·
-      Attestation: <code>${esc(opts.settings.attested_by_email)}</code> (${esc(opts.settings.scope)})
+      ${opts.settings.bypass_attestation ? `Attestation: <code style="color:var(--amber)">BYPASSED</code>` : `Attestation: <code>${esc(opts.settings.attested_by_email)}</code> (${esc(opts.settings.scope)})`}
       ${opts.clusterLabel ? `· Cluster: <code>${esc(opts.clusterLabel)}</code>` : ""}
     </p>`;
   const validCount = opts.rows.filter((r) => !r.error).length;
@@ -471,7 +629,7 @@ export function renderBulkPreview(opts: {
       <div class="form-section">
         <p class="field-hint" style="margin:0 0 .6rem">Uncheck rows you don't want to create. Override <code>client_id</code> if the auto-derived value isn't what you want — must be lowercase letters, digits, or hyphens.</p>
         <table class="data" style="margin:0">
-          <thead><tr><th style="width:2.5rem"></th><th>client_id</th><th>proxy_domain</th><th>source_domain</th></tr></thead>
+          <thead><tr><th style="width:2.5rem"></th><th>client_id</th>${zoneHeader}<th>proxy_domain</th><th>source_domain</th></tr></thead>
           <tbody>${tbody}</tbody>
         </table>
       </div>
@@ -604,13 +762,15 @@ export async function handleBulkPreviewPost(
     const h = hostnames[i] ?? "";
     const id = resolved.client_ids[i] ?? "";
     const renamed = resolved.renamed[i] ?? false;
+    const rowZone = settings.zone_strategy === "mixed" ? defaultZoneForRow(i) : settings.zone;
     return {
       source_url: src,
       source_domain: h,
       client_id: err ? "" : id,
       renamed_from_collision: renamed && !err,
       include: !err,
-      proxy_domain: err ? "" : `${id}.${settings.zone}`,
+      zone: rowZone,
+      proxy_domain: err ? "" : `${id}.${rowZone}`,
       error: err ?? null,
     };
   });
@@ -722,17 +882,30 @@ export async function handleBulkConfirmPost(
       });
       continue;
     }
-    const proxyDomain = `${requestedId}.${settings.zone}`;
+    // Per-row zone resolution (mixed strategy uses the hidden
+    // `zone_<i>` field; single strategy ignores it and uses the
+    // batch-level zone).
+    let rowZone: ProxyZone = settings.zone;
+    if (settings.zone_strategy === "mixed") {
+      const zoneRaw = (raw[`zone_${i}`] ?? "").trim();
+      if ((PROXY_ZONES as readonly string[]).includes(zoneRaw)) {
+        rowZone = zoneRaw as ProxyZone;
+      } else {
+        rowZone = defaultZoneForRow(i);
+      }
+    }
+    const proxyDomain = `${requestedId}.${rowZone}`;
     const row: BulkPreviewRow = {
       source_url: sourceUrl,
       source_domain: hostname,
       client_id: requestedId,
       renamed_from_collision: false,
       include: true,
+      zone: rowZone,
       proxy_domain: proxyDomain,
       error: null,
     };
-    const json = buildBulkClientConfigJson(row, settings, attested_at);
+    const json = buildBulkClientConfigJson(row, settings, attested_at, user.email);
     // Pass through the same Zod + invariant validation the single-add
     // path uses. Catches any oddity in the synthesized config (e.g.
     // bad source_domain shape) before it reaches D1.
@@ -763,16 +936,22 @@ export async function handleBulkConfirmPost(
           .run();
       }
       try {
+        const noteParts = [
+          `bulk_create: zone=${rowZone}`,
+          `cluster_id=${settings.cluster_id ?? "none"}`,
+          `canonical=${settings.canonical_mode}`,
+        ];
+        if (settings.bypass_attestation) noteParts.push("bypass=true");
         await writeAudit(env, {
           client_id: requestedId,
           actor_email: user.email,
           actor_ip: ip,
-          event_type: "config_create",
+          event_type: settings.bypass_attestation ? "config_create_bypass" : "config_create",
           before_hash: null,
           after_hash: fnvHash(json),
           previous_status: null,
           new_status: settings.status,
-          notes: `bulk_create: zone=${settings.zone} cluster_id=${settings.cluster_id ?? "none"}`,
+          notes: noteParts.join(" "),
         });
       } catch (e) {
         console.warn("bulk-create: audit write failed", e);

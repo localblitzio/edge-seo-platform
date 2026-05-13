@@ -510,11 +510,11 @@ export function renderClientsList(
   clusterMembers: ReadonlyMap<number, readonly string[]>,
   user: User,
 ): string {
-  const headerActions = `<span style="float:right;display:inline-flex;gap:.4rem"><a href="/app/clients/bulk-new" class="btn">Bulk-create</a> <a href="/app/clients/new" class="btn btn-primary">+ New proxied site</a></span>`;
+  const headerActions = `<span style="float:right;display:inline-flex;gap:.4rem"><a href="/app/clients/serp-new" class="btn">From SERP</a> <a href="/app/clients/bulk-new" class="btn">Bulk-create</a> <a href="/app/clients/new" class="btn btn-primary">+ New proxied site</a></span>`;
   if (clients.length === 0) {
     return `<h1>Proxied sites ${headerActions}</h1>
       <p class="subtitle">${user.role === "super_admin" ? "No proxied sites in the platform yet." : "You don't have any proxied sites yet."}</p>
-      <div class="empty">No proxied sites to show. <a href="/app/clients/new">Add the first one →</a> or <a href="/app/clients/bulk-new">bulk-create from a URL list</a>.</div>`;
+      <div class="empty">No proxied sites to show. <a href="/app/clients/new">Add the first one →</a>, <a href="/app/clients/bulk-new">bulk-create from a URL list</a>, or <a href="/app/clients/serp-new">create from a SERP query</a>.</div>`;
   }
   // Build a per-site cluster-membership map so we can stamp each row's
   // data-clusters attribute. cluster_members is indexed by cluster_id;
@@ -1102,6 +1102,7 @@ export async function renderAuditPage(env: AppEnv, user: User): Promise<string> 
 
 type AuditEventType =
   | "config_create"
+  | "config_create_bypass"
   | "config_update"
   | "status_change"
   | "revocation"
