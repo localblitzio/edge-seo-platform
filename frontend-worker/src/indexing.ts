@@ -138,7 +138,11 @@ function renderRow(diag: PathDiagnostic, check: IndexationCheckRow | undefined):
   const checkbox = `<input type="checkbox" name="path" value="${esc(diag.path)}" data-eligible="${isInclude ? "1" : "0"}"${isInclude ? " checked" : ""} aria-label="Include ${esc(diag.path)} in submission">`;
   const rowClass = isInclude ? "" : ' class="row-blocked"';
   const probeBtn = `<button type="button" class="probe-btn" data-path="${esc(diag.path)}" title="Fetch this URL through the proxy and show live SEO diagnostics">Probe</button>`;
-  const indexedBtn = `<button type="submit" name="path" value="${esc(diag.path)}" class="probe-btn" formaction="indexation/check" formmethod="POST" title="Query DataForSEO site:URL — checks if Google has this URL indexed">Check indexed</button>`;
+  // `name="target_path"` (not `path`) so the click doesn't collide
+  // with the row checkboxes' `name="path"` when the parent form
+  // posts. `formaction="indexing/check"` resolves relative to the
+  // form's action (`.../indexing`) → `.../indexing/check`.
+  const indexedBtn = `<button type="submit" name="target_path" value="${esc(diag.path)}" class="probe-btn" formaction="indexing/check" formmethod="POST" title="Query DataForSEO site:URL — checks if Google has this URL indexed">Check indexed</button>`;
   return `<tr${rowClass} data-path-row="${esc(diag.path)}">
     <td>${checkbox}</td>
     <td><a href="${esc(diag.url)}" target="_blank" rel="noopener noreferrer" class="mono small">${esc(diag.path)}</a></td>
@@ -611,10 +615,14 @@ export async function handleIndexationCheck(
   clientId: string,
 ): Promise<Response> {
   const form = await request.formData();
-  const path = String(form.get("path") ?? "");
+  // `target_path` (not `path`) — the per-row button uses this name
+  // to avoid colliding with the parent form's `path` checkboxes
+  // (the parent form is the submit-to-indexers form and posts every
+  // row's checkbox when ANY submit button fires).
+  const path = String(form.get("target_path") ?? "");
   if (!path) {
     return flashRedirect(`/app/clients/${encodeURIComponent(clientId)}/indexing`, {
-      text: "Missing path.",
+      text: "Missing target_path.",
       kind: "err",
     });
   }
