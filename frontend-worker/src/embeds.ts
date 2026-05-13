@@ -23,8 +23,9 @@
  * Multi-tenancy mirrors clusters + link_projects: rows scoped by
  * owner_id; super-admin sees all.
  */
-import { collectSitemapUrls } from "../../src/sitemap/generator.js";
+import type { ClientConfig } from "../../src/config/schema.js";
 import { pingSelectedIndexers } from "../../src/secrets/indexer-registry.js";
+import { collectSitemapUrls } from "../../src/sitemap/generator.js";
 import type { AppEnv, ClientRow, FlashMessage } from "./app.js";
 import { canSeeAllClients, esc, fnvHash, writeAudit } from "./app.js";
 import type { User } from "./auth.js";
@@ -318,7 +319,7 @@ export async function applyEmbedToCluster(
 ): Promise<ApplySiteResult[]> {
   // Pull the cluster's member client_ids via the existing helper.
   const membersByCluster = await loadAllClusterMembersByCluster(env, [cluster.id]);
-  const memberClientIds = (membersByCluster.get(cluster.id) ?? []).map((m) => m.client_id);
+  const memberClientIds = membersByCluster.get(cluster.id) ?? [];
   if (memberClientIds.length === 0) return [];
 
   // Load member client rows in one query.
@@ -434,12 +435,20 @@ async function applyEmbedToSingleClient(
   // Optional indexer fan-out.
   if (selectedIndexerSlots.length > 0) {
     try {
-      const urls = await collectSitemapUrls(env, client.client_id, client.proxy_domain);
-      // Fallback to homepage when sitemap collection returned nothing.
-      const targetUrls =
-        urls.length > 0 ? urls.map((u) => u.loc) : [`https://${client.proxy_domain}/`];
+      // Use the just-mutated config to derive the URL list. The cast is
+      // safe: this object was Zod-validated at admin-write time + we
+      // only mutated rule arrays, not the structural fields. Falls back
+      // to the homepage when no eligible URLs surface (e.g. wildcard
+      // proxy with no seed_paths).
+      let urls: string[] = [];
+      try {
+        urls = collectSitemapUrls(config as unknown as ClientConfig);
+      } catch {
+        urls = [];
+      }
+      const targetUrls = urls.length > 0 ? urls : [`https://${client.proxy_domain}/`];
       const indexerResults = await pingSelectedIndexers(
-        env,
+        env as unknown as Parameters<typeof pingSelectedIndexers>[0],
         targetUrls,
         { proxyDomain: client.proxy_domain },
         selectedIndexerSlots,
@@ -761,21 +770,16 @@ export async function handleEmbedNewPost(
   }
   const validation = validateEmbedInput(raw);
   if (!validation.ok) {
-    return {
-      errors: validation.errors,
-      prefill: {
-        name: raw.name,
-        kind: (EMBED_KINDS as readonly string[]).includes(raw.kind ?? "")
-          ? (raw.kind as EmbedKind)
-          : undefined,
-        html: raw.html,
-        default_position: (EMBED_POSITIONS as readonly string[]).includes(
-          raw.default_position ?? "",
-        )
-          ? (raw.default_position as EmbedPosition)
-          : undefined,
-      },
-    };
+    const prefill: Partial<EmbedInput> = {};
+    if (raw.name !== undefined) prefill.name = raw.name;
+    if ((EMBED_KINDS as readonly string[]).includes(raw.kind ?? "")) {
+      prefill.kind = raw.kind as EmbedKind;
+    }
+    if (raw.html !== undefined) prefill.html = raw.html;
+    if ((EMBED_POSITIONS as readonly string[]).includes(raw.default_position ?? "")) {
+      prefill.default_position = raw.default_position as EmbedPosition;
+    }
+    return { errors: validation.errors, prefill };
   }
   const v = validation.value;
   try {
@@ -819,22 +823,16 @@ export async function handleEmbedEditPost(
   }
   const validation = validateEmbedInput(raw);
   if (!validation.ok) {
-    return {
-      errors: validation.errors,
-      prefill: {
-        id,
-        name: raw.name,
-        kind: (EMBED_KINDS as readonly string[]).includes(raw.kind ?? "")
-          ? (raw.kind as EmbedKind)
-          : undefined,
-        html: raw.html,
-        default_position: (EMBED_POSITIONS as readonly string[]).includes(
-          raw.default_position ?? "",
-        )
-          ? (raw.default_position as EmbedPosition)
-          : undefined,
-      },
-    };
+    const prefill: Partial<EmbedInput> & { id: number } = { id };
+    if (raw.name !== undefined) prefill.name = raw.name;
+    if ((EMBED_KINDS as readonly string[]).includes(raw.kind ?? "")) {
+      prefill.kind = raw.kind as EmbedKind;
+    }
+    if (raw.html !== undefined) prefill.html = raw.html;
+    if ((EMBED_POSITIONS as readonly string[]).includes(raw.default_position ?? "")) {
+      prefill.default_position = raw.default_position as EmbedPosition;
+    }
+    return { errors: validation.errors, prefill };
   }
   const v = validation.value;
   try {
@@ -960,7 +958,7 @@ export async function submitClusterToIndexers(
 ): Promise<ApplySiteResult[]> {
   if (selectedIndexerSlots.length === 0) return [];
   const membersByCluster = await loadAllClusterMembersByCluster(env, [cluster.id]);
-  const memberClientIds = (membersByCluster.get(cluster.id) ?? []).map((m) => m.client_id);
+  const memberClientIds = membersByCluster.get(cluster.id) ?? [];
   if (memberClientIds.length === 0) return [];
   const placeholders = memberClientIds.map(() => "?").join(", ");
   const clients = await env.CONFIG_DB.prepare(
@@ -971,11 +969,16 @@ export async function submitClusterToIndexers(
   const out: ApplySiteResult[] = [];
   for (const client of clients.results ?? []) {
     try {
-      const urls = await collectSitemapUrls(env, client.client_id, client.proxy_domain);
-      const targetUrls =
-        urls.length > 0 ? urls.map((u) => u.loc) : [`https://${client.proxy_domain}/`];
+      let urls: string[] = [];
+      try {
+        const parsed = JSON.parse(client.config_json) as ClientConfig;
+        urls = collectSitemapUrls(parsed);
+      } catch {
+        urls = [];
+      }
+      const targetUrls = urls.length > 0 ? urls : [`https://${client.proxy_domain}/`];
       const indexerResults = await pingSelectedIndexers(
-        env,
+        env as unknown as Parameters<typeof pingSelectedIndexers>[0],
         targetUrls,
         { proxyDomain: client.proxy_domain },
         selectedIndexerSlots,

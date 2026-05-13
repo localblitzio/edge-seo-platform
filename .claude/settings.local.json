@@ -182,7 +182,8 @@
       "WebFetch(domain:docs.dataforseo.com)",
       "Bash(CLOUDFLARE_ACCOUNT_ID=cf2aaefcc5131a72802197c727a911b9 npx wrangler d1 migrations apply CONFIG_DB --env staging --remote)",
       "Bash(CLOUDFLARE_ACCOUNT_ID=cf2aaefcc5131a72802197c727a911b9 npx wrangler d1 execute edge-seo-platform-staging --remote --command=\"SELECT name FROM sqlite_master WHERE type='table' AND name='embeds'\")",
-      "Bash(CLOUDFLARE_ACCOUNT_ID=cf2aaefcc5131a72802197c727a911b9 npx wrangler d1 execute edge-seo-platform-staging --remote --file=migrations/0010_embeds.sql)"
+      "Bash(CLOUDFLARE_ACCOUNT_ID=cf2aaefcc5131a72802197c727a911b9 npx wrangler d1 execute edge-seo-platform-staging --remote --file=migrations/0010_embeds.sql)",
+      "Bash(CLOUDFLARE_ACCOUNT_ID=cf2aaefcc5131a72802197c727a911b9 npx wrangler d1 execute edge-seo-platform-staging --remote --file=migrations/0011_audit_event_types.sql)"
     ]
   }
 }
