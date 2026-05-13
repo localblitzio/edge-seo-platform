@@ -297,16 +297,66 @@ export interface ApplySiteResult {
 }
 
 /**
- * Apply an embed to every member of a cluster.
+ * Apply an embed to an explicit list of clients.
+ *
+ * Use this when the operator picked a subset of sites (e.g. checked
+ * 3 of 8 cluster members in the apply picker). The `sourceClusterId`
+ * is recorded on each placement for audit / "which cluster did this
+ * apply originate from" — pass null for a direct/ad-hoc apply.
  *
  * @param env Cloudflare bindings.
  * @param user authenticated operator (used for audit + scope).
  * @param embed the embed to apply (already loaded + visibility-checked).
- * @param cluster the target cluster (already loaded + visibility-checked).
+ * @param clientIds explicit list of client_ids to apply to (must be
+ *   non-empty; caller is responsible for visibility scoping).
+ * @param sourceClusterId cluster context the apply originated from,
+ *   recorded on each placement row. `null` for direct ad-hoc apply.
  * @param position position chosen for THIS apply (may differ from embed.default_position).
  * @param selectedIndexerSlots subset of indexer slot keys to fire after each apply.
- *   Empty array = no indexer submission. Pass `[]` not `null`.
  * @param actorIp operator's request IP (for audit).
+ */
+export async function applyEmbedToClients(
+  env: AppEnv,
+  user: User,
+  embed: EmbedRow,
+  clientIds: readonly string[],
+  sourceClusterId: number | null,
+  position: EmbedPosition,
+  selectedIndexerSlots: readonly string[],
+  actorIp: string,
+): Promise<ApplySiteResult[]> {
+  if (clientIds.length === 0) return [];
+
+  // Load every target client row in one query.
+  const placeholders = clientIds.map(() => "?").join(", ");
+  const clients = await env.CONFIG_DB.prepare(
+    `SELECT * FROM clients WHERE client_id IN (${placeholders})`,
+  )
+    .bind(...clientIds)
+    .all<ClientRow>();
+
+  const out: ApplySiteResult[] = [];
+  for (const client of clients.results ?? []) {
+    const result = await applyEmbedToSingleClient(
+      env,
+      user,
+      embed,
+      client,
+      sourceClusterId,
+      position,
+      selectedIndexerSlots,
+      actorIp,
+    );
+    out.push(result);
+  }
+  return out;
+}
+
+/**
+ * Apply an embed to every member of a cluster. Thin wrapper around
+ * `applyEmbedToClients` — preserved for the standalone "apply to
+ * whole cluster" path. The per-site picker (Phase A) calls
+ * `applyEmbedToClients` directly.
  */
 export async function applyEmbedToCluster(
   env: AppEnv,
@@ -317,34 +367,18 @@ export async function applyEmbedToCluster(
   selectedIndexerSlots: readonly string[],
   actorIp: string,
 ): Promise<ApplySiteResult[]> {
-  // Pull the cluster's member client_ids via the existing helper.
   const membersByCluster = await loadAllClusterMembersByCluster(env, [cluster.id]);
   const memberClientIds = membersByCluster.get(cluster.id) ?? [];
-  if (memberClientIds.length === 0) return [];
-
-  // Load member client rows in one query.
-  const placeholders = memberClientIds.map(() => "?").join(", ");
-  const clients = await env.CONFIG_DB.prepare(
-    `SELECT * FROM clients WHERE client_id IN (${placeholders})`,
-  )
-    .bind(...memberClientIds)
-    .all<ClientRow>();
-
-  const out: ApplySiteResult[] = [];
-  for (const client of clients.results ?? []) {
-    const result = await applyEmbedToSingleClient(
-      env,
-      user,
-      embed,
-      client,
-      cluster.id,
-      position,
-      selectedIndexerSlots,
-      actorIp,
-    );
-    out.push(result);
-  }
-  return out;
+  return applyEmbedToClients(
+    env,
+    user,
+    embed,
+    memberClientIds,
+    cluster.id,
+    position,
+    selectedIndexerSlots,
+    actorIp,
+  );
 }
 
 async function applyEmbedToSingleClient(
@@ -631,12 +665,13 @@ export function renderEmbedApplyForm(opts: {
     .join("");
   return `<div class="crumbs"><a href="/app/embeds/${opts.embed.id}">← ${esc(opts.embed.name)}</a></div>
     <h1>Apply embed: ${esc(opts.embed.name)}</h1>
-    <p class="subtitle">For each member site, this appends a content_injection rule, sets the canonical strategy to <code>self</code>, and sets <code>indexation</code> to <code>index,follow</code>. Re-applying replaces the previous version of this embed (idempotent by <code>embed:${opts.embed.id}</code> marker).</p>
+    <p class="subtitle">For each selected site, this appends a content_injection rule, sets the canonical strategy to <code>self</code>, and sets <code>indexation</code> to <code>index,follow</code>. Re-applying replaces the previous version of this embed (idempotent by <code>embed:${opts.embed.id}</code> marker).</p>
     ${errBox}
     <form class="editor" method="POST" action="/app/embeds/${opts.embed.id}/apply">
       <div class="form-section">
         <label for="apply_cluster">target cluster</label>
         <select id="apply_cluster" name="cluster_id" required>${clusterOptions}</select>
+        <div class="field-hint">Next step lets you pick which member sites to apply to (defaults to all).</div>
       </div>
       <div class="form-section">
         <label for="apply_position">position</label>
@@ -649,10 +684,94 @@ export function renderEmbedApplyForm(opts: {
         <div class="field-hint">All unchecked by default to protect your credits. Indexers without a configured API key are disabled.</div>
       </div>
       <div class="form-actions">
-        <button class="btn btn-primary" type="submit">Apply to cluster</button>
+        <button class="btn btn-primary" type="submit">Next: pick sites →</button>
         <a class="btn" href="/app/embeds/${opts.embed.id}">Cancel</a>
       </div>
     </form>`;
+}
+
+/**
+ * Step-2 picker: shown after the operator picks a cluster + position
+ * + indexers on the step-1 form. Lists every cluster member as a
+ * checkbox row (all checked by default) and carries the step-1 state
+ * through hidden inputs so the final POST has everything it needs.
+ */
+export function renderEmbedApplyPicker(opts: {
+  embed: EmbedRow;
+  cluster: ClusterRow;
+  members: readonly { client_id: string; proxy_domain: string; status: string }[];
+  position: EmbedPosition;
+  selectedIndexerSlots: readonly string[];
+  errors: string[];
+}): string {
+  const errBox =
+    opts.errors.length > 0 ? `<div class="error-box">${opts.errors.map(esc).join("\n")}</div>` : "";
+  const indexerHidden = opts.selectedIndexerSlots
+    .map((s) => `<input type="hidden" name="indexer_${esc(s)}" value="1">`)
+    .join("");
+  const rows = opts.members
+    .map(
+      (m) => `<tr>
+        <td><input type="checkbox" name="client_id" value="${esc(m.client_id)}" checked></td>
+        <td><a class="mono" href="/app/clients/${esc(m.client_id)}">${esc(m.client_id)}</a></td>
+        <td class="mono" style="font-size:.8rem;color:var(--fg-muted)">${esc(m.proxy_domain)}</td>
+        <td><span class="pill ${m.status === "active" ? "pill-active" : "pill-paused"}">${esc(m.status)}</span></td>
+      </tr>`,
+    )
+    .join("");
+  const indexerSummary =
+    opts.selectedIndexerSlots.length === 0
+      ? "no indexers will fire on completion"
+      : `indexers on completion: <code>${opts.selectedIndexerSlots.map((s) => esc(s)).join("</code>, <code>")}</code>`;
+  return `<div class="crumbs"><a href="/app/embeds/${opts.embed.id}/apply">← back to step 1</a></div>
+    <h1>Pick sites — ${esc(opts.embed.name)}</h1>
+    <p class="subtitle">Cluster <code>${esc(opts.cluster.label)}</code> · position <code>${esc(opts.position)}</code> · ${indexerSummary}</p>
+    ${errBox}
+    <form class="editor" method="POST" action="/app/embeds/${opts.embed.id}/apply/confirm">
+      <input type="hidden" name="cluster_id" value="${opts.cluster.id}">
+      <input type="hidden" name="position" value="${esc(opts.position)}">
+      ${indexerHidden}
+      <div class="form-section">
+        <p class="field-hint" style="margin:0 0 .6rem">Uncheck sites you don't want to apply to. All ${opts.members.length} members are selected by default. Use the header checkbox to toggle all.</p>
+        <table class="data" style="margin:0">
+          <thead><tr>
+            <th style="width:2.5rem"><input type="checkbox" id="embed-pick-all" checked title="Select / deselect all"></th>
+            <th>Site</th>
+            <th>Proxy domain</th>
+            <th>Status</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+      <div class="form-actions">
+        <button class="btn btn-primary" type="submit">Apply to selected</button>
+        <a class="btn" href="/app/embeds/${opts.embed.id}/apply">← Back</a>
+      </div>
+    </form>
+    <script>
+      (function() {
+        var master = document.getElementById('embed-pick-all');
+        if (!master) return;
+        function pickBoxes() {
+          return Array.prototype.slice.call(
+            document.querySelectorAll('input[type=checkbox][name="client_id"]')
+          );
+        }
+        function syncMaster() {
+          var boxes = pickBoxes();
+          if (boxes.length === 0) return;
+          var checkedCount = boxes.filter(function(b) { return b.checked; }).length;
+          master.checked = checkedCount === boxes.length;
+          master.indeterminate = checkedCount > 0 && checkedCount < boxes.length;
+        }
+        master.addEventListener('change', function() {
+          pickBoxes().forEach(function(b) { b.checked = master.checked; });
+          master.indeterminate = false;
+        });
+        pickBoxes().forEach(function(b) { b.addEventListener('change', syncMaster); });
+        syncMaster();
+      })();
+    </script>`;
 }
 
 export function renderEmbedDetail(opts: {
@@ -889,6 +1008,12 @@ export function parseSelectedIndexers(raw: Record<string, string>): string[] {
   return out;
 }
 
+/**
+ * Step-1 POST handler — operator picked cluster + position +
+ * indexers. We validate, load the cluster's members, and return the
+ * picker payload so the route renders step 2 (per-site checkboxes).
+ * No mutation happens here; the actual apply waits for step 2.
+ */
 export async function handleEmbedApplyPost(
   request: Request,
   env: AppEnv,
@@ -896,7 +1021,15 @@ export async function handleEmbedApplyPost(
   user: User,
   embedId: number,
 ): Promise<
-  | { result: { embed: EmbedRow; cluster: ClusterRow | null; results: ApplySiteResult[] } }
+  | {
+      picker: {
+        embed: EmbedRow;
+        cluster: ClusterRow;
+        members: Array<{ client_id: string; proxy_domain: string; status: string }>;
+        position: EmbedPosition;
+        selectedIndexerSlots: string[];
+      };
+    }
   | { response: Response }
 > {
   const csrf = checkCsrf(request, url);
@@ -932,11 +1065,113 @@ export async function handleEmbedApplyPost(
     ? (positionRaw as EmbedPosition)
     : embed.default_position;
   const selectedIndexers = parseSelectedIndexers(raw);
-  const results = await applyEmbedToCluster(
+
+  // Load the cluster's members + their proxy_domain/status for the
+  // picker table. We don't apply yet — that's step 2.
+  const membersByCluster = await loadAllClusterMembersByCluster(env, [cluster.id]);
+  const memberClientIds = membersByCluster.get(cluster.id) ?? [];
+  let members: Array<{ client_id: string; proxy_domain: string; status: string }> = [];
+  if (memberClientIds.length > 0) {
+    const placeholders = memberClientIds.map(() => "?").join(", ");
+    const rows = await env.CONFIG_DB.prepare(
+      `SELECT client_id, proxy_domain, status FROM clients
+       WHERE client_id IN (${placeholders})
+       ORDER BY client_id`,
+    )
+      .bind(...memberClientIds)
+      .all<{ client_id: string; proxy_domain: string; status: string }>();
+    members = rows.results ?? [];
+  }
+  if (members.length === 0) {
+    return {
+      response: flashRedirect(`/app/embeds/${embedId}/apply`, {
+        text: `Cluster "${cluster.label}" has no member sites — add some first.`,
+        kind: "warn",
+      }),
+    };
+  }
+  return {
+    picker: {
+      embed,
+      cluster,
+      members,
+      position,
+      selectedIndexerSlots: selectedIndexers,
+    },
+  };
+}
+
+/**
+ * Step-2 confirm handler — operator picked specific client_ids on
+ * the picker page. Validates the selected ids against the cluster's
+ * current membership (so a stale picker can't apply to non-members)
+ * and runs the actual apply via `applyEmbedToClients`.
+ */
+export async function handleEmbedApplyConfirmPost(
+  request: Request,
+  env: AppEnv,
+  url: URL,
+  user: User,
+  embedId: number,
+): Promise<
+  | { result: { embed: EmbedRow; cluster: ClusterRow | null; results: ApplySiteResult[] } }
+  | { response: Response }
+> {
+  const csrf = checkCsrf(request, url);
+  if (csrf) return { response: csrf };
+  const embed = await loadVisibleEmbed(env, user, embedId);
+  if (!embed) return { response: new Response("Embed not found", { status: 404 }) };
+  const form = await request.formData();
+  const raw: Record<string, string> = {};
+  const checkedClientIds: string[] = [];
+  for (const [k, v] of form.entries()) {
+    if (typeof v !== "string") continue;
+    if (k === "client_id") checkedClientIds.push(v);
+    else raw[k] = v;
+  }
+  const clusterId = Number.parseInt((raw.cluster_id ?? "").trim(), 10);
+  if (!Number.isFinite(clusterId) || clusterId <= 0) {
+    return {
+      response: flashRedirect(`/app/embeds/${embedId}/apply`, {
+        text: "Lost cluster context — start over from the apply form.",
+        kind: "err",
+      }),
+    };
+  }
+  const visibleClusters = await loadVisibleClusters(env, user);
+  const cluster = visibleClusters.find((c) => c.id === clusterId);
+  if (!cluster) {
+    return {
+      response: flashRedirect(`/app/embeds/${embedId}/apply`, {
+        text: "Cluster not found or not visible to you.",
+        kind: "err",
+      }),
+    };
+  }
+  // Validate every picked client_id belongs to this cluster (defence
+  // against a tampered form submission applying to arbitrary sites).
+  const membersByCluster = await loadAllClusterMembersByCluster(env, [cluster.id]);
+  const memberSet = new Set(membersByCluster.get(cluster.id) ?? []);
+  const validClientIds = checkedClientIds.filter((id) => memberSet.has(id));
+  if (validClientIds.length === 0) {
+    return {
+      response: flashRedirect(`/app/embeds/${embedId}/apply`, {
+        text: "No sites selected. Pick at least one and try again.",
+        kind: "warn",
+      }),
+    };
+  }
+  const positionRaw = (raw.position ?? embed.default_position).trim();
+  const position: EmbedPosition = (EMBED_POSITIONS as readonly string[]).includes(positionRaw)
+    ? (positionRaw as EmbedPosition)
+    : embed.default_position;
+  const selectedIndexers = parseSelectedIndexers(raw);
+  const results = await applyEmbedToClients(
     env,
     user,
     embed,
-    cluster,
+    validClientIds,
+    cluster.id,
     position,
     selectedIndexers,
     actorIp(request),

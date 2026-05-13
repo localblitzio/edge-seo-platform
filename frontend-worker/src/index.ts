@@ -109,6 +109,7 @@ import {
 import { type EmailBinding, resetPasswordMessage, sendEmail } from "./email.js";
 import {
   handleClusterSubmitIndexersPost,
+  handleEmbedApplyConfirmPost,
   handleEmbedApplyPost,
   handleEmbedDeletePost,
   handleEmbedEditPost,
@@ -120,6 +121,7 @@ import {
   renderClusterSubmitIndexersFormBlock,
   renderClusterSubmitResult,
   renderEmbedApplyForm,
+  renderEmbedApplyPicker,
   renderEmbedApplyResult,
   renderEmbedDetail,
   renderEmbedForm,
@@ -1981,7 +1983,32 @@ export default {
       }
 
       if (sub === "apply" && method === "POST") {
+        // Step-1 POST: renders the per-site picker (step 2).
         const result = await handleEmbedApplyPost(request, env, url, user, embedId);
+        if ("response" in result) return result.response;
+        return htmlResponse(
+          htmlPage({
+            title: `Pick sites — ${embed.name} — Edge SEO Platform`,
+            body: appLayout({
+              title: `Pick sites — ${embed.name}`,
+              content: renderEmbedApplyPicker({
+                ...result.picker,
+                errors: [],
+              }),
+              activeNav: "embeds",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+
+      if (sub === "apply/confirm" && method === "POST") {
+        // Step-2 POST: actually apply to operator-selected client_ids.
+        const result = await handleEmbedApplyConfirmPost(request, env, url, user, embedId);
         if ("response" in result) return result.response;
         return htmlResponse(
           htmlPage({
