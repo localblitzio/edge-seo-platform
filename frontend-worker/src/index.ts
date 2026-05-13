@@ -133,6 +133,7 @@ import {
 } from "./embeds.js";
 import { FAVICON_DATA_URL } from "./favicon-data-url.js";
 import {
+  handleIndexationCheck,
   handleIndexingSubmit,
   handleProbeUrl,
   handleReindexAll,
@@ -1290,6 +1291,16 @@ export default {
         const csrf = checkCsrf(request, url);
         if (csrf) return csrf;
         return handleProbeUrl(request, env, user, id);
+      }
+
+      // Per-URL "Check indexed" — DataForSEO site:URL probe.
+      // Always force=true so the operator's click bypasses the 24h
+      // cache and gets fresh data. Result rendered as flash on the
+      // indexing page after redirect.
+      if (sub === "indexing/check" && method === "POST") {
+        const csrf = checkCsrf(request, url);
+        if (csrf) return csrf;
+        return handleIndexationCheck(request, env, user, id);
       }
 
       // Per-site Bot activity dashboard: search engine + AI bot crawl counts.
