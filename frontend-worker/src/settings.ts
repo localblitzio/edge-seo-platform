@@ -134,7 +134,7 @@ const SETTINGS_CSS = `
 .settings-slot-desc{color:var(--fg-muted);margin:.35rem 0 .75rem;font-size:.9rem}
 .settings-slot-current{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.85rem;margin-bottom:.25rem}
 .settings-slot .meta{color:var(--fg-muted);font-size:.78rem;margin-bottom:.6rem}
-.settings-slot input[type=password],.settings-slot textarea{width:100%;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.85rem;padding:.5rem;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg)}
+.settings-slot input[type=password],.settings-slot input[type=text],.settings-slot textarea{width:100%;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.85rem;padding:.5rem;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg);margin-bottom:.4rem}
 .settings-slot textarea{resize:vertical}
 .settings-slot .form-actions{margin-top:.5rem;display:flex;gap:.5rem}
 .settings-test-result{margin-top:.85rem;padding:.7rem .9rem;border-radius:var(--radius);display:flex;gap:.7rem;align-items:flex-start;border:1px solid transparent}
@@ -159,14 +159,85 @@ const SETTINGS_CSS = `
  * @param testResults transient per-slot test outcomes from the most
  *   recent POST. Empty/undefined when the page was loaded directly.
  */
+/**
+ * Slot keys grouped into the DataForSEO credential pair card. These
+ * are NOT rendered as individual rows — they share a single form
+ * with one Save (persists both) and one Test (verifies as a combo
+ * directly from form values, no save-first required).
+ */
+const DATAFORSEO_PAIR_KEYS = new Set(["DATAFORSEO_LOGIN", "DATAFORSEO_PASSWORD"]);
+
+/** Sentinel value posted in the `pair` field for the DataForSEO card. */
+const DATAFORSEO_PAIR = "DATAFORSEO";
+
+function renderDataForSeoPairCard(
+  loginValue: string | null,
+  passwordValue: string | null,
+  loginRow: SecretRow | null,
+  passwordRow: SecretRow | null,
+  testResult: TestResult | undefined,
+): string {
+  const maskedLogin = esc(maskSecret(loginValue));
+  const maskedPassword = esc(maskSecret(passwordValue));
+  const lastUpdated =
+    loginRow || passwordRow
+      ? `<div class="meta">Last updated ${esc(
+          formatTimestamp(Math.max(loginRow?.updated_at ?? 0, passwordRow?.updated_at ?? 0)),
+        )}${
+          (loginRow?.updated_by_email ?? passwordRow?.updated_by_email)
+            ? ` by ${esc(loginRow?.updated_by_email ?? passwordRow?.updated_by_email ?? "")}`
+            : ""
+        }</div>`
+      : `<div class="meta">Not set.</div>`;
+  const resultBlock = testResult ? renderTestResult(testResult) : "";
+  return `<section class="section settings-slot">
+  <header class="settings-slot-header">
+    <h3>DataForSEO credentials</h3>
+    <a href="https://docs.dataforseo.com/v3/auth/" target="_blank" rel="noopener noreferrer">Docs ↗</a>
+  </header>
+  <p class="settings-slot-desc">Login + API password used together (HTTP Basic auth). Both required for the Create-from-SERP flow. Get the API password from app.dataforseo.com → API Dashboard — it's separate from your account login password.</p>
+  <div class="settings-slot-current">
+    <div><strong>Login:</strong> <code class="mono">${maskedLogin}</code></div>
+    <div><strong>API password:</strong> <code class="mono">${maskedPassword}</code></div>
+  </div>
+  ${lastUpdated}
+  <form method="post" action="/app/settings/api-keys" class="settings-slot-form">
+    <input type="hidden" name="pair" value="${DATAFORSEO_PAIR}">
+    <label for="dataforseo-login" class="visually-hidden">DataForSEO login</label>
+    <input id="dataforseo-login" name="login" type="text" placeholder="DataForSEO login (email)" autocomplete="off">
+    <label for="dataforseo-password" class="visually-hidden">DataForSEO API password</label>
+    <input id="dataforseo-password" name="password" type="password" placeholder="DataForSEO API password" autocomplete="off">
+    <div class="form-actions">
+      <button type="submit" name="action" value="save_pair" class="btn-primary">Save both</button>
+      <button type="submit" name="action" value="test_pair" class="btn-secondary">Test</button>
+      ${loginValue !== null || passwordValue !== null ? '<button type="submit" name="action" value="clear_pair" class="btn-secondary">Clear both</button>' : ""}
+    </div>
+  </form>
+  ${resultBlock}
+</section>`;
+}
+
 export async function renderSettingsApiKeysPage(
   env: SettingsEnv,
   testResults: TestResultsByKey = {},
 ): Promise<string> {
   const [values, rows] = await Promise.all([getAllSlotValues(env), listSecretRows(env)]);
-  const rowsHtml = SECRET_SLOTS.map((slot) =>
-    renderSlotRow(slot, values[slot.key] ?? null, findRow(rows, slot.key), testResults[slot.key]),
-  ).join("");
+  // Render non-paired slots one per card; render DataForSEO as a
+  // single combined card after the regular slots.
+  const regularSlots = SECRET_SLOTS.filter((s) => !DATAFORSEO_PAIR_KEYS.has(s.key));
+  const rowsHtml = regularSlots
+    .map((slot) =>
+      renderSlotRow(slot, values[slot.key] ?? null, findRow(rows, slot.key), testResults[slot.key]),
+    )
+    .join("");
+  const dataForSeoCard = renderDataForSeoPairCard(
+    values.DATAFORSEO_LOGIN ?? null,
+    values.DATAFORSEO_PASSWORD ?? null,
+    findRow(rows, "DATAFORSEO_LOGIN"),
+    findRow(rows, "DATAFORSEO_PASSWORD"),
+    // Either key's test result surfaces on the combined card.
+    testResults.DATAFORSEO_LOGIN ?? testResults.DATAFORSEO_PASSWORD,
+  );
   return `<style>${SETTINGS_CSS}</style>
 <header class="page-header">
   <h2>API keys</h2>
@@ -176,7 +247,8 @@ export async function renderSettingsApiKeysPage(
     them at request time. Setting a value here overrides any equivalent <code>wrangler secret put</code>-bound value on next request.
   </p>
 </header>
-${rowsHtml}`;
+${rowsHtml}
+${dataForSeoCard}`;
 }
 
 /**
@@ -219,8 +291,16 @@ export async function handleSettingsApiKeysPost(
   user: User,
 ): Promise<SettingsPostOutcome> {
   const form = await request.formData();
-  const key = String(form.get("key") ?? "");
+  const pair = String(form.get("pair") ?? "");
   const action = String(form.get("action") ?? "save");
+
+  // DataForSEO combined-card actions: one form with `login` +
+  // `password` fields, no per-row save needed.
+  if (pair === DATAFORSEO_PAIR) {
+    return handleDataForSeoPairPost(env, user, action, form);
+  }
+
+  const key = String(form.get("key") ?? "");
   const value = String(form.get("value") ?? "");
 
   if (action === "test") {
@@ -237,6 +317,85 @@ export async function handleSettingsApiKeysPost(
   }
   const text = persistValue.trim().length === 0 ? `Cleared ${key}.` : `Updated ${key}.`;
   return { redirect: flashRedirect("/app/settings/api-keys", { text, kind: "ok" }) };
+}
+
+/**
+ * Combined DataForSEO credential pair handler.
+ *
+ *   - `save_pair`  → persist both `login` and `password` form fields
+ *                    (only the ones with non-empty values; blanks are
+ *                    skipped so a partial update doesn't blow away
+ *                    the half the operator didn't retype).
+ *   - `test_pair`  → call `testDataForSeoCredentials` directly with
+ *                    the form values, no save required. Falls back to
+ *                    the stored value when a field is blank so a half-
+ *                    update can still be verified.
+ *   - `clear_pair` → wipe both slots in one shot.
+ */
+async function handleDataForSeoPairPost(
+  env: SettingsEnv,
+  user: User,
+  action: string,
+  form: FormData,
+): Promise<SettingsPostOutcome> {
+  const login = String(form.get("login") ?? "");
+  const password = String(form.get("password") ?? "");
+
+  if (action === "test_pair") {
+    // Fall back to saved values when a field is blank — lets the
+    // operator test "just changed the password" without retyping
+    // the login.
+    const effectiveLogin =
+      login.trim().length > 0 ? login : ((await getSecret(env, "DATAFORSEO_LOGIN")) ?? "");
+    const effectivePassword =
+      password.trim().length > 0 ? password : ((await getSecret(env, "DATAFORSEO_PASSWORD")) ?? "");
+    const result = await testDataForSeoCredentials(effectiveLogin, effectivePassword);
+    // Surface the result under whichever key the renderer picks up
+    // first (login). The renderer checks both keys.
+    return { testResults: { DATAFORSEO_LOGIN: result } };
+  }
+
+  if (action === "clear_pair") {
+    await Promise.all([
+      setSecret(env, "DATAFORSEO_LOGIN", "", user.email),
+      setSecret(env, "DATAFORSEO_PASSWORD", "", user.email),
+    ]);
+    return {
+      redirect: flashRedirect("/app/settings/api-keys", {
+        text: "Cleared DataForSEO credentials.",
+        kind: "ok",
+      }),
+    };
+  }
+
+  // Default: save_pair — persist whichever fields the operator typed
+  // a value into. Skip blanks so a partial update is non-destructive.
+  const updates: Array<{ key: string; value: string }> = [];
+  if (login.trim().length > 0) updates.push({ key: "DATAFORSEO_LOGIN", value: login });
+  if (password.trim().length > 0) updates.push({ key: "DATAFORSEO_PASSWORD", value: password });
+  if (updates.length === 0) {
+    return {
+      redirect: flashRedirect("/app/settings/api-keys", {
+        text: "Nothing to save — paste a login and/or API password first.",
+        kind: "warn",
+      }),
+    };
+  }
+  for (const u of updates) {
+    const r = await setSecret(env, u.key, u.value, user.email);
+    if (!r.ok) {
+      return {
+        redirect: flashRedirect("/app/settings/api-keys", { text: r.error, kind: "err" }),
+      };
+    }
+  }
+  const labels = updates.map((u) => (u.key === "DATAFORSEO_LOGIN" ? "login" : "password"));
+  return {
+    redirect: flashRedirect("/app/settings/api-keys", {
+      text: `Updated DataForSEO ${labels.join(" + ")}.`,
+      kind: "ok",
+    }),
+  };
 }
 
 /**
