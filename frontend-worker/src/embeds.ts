@@ -542,7 +542,7 @@ export function renderEmbedForm(opts: {
   mode: "new" | "edit";
 }): string {
   const action = opts.mode === "new" ? "/app/embeds/new" : `/app/embeds/${opts.prefill.id}/edit`;
-  const heading = opts.mode === "new" ? "New embed" : `Edit embed`;
+  const heading = opts.mode === "new" ? "New embed" : "Edit embed";
   const errBox =
     opts.errors.length > 0 ? `<div class="error-box">${opts.errors.map(esc).join("\n")}</div>` : "";
   const kindOptions = EMBED_KINDS.map(

@@ -26,6 +26,8 @@
  * — same pattern as the admin-worker.
  */
 
+import { ACTIVE_INDEXERS } from "../../src/secrets/indexer-registry.js";
+import { getSecret } from "../../src/secrets/store.js";
 import {
   APP_STYLE,
   NEW_CLIENT_TEMPLATE,
@@ -92,13 +94,6 @@ import {
   renderBulkResult,
 } from "./bulk-clients.js";
 import {
-  defaultSerpPrefill,
-  handleSerpPickPost,
-  handleSerpQueryPost,
-  renderSerpNewForm,
-  renderSerpPicker,
-} from "./serp-new.js";
-import {
   handleClusterStatusPost,
   handleEditClusterPost,
   handleNewClusterPost,
@@ -111,6 +106,7 @@ import {
   renderEditClusterForm,
   renderNewClusterForm,
 } from "./clusters.js";
+import { type EmailBinding, resetPasswordMessage, sendEmail } from "./email.js";
 import {
   handleClusterSubmitIndexersPost,
   handleEmbedApplyPost,
@@ -129,9 +125,6 @@ import {
   renderEmbedForm,
   renderEmbedsList,
 } from "./embeds.js";
-import { ACTIVE_INDEXERS } from "../../src/secrets/indexer-registry.js";
-import { getSecret } from "../../src/secrets/store.js";
-import { type EmailBinding, resetPasswordMessage, sendEmail } from "./email.js";
 import { FAVICON_DATA_URL } from "./favicon-data-url.js";
 import {
   handleIndexingSubmit,
@@ -160,6 +153,13 @@ import {
   renderNewLinkProjectForm,
 } from "./link-projects.js";
 import { LOGO_DATA_URL } from "./logo-data-url.js";
+import {
+  defaultSerpPrefill,
+  handleSerpPickPost,
+  handleSerpQueryPost,
+  renderSerpNewForm,
+  renderSerpPicker,
+} from "./serp-new.js";
 import { handleSettingsApiKeysPost, renderSettingsApiKeysPage } from "./settings.js";
 
 interface Env {
