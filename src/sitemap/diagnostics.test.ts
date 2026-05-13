@@ -12,9 +12,15 @@ function configWith(mut: (cfg: Record<string, unknown>) => void): ClientConfig {
 }
 
 describe("computePathDiagnostics", () => {
-  it("returns empty when no rules pin a literal path and no seed_paths", () => {
+  it("returns just the implicit homepage row when no rules pin a literal path and no seed_paths", () => {
+    // Behavior changed: every site gets an implicit `/` candidate
+    // (sourced as seed_paths) so the indexing page always has at
+    // least one row to interact with. Pre-change this returned [].
     const config = configWith(() => {});
-    expect(computePathDiagnostics(config)).toEqual([]);
+    const diag = computePathDiagnostics(config);
+    expect(diag).toHaveLength(1);
+    expect(diag[0]?.path).toBe("/");
+    expect(diag[0]?.sources).toEqual(["seed_paths"]);
   });
 
   it("includes seed_paths with verdict=include even when default canonical = origin", () => {
@@ -22,14 +28,18 @@ describe("computePathDiagnostics", () => {
       cfg.seed_paths = ["/about"];
     });
     const diag = computePathDiagnostics(config);
-    expect(diag).toHaveLength(1);
-    const row = diag[0];
-    if (!row) throw new Error("no row");
-    expect(row.path).toBe("/about");
-    expect(row.url).toBe("https://lanterncrest.com/about");
-    expect(row.sources).toEqual(["seed_paths"]);
-    expect(row.canonical).toBe("origin");
-    expect(row.verdict.kind).toBe("include");
+    // Two rows now: /about (operator seed) + / (implicit homepage seed).
+    expect(diag).toHaveLength(2);
+    const about = diag.find((r) => r.path === "/about");
+    if (!about) throw new Error("no /about row");
+    expect(about.url).toBe("https://lanterncrest.com/about");
+    expect(about.sources).toEqual(["seed_paths"]);
+    expect(about.canonical).toBe("origin");
+    expect(about.verdict.kind).toBe("include");
+    // Homepage is also present and also includes (implicit seed semantics).
+    const home = diag.find((r) => r.path === "/");
+    if (!home) throw new Error("no / row");
+    expect(home.verdict.kind).toBe("include");
   });
 
   it("merges sources when a path appears in multiple sections", () => {
@@ -140,7 +150,8 @@ describe("computePathDiagnostics", () => {
       cfg.seed_paths = ["/zebra", "/apple", "/mango"];
     });
     const diag = computePathDiagnostics(config);
-    expect(diag.map((r) => r.path)).toEqual(["/apple", "/mango", "/zebra"]);
+    // `/` is the implicit homepage candidate, sorts before any /letter path.
+    expect(diag.map((r) => r.path)).toEqual(["/", "/apple", "/mango", "/zebra"]);
   });
 
   it("agrees with collectSitemapUrls on which paths appear (verdict=include set is identical)", async () => {

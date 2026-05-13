@@ -135,6 +135,7 @@ import { FAVICON_DATA_URL } from "./favicon-data-url.js";
 import {
   handleIndexationCheck,
   handleIndexingSubmit,
+  handleMakeIndexable,
   handleProbeUrl,
   handleReindexAll,
   loadIndexingPageData,
@@ -1301,6 +1302,16 @@ export default {
         const csrf = checkCsrf(request, url);
         if (csrf) return csrf;
         return handleIndexationCheck(request, env, user, id);
+      }
+
+      // Per-URL "Make indexable" — upsert path-anchored
+      // canonical=self + index,follow rules on this client's config.
+      // Idempotent: re-clicking replaces the same rule rather than
+      // stacking.
+      if (sub === "indexing/make-indexable" && method === "POST") {
+        const csrf = checkCsrf(request, url);
+        if (csrf) return csrf;
+        return handleMakeIndexable(request, env, user, id);
       }
 
       // Per-site Bot activity dashboard: search engine + AI bot crawl counts.

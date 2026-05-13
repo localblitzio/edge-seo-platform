@@ -22,7 +22,7 @@ import { collectSitemapUrls } from "../../src/sitemap/generator.js";
 import { probeUrl } from "../../src/sitemap/probe.js";
 
 import type { AppEnv, ClientRow, FlashMessage } from "./app.js";
-import { canSeeAllClients, esc } from "./app.js";
+import { canSeeAllClients, esc, fnvHash, writeAudit } from "./app.js";
 import type { User } from "./auth.js";
 
 import { ClientConfig } from "../../src/config/schema.js";
@@ -31,6 +31,16 @@ import {
   checkUrlIndexation,
   loadLatestChecksForClient,
 } from "./indexation-check.js";
+
+/**
+ * Anchor-regex for a literal path. Used as the `match` field of
+ * config rules so the rule matches THIS path exactly, not as a
+ * substring or prefix. Special regex metacharacters are escaped.
+ */
+function pathToAnchorRegex(path: string): string {
+  const escaped = path.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+  return `^${escaped}$`;
+}
 
 /* ─── Types ─── */
 
@@ -143,6 +153,12 @@ function renderRow(diag: PathDiagnostic, check: IndexationCheckRow | undefined):
   // posts. `formaction="indexing/check"` resolves relative to the
   // form's action (`.../indexing`) → `.../indexing/check`.
   const indexedBtn = `<button type="submit" name="target_path" value="${esc(diag.path)}" class="probe-btn" formaction="indexing/check" formmethod="POST" title="Query DataForSEO site:URL — checks if Google has this URL indexed">Check indexed</button>`;
+  // "Make indexable" — only shown when the row's current verdict is
+  // exclude (already-indexable rows don't need it). Upserts a path-
+  // anchored canonical=self + index,follow rule for THIS path.
+  const makeIndexableBtn = !isInclude
+    ? `<button type="submit" name="target_path" value="${esc(diag.path)}" class="probe-btn" formaction="indexing/make-indexable" formmethod="POST" title="Add a path-anchored canonical=self + indexation=index,follow rule for this URL so it can be indexed">Make indexable</button>`
+    : "";
   return `<tr${rowClass} data-path-row="${esc(diag.path)}">
     <td>${checkbox}</td>
     <td><a href="${esc(diag.url)}" target="_blank" rel="noopener noreferrer" class="mono small">${esc(diag.path)}</a></td>
@@ -151,7 +167,7 @@ function renderRow(diag: PathDiagnostic, check: IndexationCheckRow | undefined):
     <td class="small">${robotsCell}</td>
     <td>${renderVerdict(diag)}</td>
     <td class="small">${renderIndexationCell(check)}</td>
-    <td>${probeBtn} ${indexedBtn}</td>
+    <td>${probeBtn} ${indexedBtn} ${makeIndexableBtn}</td>
   </tr>`;
 }
 
@@ -647,4 +663,104 @@ function flashRedirect(location: string, flash: FlashMessage): Response {
   const sep = location.includes("?") ? "&" : "?";
   const target = `${location}${sep}flash=${encodeURIComponent(flash.text)}&flash_kind=${flash.kind}`;
   return new Response(null, { status: 303, headers: { location: target } });
+}
+
+/**
+ * "Make indexable" quick-action — upserts a path-anchored
+ * canonical=self + indexation=index,follow rule pair for `path`.
+ * Idempotent: if a rule with the same anchored `match` already
+ * exists, replace it (no duplicates).
+ *
+ * Why path-anchored not wildcard:
+ *   The wildcard `^/.*` would flip EVERY path on the site
+ *   indexable, including ones the operator intentionally excluded.
+ *   Path-anchored only affects this one URL. Operators can still
+ *   layer a wildcard via the embed apply flow or per-page editor.
+ */
+export async function handleMakeIndexable(
+  request: Request,
+  env: AppEnv,
+  user: User,
+  clientId: string,
+): Promise<Response> {
+  const form = await request.formData();
+  const path = String(form.get("target_path") ?? "");
+  if (!path || !path.startsWith("/")) {
+    return flashRedirect(`/app/clients/${encodeURIComponent(clientId)}/indexing`, {
+      text: "Missing or invalid target_path.",
+      kind: "err",
+    });
+  }
+  const loaded = await loadClientForIndexing(env, user, clientId);
+  if (!loaded) return new Response("Not found", { status: 404 });
+  const { row } = loaded;
+  const match = pathToAnchorRegex(path);
+
+  // Build the mutated config. Casting to a plain dict is safe — we
+  // only touch the two arrays we own (canonicals, indexation) and
+  // re-stringify. The original was Zod-validated at admin-write
+  // time, and the resulting object is structurally equivalent.
+  const configObj = JSON.parse(row.config_json) as Record<string, unknown>;
+  const canonicals = Array.isArray(configObj.canonicals)
+    ? (configObj.canonicals as Array<Record<string, unknown>>)
+    : [];
+  const cIdx = canonicals.findIndex((r) => r.match === match);
+  const selfCanonical = {
+    match,
+    strategy: { type: "self" },
+    sync_og_url: true,
+    sync_twitter_url: true,
+    sync_jsonld_url: true,
+  };
+  if (cIdx >= 0) canonicals[cIdx] = selfCanonical;
+  else canonicals.push(selfCanonical);
+  configObj.canonicals = canonicals;
+
+  const indexation = Array.isArray(configObj.indexation)
+    ? (configObj.indexation as Array<Record<string, unknown>>)
+    : [];
+  const iIdx = indexation.findIndex((r) => r.match === match);
+  const indexableRule = { match, robots: "index,follow", additional_directives: [] };
+  if (iIdx >= 0) indexation[iIdx] = indexableRule;
+  else indexation.push(indexableRule);
+  configObj.indexation = indexation;
+
+  const beforeHash = fnvHash(row.config_json);
+  const newJson = JSON.stringify(configObj);
+  const afterHash = fnvHash(newJson);
+
+  try {
+    await env.CONFIG_DB.prepare(
+      "UPDATE clients SET config_json = ?, updated_at = CURRENT_TIMESTAMP WHERE client_id = ?",
+    )
+      .bind(newJson, clientId)
+      .run();
+    await env.CONFIG_KV.put(`config:${clientId}`, newJson);
+  } catch (e) {
+    return flashRedirect(`/app/clients/${encodeURIComponent(clientId)}/indexing`, {
+      text: `Update failed: ${e instanceof Error ? e.message : String(e)}`,
+      kind: "err",
+    });
+  }
+
+  try {
+    await writeAudit(env, {
+      client_id: clientId,
+      actor_email: user.email,
+      actor_ip: request.headers.get("cf-connecting-ip") ?? "0.0.0.0",
+      event_type: "config_update",
+      before_hash: beforeHash,
+      after_hash: afterHash,
+      previous_status: null,
+      new_status: null,
+      notes: `make_indexable path=${path} (canonical=self + index,follow upserted for ${match})`,
+    });
+  } catch (e) {
+    console.warn("indexing: audit write failed", e);
+  }
+
+  return flashRedirect(`/app/clients/${encodeURIComponent(clientId)}/indexing`, {
+    text: `${path} is now indexable — canonical=self + index,follow upserted.`,
+    kind: "ok",
+  });
 }
