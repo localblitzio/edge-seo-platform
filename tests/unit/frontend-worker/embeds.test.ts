@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  type EmbedRow,
   applyEmbedToConfig,
   buildEmbedContentInjection,
-  type EmbedRow,
   parseSelectedIndexers,
   validateEmbedInput,
 } from "../../../frontend-worker/src/embeds.js";
@@ -139,7 +139,7 @@ describe("applyEmbedToConfig", () => {
     expect(Array.isArray(cfg.content_injections)).toBe(true);
     const injs = cfg.content_injections as Array<Record<string, unknown>>;
     expect(injs).toHaveLength(1);
-    expect(injs[0]!.html as string).toContain('data-edge-seo-rule="embed:7"');
+    expect(injs[0]?.html as string).toContain('data-edge-seo-rule="embed:7"');
   });
 
   it("is idempotent — re-applying replaces the existing rule for the same embed", () => {
@@ -148,7 +148,7 @@ describe("applyEmbedToConfig", () => {
     applyEmbedToConfig(cfg, fakeEmbed({ id: 7 }), "middle");
     const injs = cfg.content_injections as Array<Record<string, unknown>>;
     expect(injs).toHaveLength(1);
-    expect(injs[0]!.position).toBe("after"); // middle position
+    expect(injs[0]?.position).toBe("after"); // middle position
   });
 
   it("preserves content_injections from other embeds", () => {
@@ -177,8 +177,8 @@ describe("applyEmbedToConfig", () => {
     applyEmbedToConfig(cfg, fakeEmbed(), "bottom");
     const canons = cfg.canonicals as Array<Record<string, unknown>>;
     expect(canons).toHaveLength(1);
-    expect(canons[0]!.match).toBe("^/.*");
-    expect((canons[0]!.strategy as Record<string, unknown>).type).toBe("self");
+    expect(canons[0]?.match).toBe("^/.*");
+    expect((canons[0]?.strategy as Record<string, unknown>).type).toBe("self");
   });
 
   it("replaces a pre-existing wildcard canonical rule (not stacking)", () => {
@@ -198,7 +198,7 @@ describe("applyEmbedToConfig", () => {
     applyEmbedToConfig(cfg, fakeEmbed(), "bottom");
     const canons = cfg.canonicals as Array<Record<string, unknown>>;
     expect(canons).toHaveLength(1);
-    expect((canons[0]!.strategy as Record<string, unknown>).type).toBe("self");
+    expect((canons[0]?.strategy as Record<string, unknown>).type).toBe("self");
   });
 
   it("upserts a wildcard indexation=index,follow rule", () => {
@@ -206,8 +206,8 @@ describe("applyEmbedToConfig", () => {
     applyEmbedToConfig(cfg, fakeEmbed(), "bottom");
     const idx = cfg.indexation as Array<Record<string, unknown>>;
     expect(idx).toHaveLength(1);
-    expect(idx[0]!.match).toBe("^/.*");
-    expect(idx[0]!.robots).toBe("index,follow");
+    expect(idx[0]?.match).toBe("^/.*");
+    expect(idx[0]?.robots).toBe("index,follow");
   });
 
   it("replaces a pre-existing wildcard noindex rule", () => {
@@ -219,7 +219,7 @@ describe("applyEmbedToConfig", () => {
     applyEmbedToConfig(cfg, fakeEmbed(), "bottom");
     const idx = cfg.indexation as Array<Record<string, unknown>>;
     expect(idx).toHaveLength(1);
-    expect(idx[0]!.robots).toBe("index,follow");
+    expect(idx[0]?.robots).toBe("index,follow");
   });
 
   it("preserves non-wildcard canonical and indexation rules", () => {
