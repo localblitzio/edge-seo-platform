@@ -111,6 +111,26 @@ import {
   renderEditClusterForm,
   renderNewClusterForm,
 } from "./clusters.js";
+import {
+  handleClusterSubmitIndexersPost,
+  handleEmbedApplyPost,
+  handleEmbedDeletePost,
+  handleEmbedEditPost,
+  handleEmbedNewPost,
+  handleEmbedReapplyPost,
+  loadPlacementsForEmbed,
+  loadVisibleEmbed,
+  loadVisibleEmbeds,
+  renderClusterSubmitIndexersFormBlock,
+  renderClusterSubmitResult,
+  renderEmbedApplyForm,
+  renderEmbedApplyResult,
+  renderEmbedDetail,
+  renderEmbedForm,
+  renderEmbedsList,
+} from "./embeds.js";
+import { ACTIVE_INDEXERS } from "../../src/secrets/indexer-registry.js";
+import { getSecret } from "../../src/secrets/store.js";
 import { type EmailBinding, resetPasswordMessage, sendEmail } from "./email.js";
 import { FAVICON_DATA_URL } from "./favicon-data-url.js";
 import {
@@ -1762,6 +1782,247 @@ export default {
       // Unknown sub-route — fall through to 404 below.
     }
 
+    /* ─── Embeds (library + cluster bulk-apply + reapply) ─── */
+    /* Order: list, new, then `/:id/...` actions before the `/:id` catch. */
+
+    if (path === "/app/embeds" && method === "GET") {
+      if (!user) return redirectToLogin(url);
+      const clients = await loadVisibleClients(env, user);
+      const rows = await loadVisibleEmbeds(env, user);
+      return htmlResponse(
+        htmlPage({
+          title: "Embeds — Edge SEO Platform",
+          body: appLayout({
+            title: "Embeds",
+            content: renderEmbedsList(rows, user),
+            activeNav: "embeds",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+      );
+    }
+
+    if (path === "/app/embeds/new" && method === "GET") {
+      if (!user) return redirectToLogin(url);
+      const clients = await loadVisibleClients(env, user);
+      return htmlResponse(
+        htmlPage({
+          title: "New embed — Edge SEO Platform",
+          body: appLayout({
+            title: "New embed",
+            content: renderEmbedForm({ prefill: {}, errors: [], mode: "new" }),
+            activeNav: "embeds",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+      );
+    }
+
+    if (path === "/app/embeds/new" && method === "POST") {
+      if (!user) return redirectToLogin(url);
+      const result = await handleEmbedNewPost(request, env, url, user);
+      if ("redirect" in result) return result.redirect;
+      const clients = await loadVisibleClients(env, user);
+      return htmlResponse(
+        htmlPage({
+          title: "New embed — Edge SEO Platform",
+          body: appLayout({
+            title: "New embed",
+            content: renderEmbedForm({
+              prefill: result.prefill,
+              errors: result.errors,
+              mode: "new",
+            }),
+            activeNav: "embeds",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+        { status: 400 },
+      );
+    }
+
+    if (path.startsWith("/app/embeds/")) {
+      if (!user) return redirectToLogin(url);
+      const rest = path.slice("/app/embeds/".length);
+      const slash = rest.indexOf("/");
+      const idStr = slash === -1 ? rest : rest.slice(0, slash);
+      const sub = slash === -1 ? "" : rest.slice(slash + 1);
+      const embedId = Number.parseInt(idStr, 10);
+      if (!Number.isFinite(embedId) || embedId <= 0) {
+        return new Response("Invalid embed id", { status: 400 });
+      }
+      const embed = await loadVisibleEmbed(env, user, embedId);
+      if (!embed) return new Response("Embed not found", { status: 404 });
+      const clients = await loadVisibleClients(env, user);
+
+      // Build the indexer-option list once per request — used by both
+      // the apply form and the reapply section of the detail page.
+      const sharedEnv = env as unknown as Parameters<typeof getSecret>[0];
+      const indexerOptions = await Promise.all(
+        ACTIVE_INDEXERS.map(async (i) => ({
+          slotKey: i.slotKey,
+          label: i.label,
+          color: i.color,
+          available: ((await getSecret(sharedEnv, i.slotKey)) ?? "").length > 0,
+        })),
+      );
+
+      // GET /app/embeds/:id — detail page
+      if (sub === "" && method === "GET") {
+        const placements = await loadPlacementsForEmbed(env, embedId);
+        return htmlResponse(
+          htmlPage({
+            title: `${embed.name} — Embed — Edge SEO Platform`,
+            body: appLayout({
+              title: `Embed: ${embed.name}`,
+              content: renderEmbedDetail({ embed, placements, indexerOptions }),
+              activeNav: "embeds",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+
+      if (sub === "edit" && method === "GET") {
+        return htmlResponse(
+          htmlPage({
+            title: `Edit ${embed.name} — Edge SEO Platform`,
+            body: appLayout({
+              title: `Edit embed: ${embed.name}`,
+              content: renderEmbedForm({
+                prefill: {
+                  id: embed.id,
+                  name: embed.name,
+                  kind: embed.kind,
+                  html: embed.html,
+                  default_position: embed.default_position,
+                },
+                errors: [],
+                mode: "edit",
+              }),
+              activeNav: "embeds",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+
+      if (sub === "edit" && method === "POST") {
+        const result = await handleEmbedEditPost(request, env, url, user, embedId);
+        if ("redirect" in result) return result.redirect;
+        return htmlResponse(
+          htmlPage({
+            title: `Edit ${embed.name} — Edge SEO Platform`,
+            body: appLayout({
+              title: `Edit embed: ${embed.name}`,
+              content: renderEmbedForm({
+                prefill: result.prefill,
+                errors: result.errors,
+                mode: "edit",
+              }),
+              activeNav: "embeds",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+          { status: 400 },
+        );
+      }
+
+      if (sub === "delete" && method === "POST") {
+        return handleEmbedDeletePost(request, env, url, user, embedId);
+      }
+
+      if (sub === "apply" && method === "GET") {
+        const visibleClusters = await loadVisibleClusters(env, user);
+        return htmlResponse(
+          htmlPage({
+            title: `Apply ${embed.name} — Edge SEO Platform`,
+            body: appLayout({
+              title: `Apply: ${embed.name}`,
+              content: renderEmbedApplyForm({
+                embed,
+                visibleClusters,
+                indexerOptions,
+                errors: [],
+              }),
+              activeNav: "embeds",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+
+      if (sub === "apply" && method === "POST") {
+        const result = await handleEmbedApplyPost(request, env, url, user, embedId);
+        if ("response" in result) return result.response;
+        return htmlResponse(
+          htmlPage({
+            title: `Apply result — ${embed.name} — Edge SEO Platform`,
+            body: appLayout({
+              title: `Apply result — ${embed.name}`,
+              content: renderEmbedApplyResult(result.result),
+              activeNav: "embeds",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+
+      if (sub === "reapply" && method === "POST") {
+        const result = await handleEmbedReapplyPost(request, env, url, user, embedId);
+        if ("response" in result) return result.response;
+        return htmlResponse(
+          htmlPage({
+            title: `Reapply result — ${embed.name} — Edge SEO Platform`,
+            body: appLayout({
+              title: `Reapply result — ${embed.name}`,
+              content: renderEmbedApplyResult(result.result),
+              activeNav: "embeds",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+
+      return new Response("Not found", { status: 404 });
+    }
+
     /* ─── Clusters (Slice A: registry only) ─── */
 
     if (path === "/app/clusters" && method === "GET") {
@@ -1869,12 +2130,54 @@ export default {
       }
 
       if (sub === "" && method === "GET") {
+        // Build indexer options once for the inline submit form.
+        const sharedEnv = env as unknown as Parameters<typeof getSecret>[0];
+        const indexerOptions = await Promise.all(
+          ACTIVE_INDEXERS.map(async (i) => ({
+            slotKey: i.slotKey,
+            label: i.label,
+            color: i.color,
+            available: ((await getSecret(sharedEnv, i.slotKey)) ?? "").length > 0,
+          })),
+        );
+        const submitBlock = renderClusterSubmitIndexersFormBlock({
+          clusterId: data.cluster.id,
+          indexerOptions,
+        });
         return htmlResponse(
           htmlPage({
             title: `${data.cluster.label} — Edge SEO Platform`,
             body: appLayout({
               title: data.cluster.label,
-              content: renderClusterDetail(data.cluster, data.members, data.visibleClients),
+              content: renderClusterDetail(
+                data.cluster,
+                data.members,
+                data.visibleClients,
+                submitBlock,
+              ),
+              activeNav: "clusters",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+
+      if (sub === "submit-indexers" && method === "POST") {
+        const result = await handleClusterSubmitIndexersPost(request, env, url, data.cluster);
+        if ("response" in result) return result.response;
+        return htmlResponse(
+          htmlPage({
+            title: `Indexer submission — ${data.cluster.label} — Edge SEO Platform`,
+            body: appLayout({
+              title: `Indexer submission — ${data.cluster.label}`,
+              content: renderClusterSubmitResult({
+                cluster: data.cluster,
+                results: result.results,
+              }),
               activeNav: "clusters",
               user,
               flash,
