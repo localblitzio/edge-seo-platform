@@ -106,7 +106,7 @@ function htmlShell(opts: { preheader: string; body: string; footerNote: string }
       </td></tr>
       <tr><td style="padding:16px 32px;font-size:12px;color:#71717a;border-top:1px solid #e4e4e7;line-height:1.5;">
         ${esc(opts.footerNote)}<br>
-        Replies go to <a href="mailto:${esc(REPLY_TO)}" style="color:#2563eb;">${esc(REPLY_TO)}</a>.
+        Replies go to <a href="mailto:${esc(REPLY_TO)}" style="color:#10b981;">${esc(REPLY_TO)}</a>.
       </td></tr>
     </table>
   </td></tr>
@@ -138,8 +138,8 @@ export function verifyEmailMessage(opts: {
     footerNote: "This link expires in 24 hours. If you didn't request this, ignore this email.",
     body: `<p>Welcome to <strong>${esc(BRAND)}</strong>.</p>
       <p>Please verify your email address by clicking the button below.</p>
-      <p style="margin:24px 0;"><a href="${esc(opts.verifyUrl)}" style="display:inline-block;padding:12px 20px;background:#2563eb;color:#fff;text-decoration:none;border-radius:6px;font-weight:600;">Verify email</a></p>
-      <p style="font-size:12px;color:#71717a;">Or paste this URL into your browser:<br><a href="${esc(opts.verifyUrl)}" style="color:#2563eb;word-break:break-all;">${esc(opts.verifyUrl)}</a></p>`,
+      <p style="margin:24px 0;"><a href="${esc(opts.verifyUrl)}" style="display:inline-block;padding:12px 20px;background:#10b981;color:#fff;text-decoration:none;border-radius:6px;font-weight:600;">Verify email</a></p>
+      <p style="font-size:12px;color:#71717a;">Or paste this URL into your browser:<br><a href="${esc(opts.verifyUrl)}" style="color:#10b981;word-break:break-all;">${esc(opts.verifyUrl)}</a></p>`,
   });
   return { to: opts.to, subject, html, text };
 }
@@ -173,8 +173,8 @@ export function resetPasswordMessage(opts: {
       "This link expires in 1 hour and can only be used once. If you didn't expect this email, your password won't change unless you use the link.",
     body: `<p>${initiator === "you" ? "You" : "An administrator"} requested a password reset for your <strong>${esc(BRAND)}</strong> account.</p>
       <p>Click the button below to set a new password.</p>
-      <p style="margin:24px 0;"><a href="${esc(opts.resetUrl)}" style="display:inline-block;padding:12px 20px;background:#2563eb;color:#fff;text-decoration:none;border-radius:6px;font-weight:600;">Set new password</a></p>
-      <p style="font-size:12px;color:#71717a;">Or paste this URL into your browser:<br><a href="${esc(opts.resetUrl)}" style="color:#2563eb;word-break:break-all;">${esc(opts.resetUrl)}</a></p>`,
+      <p style="margin:24px 0;"><a href="${esc(opts.resetUrl)}" style="display:inline-block;padding:12px 20px;background:#10b981;color:#fff;text-decoration:none;border-radius:6px;font-weight:600;">Set new password</a></p>
+      <p style="font-size:12px;color:#71717a;">Or paste this URL into your browser:<br><a href="${esc(opts.resetUrl)}" style="color:#10b981;word-break:break-all;">${esc(opts.resetUrl)}</a></p>`,
   });
   return { to: opts.to, subject, html, text };
 }
@@ -207,8 +207,8 @@ export function inviteMessage(opts: {
     footerNote: "This invite expires in 7 days. If you weren't expecting it, ignore this email.",
     body: `<p><strong>${esc(opts.invitedBy)}</strong> invited you to join <strong>${esc(BRAND)}</strong>.</p>
       <p>Click the button below to set your password and sign in.</p>
-      <p style="margin:24px 0;"><a href="${esc(opts.inviteUrl)}" style="display:inline-block;padding:12px 20px;background:#2563eb;color:#fff;text-decoration:none;border-radius:6px;font-weight:600;">Accept invite</a></p>
-      <p style="font-size:12px;color:#71717a;">Or paste this URL into your browser:<br><a href="${esc(opts.inviteUrl)}" style="color:#2563eb;word-break:break-all;">${esc(opts.inviteUrl)}</a></p>`,
+      <p style="margin:24px 0;"><a href="${esc(opts.inviteUrl)}" style="display:inline-block;padding:12px 20px;background:#10b981;color:#fff;text-decoration:none;border-radius:6px;font-weight:600;">Accept invite</a></p>
+      <p style="font-size:12px;color:#71717a;">Or paste this URL into your browser:<br><a href="${esc(opts.inviteUrl)}" style="color:#10b981;word-break:break-all;">${esc(opts.inviteUrl)}</a></p>`,
   });
   return { to: opts.to, subject, html, text };
 }
