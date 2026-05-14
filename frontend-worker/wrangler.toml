@@ -52,6 +52,9 @@ allowed_sender_addresses = ["noreply@edgeseo.app"]
 name = "edge-seo-frontend-stage"
 workers_dev = true
 
+[env.staging.vars]
+ENV = "staging"
+
 [[env.staging.routes]]
 pattern = "staging.edgeseo.app/*"
 zone_name = "edgeseo.app"

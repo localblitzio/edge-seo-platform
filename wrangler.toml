@@ -100,17 +100,26 @@ binding = "METRICS"
 dataset = "edge_seo_metrics_staging"
 
 # ---------------------------------------------------------------------------
-# Staging (proxy worker — empty sandbox for iterating on changes)
+# Staging (proxy worker — sandbox for end-to-end testing)
 # ---------------------------------------------------------------------------
 # Resources provisioned 2026-05-13. Empty DB, separate KV/R2 — no
-# real customer data. No zone routes — the staging proxy worker
-# only serves via the workers.dev URL for end-to-end smoke tests.
-# Operator-facing flows happen through `edge-seo-frontend-stage`
-# (admin UI on staging.edgeseo.app), which binds to the SAME D1
-# below so admin actions land on the same staging data.
+# real customer data. Staging-created sites use the dedicated
+# `localsitestage.us` zone (registered via Cloudflare Registrar)
+# so CF Universal SSL covers `*.localsitestage.us` for free.
+# Previous attempt used `stage.localpage.us.com` (nested wildcard)
+# which Universal SSL doesn't cover — replaced 2026-05-13.
 [env.staging]
 name = "edge-seo-platform-stage"
 workers_dev = true
+
+# Single staging zone. Wildcard `*` DNS record on this zone routes
+# all `<id>.localsitestage.us` traffic to the staging proxy worker.
+[[env.staging.routes]]
+pattern = "*.localsitestage.us/*"
+zone_name = "localsitestage.us"
+
+[env.staging.vars]
+ENV = "staging"
 
 [[env.staging.kv_namespaces]]
 binding = "CONFIG_KV"

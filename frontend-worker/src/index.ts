@@ -26,6 +26,7 @@
  * — same pattern as the admin-worker.
  */
 
+import { defaultZoneForEnv } from "../../src/config/proxy-zone.js";
 import { ACTIVE_INDEXERS } from "../../src/secrets/indexer-registry.js";
 import { getSecret } from "../../src/secrets/store.js";
 import {
@@ -199,49 +200,123 @@ function esc(value: unknown): string {
 }
 
 const STYLE = `
-:root{color-scheme:light dark;--bg:#fafafa;--bg-elevated:#fff;--bg-code:#f4f4f5;--border:#e4e4e7;--border-strong:#d4d4d8;--fg:#18181b;--fg-muted:#71717a;--accent:#2563eb;--accent-fg:#fff;--green:#16a34a;--green-bg:#dcfce7;--amber:#b45309;--amber-bg:#fef3c7;--red:#b91c1c;--red-bg:#fee2e2;--shadow:0 1px 2px rgba(0,0,0,.04),0 1px 3px rgba(0,0,0,.06);--radius:.5rem;--mono:ui-monospace,"SFMono-Regular","Menlo","Cascadia Mono",monospace}
-@media (prefers-color-scheme:dark){:root{--bg:#09090b;--bg-elevated:#18181b;--bg-code:#18181b;--border:#27272a;--border-strong:#3f3f46;--fg:#fafafa;--fg-muted:#a1a1aa;--accent:#60a5fa;--green:#4ade80;--green-bg:#052e16;--amber:#fbbf24;--amber-bg:#422006;--red:#f87171;--red-bg:#450a0a}}
-*{box-sizing:border-box}html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
-a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+/* ─── Palette ─── Emerald accent. Light = warm off-white base, dark = manual opt-in via [data-theme="dark"] on <html>. */
+:root{
+  color-scheme:light;
+  --bg:#fafafb;
+  --bg-elevated:#ffffff;
+  --bg-sidebar:#f7f8f9;
+  --bg-code:#f1f3f5;
+  --bg-tint:linear-gradient(180deg,#fafafb 0%,#f7faf9 100%);
+  --border:#e5e7eb;
+  --border-strong:#d1d5db;
+  --fg:#0a0a0a;
+  --fg-muted:#6b7280;
+  --accent:#10b981;
+  --accent-hover:#059669;
+  --accent-fg:#ffffff;
+  --accent-bg:#d1fae5;
+  --accent-bg-strong:#a7f3d0;
+  --accent-soft:#ecfdf5;
+  --green:#10b981;
+  --green-bg:#d1fae5;
+  --amber:#d97706;
+  --amber-bg:#fef3c7;
+  --red:#dc2626;
+  --red-bg:#fee2e2;
+  --shadow-sm:0 1px 2px rgba(15,23,42,.04);
+  --shadow:0 1px 3px rgba(15,23,42,.06),0 1px 2px rgba(15,23,42,.04);
+  --shadow-md:0 4px 12px rgba(15,23,42,.08);
+  --shadow-lg:0 10px 25px rgba(15,23,42,.1);
+  --radius:.5rem;
+  --radius-sm:.375rem;
+  --radius-lg:.75rem;
+  --mono:ui-monospace,"SFMono-Regular","Menlo","Cascadia Mono",monospace
+}
+html[data-theme="dark"]{
+  color-scheme:dark;
+  --bg:#0a0a0b;
+  --bg-elevated:#141416;
+  --bg-sidebar:#0e0e10;
+  --bg-code:#1a1a1d;
+  --bg-tint:linear-gradient(180deg,#0a0a0b 0%,#0d1110 100%);
+  --border:#26262a;
+  --border-strong:#3f3f46;
+  --fg:#fafafa;
+  --fg-muted:#a1a1aa;
+  --accent:#34d399;
+  --accent-hover:#10b981;
+  --accent-fg:#052e16;
+  --accent-bg:rgba(52,211,153,.12);
+  --accent-bg-strong:rgba(52,211,153,.22);
+  --accent-soft:rgba(52,211,153,.06);
+  --green:#34d399;
+  --green-bg:rgba(52,211,153,.12);
+  --amber:#fbbf24;
+  --amber-bg:rgba(251,191,36,.12);
+  --red:#f87171;
+  --red-bg:rgba(248,113,113,.12);
+  --shadow-sm:0 1px 2px rgba(0,0,0,.3);
+  --shadow:0 1px 3px rgba(0,0,0,.4),0 1px 2px rgba(0,0,0,.3);
+  --shadow-md:0 4px 12px rgba(0,0,0,.5);
+  --shadow-lg:0 10px 25px rgba(0,0,0,.6)
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;background:var(--bg);background-image:var(--bg-tint);background-attachment:fixed;color:var(--fg);font:14px/1.55 -apple-system,BlinkMacSystemFont,"Inter","Segoe UI",Roboto,sans-serif;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
+a{color:var(--accent);text-decoration:none;transition:color .15s ease}a:hover{color:var(--accent-hover);text-decoration:underline}
 code,.mono{font-family:var(--mono);font-size:.92em}
-.topbar{display:flex;align-items:center;justify-content:space-between;padding:.85rem 2rem;background:var(--bg-elevated);border-bottom:1px solid var(--border)}
+::selection{background:var(--accent-bg-strong);color:var(--fg)}
+.topbar{display:flex;align-items:center;justify-content:space-between;padding:.85rem 2rem;background:var(--bg-elevated);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:50;backdrop-filter:saturate(180%) blur(6px);background:color-mix(in srgb,var(--bg-elevated) 92%,transparent)}
 .topbar .brand{display:flex;align-items:center;gap:.7rem;font-size:1rem;font-weight:600;color:var(--fg)}
 .topbar .brand:hover{text-decoration:none}
 .topbar .logo{display:inline-block;height:4.9rem;aspect-ratio:4/1;background-image:url("${LOGO_DATA_URL}");background-size:contain;background-position:left center;background-repeat:no-repeat}
+html[data-theme="dark"] .topbar .logo{filter:brightness(0) invert(1)}
 .auth-card .logo{display:block;margin:0 auto 1rem;width:4.5rem;height:4.5rem;background-image:url("${FAVICON_DATA_URL}");background-size:contain;background-position:center;background-repeat:no-repeat}
 .topbar nav{display:flex;gap:1.25rem;font-size:.9rem;align-items:center}
 .topbar nav .who{color:var(--fg-muted);font-size:.82rem}
 .topbar nav form{display:inline}
-.topbar nav button.linklike{font:inherit;background:none;border:none;color:var(--accent);cursor:pointer;padding:0}
-.btn{font:inherit;border:1px solid var(--border-strong);background:var(--bg-elevated);color:var(--fg);padding:.45rem 1rem;border-radius:var(--radius);cursor:pointer;display:inline-block;text-decoration:none}
-.btn:hover{border-color:var(--accent);color:var(--accent);text-decoration:none}
-.btn-primary{background:var(--accent);color:var(--accent-fg);border-color:var(--accent)}.btn-primary:hover{filter:brightness(1.1);color:var(--accent-fg)}
+.topbar nav button.linklike{font:inherit;background:none;border:none;color:var(--accent);cursor:pointer;padding:0;transition:color .15s ease}
+.topbar nav button.linklike:hover{color:var(--accent-hover)}
+.theme-toggle{font:inherit;background:none;border:1px solid var(--border);width:2rem;height:2rem;border-radius:9999px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;color:var(--fg-muted);transition:all .15s ease;padding:0}
+.theme-toggle:hover{border-color:var(--accent);color:var(--accent);transform:rotate(15deg)}
+.theme-toggle svg{width:1rem;height:1rem}
+.theme-toggle .icon-sun{display:none}
+html[data-theme="dark"] .theme-toggle .icon-moon{display:none}
+html[data-theme="dark"] .theme-toggle .icon-sun{display:block}
+.btn{font:inherit;font-weight:500;border:1px solid var(--border-strong);background:var(--bg-elevated);color:var(--fg);padding:.45rem 1rem;border-radius:var(--radius);cursor:pointer;display:inline-block;text-decoration:none;transition:all .15s ease;box-shadow:var(--shadow-sm)}
+.btn:hover{border-color:var(--accent);color:var(--accent);text-decoration:none;box-shadow:var(--shadow)}
+.btn-primary{background:var(--accent);color:var(--accent-fg);border-color:var(--accent);box-shadow:var(--shadow-sm)}
+.btn-primary:hover{background:var(--accent-hover);border-color:var(--accent-hover);color:var(--accent-fg);box-shadow:var(--shadow-md);transform:translateY(-1px)}
+.btn-primary:active{transform:translateY(0);box-shadow:var(--shadow-sm)}
 .hero{max-width:920px;margin:5rem auto 2rem;padding:0 2rem;text-align:center}
-.hero h1{font-size:2.6rem;line-height:1.1;letter-spacing:-.02em;font-weight:800;margin:0 0 1rem}
+.hero h1{font-size:2.75rem;line-height:1.05;letter-spacing:-.025em;font-weight:800;margin:0 0 1rem;background:linear-gradient(135deg,var(--fg) 0%,var(--accent) 100%);-webkit-background-clip:text;background-clip:text;color:transparent}
 .hero p.lead{font-size:1.15rem;color:var(--fg-muted);max-width:640px;margin:0 auto 1.75rem;line-height:1.5}
 .hero .cta{display:inline-flex;gap:.6rem;flex-wrap:wrap;justify-content:center}
 .features{max-width:920px;margin:3rem auto;padding:0 2rem;display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1.25rem}
-.feature{background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius);padding:1.25rem 1.5rem;box-shadow:var(--shadow)}
+.feature{background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-lg);padding:1.25rem 1.5rem;box-shadow:var(--shadow);transition:transform .2s ease,box-shadow .2s ease}
+.feature:hover{transform:translateY(-2px);box-shadow:var(--shadow-md);border-color:color-mix(in srgb,var(--accent) 30%,var(--border))}
 .feature h3{margin:0 0 .5rem;font-size:1rem;font-weight:600}
 .feature p{margin:0;color:var(--fg-muted);font-size:.9rem;line-height:1.5}
 .footer{margin-top:5rem;padding:2rem;text-align:center;color:var(--fg-muted);font-size:.85rem;border-top:1px solid var(--border)}
-.placeholder{max-width:560px;margin:5rem auto;padding:2rem;background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius);text-align:center}
+.placeholder{max-width:560px;margin:5rem auto;padding:2rem;background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-lg);text-align:center;box-shadow:var(--shadow)}
 .placeholder h1{font-size:1.35rem;margin:0 0 .5rem}
 .placeholder p{color:var(--fg-muted);margin:.4rem 0}
 .placeholder code{background:var(--bg-code);padding:.15rem .35rem;border-radius:.25rem;font-size:.85em}
-.auth-card{max-width:420px;margin:4rem auto;padding:2rem;background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow)}
-.auth-card h1{font-size:1.35rem;margin:0 0 .35rem;letter-spacing:-.01em}
+.auth-card{max-width:420px;margin:4rem auto;padding:2.25rem;background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-lg);box-shadow:var(--shadow-md)}
+.auth-card h1{font-size:1.4rem;margin:0 0 .35rem;letter-spacing:-.015em;font-weight:700}
 .auth-card .subtitle{color:var(--fg-muted);font-size:.9rem;margin:0 0 1.5rem}
 .auth-card form{display:flex;flex-direction:column;gap:.85rem}
 .auth-card label{font-weight:600;font-size:.85rem;display:block;margin-bottom:.3rem}
-.auth-card input[type=email],.auth-card input[type=password],.auth-card input[type=text]{font:inherit;font-size:.95rem;padding:.55rem .75rem;border:1px solid var(--border-strong);border-radius:var(--radius);background:var(--bg);color:var(--fg);width:100%}
+.auth-card input[type=email],.auth-card input[type=password],.auth-card input[type=text]{font:inherit;font-size:.95rem;padding:.6rem .85rem;border:1px solid var(--border-strong);border-radius:var(--radius);background:var(--bg);color:var(--fg);width:100%;transition:border-color .15s ease,box-shadow .15s ease}
+.auth-card input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-bg)}
 .auth-card .form-actions{margin-top:.5rem}
-.auth-card .form-actions .btn-primary{width:100%}
+.auth-card .form-actions .btn-primary{width:100%;padding:.6rem 1rem}
 .auth-card .alt{margin-top:1.25rem;text-align:center;font-size:.85rem;color:var(--fg-muted)}
-.flash{padding:.65rem 1rem;border-radius:var(--radius);margin:0 0 1rem;border:1px solid transparent;font-size:.9rem}
-.flash-ok{background:var(--green-bg);color:var(--green);border-color:var(--green)}
-.flash-warn{background:var(--amber-bg);color:var(--amber);border-color:var(--amber)}
-.flash-err{background:var(--red-bg);color:var(--red);border-color:var(--red)}
+.flash{padding:.7rem 1rem;border-radius:var(--radius);margin:0 0 1rem;border:1px solid transparent;font-size:.9rem;display:flex;align-items:center;gap:.5rem;animation:flash-in .2s ease}
+@keyframes flash-in{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
+.flash-ok{background:var(--green-bg);color:var(--green);border-color:color-mix(in srgb,var(--green) 30%,transparent)}
+.flash-warn{background:var(--amber-bg);color:var(--amber);border-color:color-mix(in srgb,var(--amber) 30%,transparent)}
+.flash-err{background:var(--red-bg);color:var(--red);border-color:color-mix(in srgb,var(--red) 30%,transparent)}
 ${APP_STYLE}
 `;
 
@@ -252,13 +327,34 @@ interface FlashMessage {
   kind: "ok" | "warn" | "err";
 }
 
+/**
+ * Inline script in <head> — reads the `theme` cookie and sets the
+ * matching `data-theme` attribute on <html> before the body paints,
+ * so no flash-of-wrong-theme on navigation. Tiny + minified.
+ */
+const THEME_INLINE_SCRIPT = `<script>(function(){try{var m=document.cookie.match(/(?:^|; )theme=(light|dark)/);if(m&&m[1]==="dark")document.documentElement.setAttribute("data-theme","dark")}catch(e){}})();</script>`;
+
+/**
+ * Theme-toggle button — single form that POSTs to `/theme`, no
+ * payload needed (the endpoint reads the current cookie and flips
+ * it). Both sun + moon icons are present; CSS shows the right one
+ * based on the `[data-theme]` attribute on <html>.
+ */
+const THEME_TOGGLE = `<form method="POST" action="/theme" style="display:inline">
+  <button type="submit" class="theme-toggle" title="Toggle dark mode" aria-label="Toggle dark mode">
+    <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+    <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+  </button>
+</form>`;
+
 function topbar(user: User | null): string {
   const right = user
     ? `<span class="who">${esc(user.email)}${user.role === "super_admin" ? " · super_admin" : ""}</span>
         <a href="/app">Dashboard</a>
         ${user.role === "super_admin" ? '<a href="/admin/users">Admin</a>' : ""}
+        ${THEME_TOGGLE}
         <form method="POST" action="/logout"><button type="submit" class="linklike">Sign out</button></form>`
-    : `<a href="/login">Sign in</a>`;
+    : `<a href="/login">Sign in</a>${THEME_TOGGLE}`;
   return `<header class="topbar">
     <a class="brand" href="/" aria-label="Edge SEO Platform — home"><span class="logo"></span></a>
     <nav>${right}</nav>
@@ -276,7 +372,7 @@ function htmlPage(opts: {
   user: User | null;
   flash?: FlashMessage | null;
 }): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(opts.title)}</title><link rel="icon" type="image/png" href="${FAVICON_DATA_URL}"><style>${STYLE}</style></head><body>${topbar(opts.user)}<main>${flashBanner(opts.flash ?? null)}${opts.body}</main><footer class="footer">© ${new Date().getFullYear()} Edge SEO Platform</footer></body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(opts.title)}</title><link rel="icon" type="image/png" href="${FAVICON_DATA_URL}">${THEME_INLINE_SCRIPT}<style>${STYLE}</style></head><body>${topbar(opts.user)}<main>${flashBanner(opts.flash ?? null)}${opts.body}</main><footer class="footer">© ${new Date().getFullYear()} Edge SEO Platform</footer></body></html>`;
 }
 
 const htmlHeadersBase: Record<string, string> = {
@@ -858,6 +954,23 @@ export default {
     if (path === "/logout" && method === "POST") {
       return handleLogoutPost(request, env, url, sessionToken);
     }
+
+    // Theme toggle — reads the current `theme` cookie, flips it,
+    // sets new cookie, 303-redirects back to the referer. No CSRF
+    // check (purely cosmetic, no security implications).
+    if (path === "/theme" && method === "POST") {
+      const cookie = request.headers.get("cookie") ?? "";
+      const current = cookie.match(/(?:^|;\s*)theme=(light|dark)/)?.[1] ?? "light";
+      const next = current === "dark" ? "light" : "dark";
+      const back = request.headers.get("referer") ?? "/";
+      return new Response(null, {
+        status: 303,
+        headers: {
+          location: back,
+          "set-cookie": `theme=${next}; Path=/; SameSite=Lax; Max-Age=31536000`,
+        },
+      });
+    }
     if (path === "/logout" && method === "GET") {
       // GET /logout is a courtesy redirect — the real logout is POST.
       // Renders a one-button page so a user clicking a "logout" link
@@ -997,7 +1110,7 @@ export default {
             title: "Bulk-create sites",
             content: renderBulkNewForm({
               prefill: {
-                zone: "localpage.us.com",
+                zone: defaultZoneForEnv(env as { ENV?: string }),
                 zone_strategy: "single",
                 attested_by_email: user.email,
                 attested_ip: "",
@@ -1101,7 +1214,7 @@ export default {
           body: appLayout({
             title: "Create sites from SERP",
             content: renderSerpNewForm({
-              prefill: defaultSerpPrefill(),
+              prefill: defaultSerpPrefill(env as { ENV?: string }),
               visibleClusters,
               errors: [],
             }),
