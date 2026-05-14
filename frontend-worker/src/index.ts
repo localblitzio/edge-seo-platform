@@ -148,6 +148,14 @@ import {
 } from "./embeds.js";
 import { FAVICON_DATA_URL } from "./favicon-data-url.js";
 import {
+  handleBulkDeletePost,
+  loadClientsByIds,
+  loadGeneratedClientIds,
+  loadGeneratedSites,
+  renderBulkDeleteConfirm,
+  renderGeneratedSitesList,
+} from "./generated-sites.js";
+import {
   type IndexationFilters,
   LAST_CHECK_AGE_FILTERS,
   type LastCheckAgeFilter,
@@ -1051,8 +1059,19 @@ export default {
       // rather than have renderClientsList call into clusters.ts
       // (which would be a circular import).
       const showDeleted = url.searchParams.get("show_deleted") === "1";
-      const clients = await loadVisibleClients(env, user, { includeDeleted: showDeleted });
-      const visibleClusters = await loadVisibleClusters(env, user);
+      const showGenerated = url.searchParams.get("show_generated") === "1";
+      const [allClients, visibleClusters, generatedIds] = await Promise.all([
+        loadVisibleClients(env, user, { includeDeleted: showDeleted }),
+        loadVisibleClusters(env, user),
+        loadGeneratedClientIds(env),
+      ]);
+      // Hide programmatic-SEO clients by default — they live on their
+      // own page at /app/generated-sites. Toggle ?show_generated=1 to
+      // merge them back into this list.
+      const clients = showGenerated
+        ? allClients
+        : allClients.filter((c) => !generatedIds.has(c.client_id));
+      const hiddenGeneratedCount = allClients.length - clients.length;
       const clusterMembers = await loadAllClusterMembersByCluster(
         env,
         visibleClusters.map((c) => c.id),
@@ -1064,6 +1083,8 @@ export default {
             title: "Proxied sites",
             content: renderClientsList(clients, visibleClusters, clusterMembers, user, {
               showDeleted,
+              showGenerated,
+              hiddenGeneratedCount,
             }),
             activeNav: "clients",
             user,
@@ -3374,6 +3395,72 @@ export default {
         }),
         { status: 400 },
       );
+    }
+
+    /* ─── Generated sites (programmatic SEO) ─── */
+
+    if (path === "/app/generated-sites" && method === "GET") {
+      if (!user) return redirectToLogin(url);
+      const showDeleted = url.searchParams.get("show_deleted") === "1";
+      const [allRows, clients] = await Promise.all([
+        loadGeneratedSites(env, user),
+        loadVisibleClients(env, user, { includeDeleted: true }),
+      ]);
+      const rows = showDeleted ? allRows : allRows.filter((r) => !r.deleted_at);
+      return htmlResponse(
+        htmlPage({
+          title: "Generated sites — Edge SEO Platform",
+          body: appLayout({
+            title: "Generated sites",
+            content: renderGeneratedSitesList({ rows, user, showDeleted }),
+            activeNav: "generated-sites",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+      );
+    }
+
+    if (path === "/app/generated-sites/bulk-delete" && method === "GET") {
+      if (!user) return redirectToLogin(url);
+      const ids = url.searchParams.getAll("client_id");
+      if (ids.length === 0) {
+        return new Response(null, {
+          status: 303,
+          headers: { location: "/app/generated-sites" },
+        });
+      }
+      const [clients, allClients] = await Promise.all([
+        loadClientsByIds(env, user, ids),
+        loadVisibleClients(env, user, { includeDeleted: true }),
+      ]);
+      return htmlResponse(
+        htmlPage({
+          title: `Bulk delete ${clients.length} site${clients.length === 1 ? "" : "s"}`,
+          body: appLayout({
+            title: "Bulk delete",
+            content: renderBulkDeleteConfirm({
+              clients,
+              errors: [],
+              returnTo: "/app/generated-sites",
+            }),
+            activeNav: "generated-sites",
+            user,
+            flash,
+            clients: allClients,
+          }),
+          user,
+          flash: null,
+        }),
+      );
+    }
+
+    if (path === "/app/generated-sites/bulk-delete" && method === "POST") {
+      if (!user) return redirectToLogin(url);
+      return handleBulkDeletePost(request, env, url, user);
     }
 
     /* ─── Phase B: DataForSEO Maps scrape → data source ─── */

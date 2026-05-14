@@ -385,6 +385,8 @@ const NAV_ICONS: Record<string, string> = {
   embeds: `<svg ${NAV_SVG_ATTRS}><path d="M16.5 9.4L7.5 4.21"/><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>`,
   // bar-chart (Indexation — overview / stats)
   indexation: `<svg ${NAV_SVG_ATTRS}><line x1="12" y1="20" x2="12" y2="10"/><line x1="18" y1="20" x2="18" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>`,
+  // copy (Generated sites — duplicated/auto-generated)
+  "generated-sites": `<svg ${NAV_SVG_ATTRS}><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`,
   // layers (Templates — stacked content)
   templates: `<svg ${NAV_SVG_ATTRS}><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>`,
   // database (Data sources — tabular data)
@@ -451,6 +453,12 @@ export function appSidebar(opts: { activeNav: string; clients: ClientRow[]; user
       id: "templates",
       label: "Templates",
       icon: NAV_ICONS.templates ?? "",
+    },
+    {
+      href: "/app/generated-sites",
+      id: "generated-sites",
+      label: "Generated sites",
+      icon: NAV_ICONS["generated-sites"] ?? "",
     },
     {
       href: "/app/data-sources",
@@ -552,12 +560,20 @@ export function renderClientsList(
   clusters: readonly ClusterFilterOption[],
   clusterMembers: ReadonlyMap<number, readonly string[]>,
   user: User,
-  opts: { showDeleted?: boolean } = {},
+  opts: { showDeleted?: boolean; showGenerated?: boolean; hiddenGeneratedCount?: number } = {},
 ): string {
   const headerActions = `<span style="float:right;display:inline-flex;gap:.4rem"><a href="/app/clients/serp-new" class="btn">From SERP</a> <a href="/app/clients/bulk-new" class="btn">Bulk-create</a> <a href="/app/clients/new" class="btn btn-primary">+ New proxied site</a></span>`;
   const deletedToggle = opts.showDeleted
-    ? `<a href="/app/clients" class="btn" style="font-size:.82rem;padding:.3rem .65rem">Hide deleted</a>`
-    : `<a href="/app/clients?show_deleted=1" class="btn" style="font-size:.82rem;padding:.3rem .65rem;color:var(--fg-muted)">Show deleted</a>`;
+    ? `<a href="/app/clients${opts.showGenerated ? "?show_generated=1" : ""}" class="btn" style="font-size:.82rem;padding:.3rem .65rem">Hide deleted</a>`
+    : `<a href="/app/clients?show_deleted=1${opts.showGenerated ? "&show_generated=1" : ""}" class="btn" style="font-size:.82rem;padding:.3rem .65rem;color:var(--fg-muted)">Show deleted</a>`;
+  // "Generated" toggle — only show when there are programmatic-SEO
+  // clients to merge in, otherwise it's noise.
+  const hiddenGenerated = opts.hiddenGeneratedCount ?? 0;
+  const generatedToggle = opts.showGenerated
+    ? `<a href="/app/clients${opts.showDeleted ? "?show_deleted=1" : ""}" class="btn" style="font-size:.82rem;padding:.3rem .65rem">Hide ${hiddenGenerated} generated</a>`
+    : hiddenGenerated > 0
+      ? `<a href="/app/clients?show_generated=1${opts.showDeleted ? "&show_deleted=1" : ""}" class="btn" style="font-size:.82rem;padding:.3rem .65rem;color:var(--fg-muted)">Show ${hiddenGenerated} generated</a> <a href="/app/generated-sites" style="font-size:.82rem;color:var(--accent)">→ go to Generated sites</a>`
+      : "";
   if (clients.length === 0) {
     return `<h1>Proxied sites ${headerActions}</h1>
       <p class="subtitle">${user.role === "super_admin" ? "No proxied sites in the platform yet." : "You don't have any proxied sites yet."}</p>
@@ -624,7 +640,7 @@ export function renderClientsList(
       ),
   ].join("");
   return `<h1>Proxied sites ${headerActions}</h1>
-    <p class="subtitle">${ownership} ${deletedToggle}</p>
+    <p class="subtitle">${ownership} ${deletedToggle} ${generatedToggle}</p>
     <div class="card" style="padding:.75rem 1rem;margin-bottom:.75rem">
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:.6rem;align-items:end">
         <div>
@@ -1918,14 +1934,14 @@ interface ActorContext {
   ip: string;
 }
 
-function actorOf(user: User, request: Request): ActorContext {
+export function actorOf(user: User, request: Request): ActorContext {
   return {
     user,
     ip: request.headers.get("cf-connecting-ip") ?? "0.0.0.0",
   };
 }
 
-function checkCsrf(request: Request, url: URL): Response | null {
+export function checkCsrf(request: Request, url: URL): Response | null {
   const expected = `${url.protocol}//${url.host}`;
   const origin = request.headers.get("origin");
   if (origin) {
@@ -1945,7 +1961,7 @@ function checkCsrf(request: Request, url: URL): Response | null {
   return new Response("CSRF: missing Origin and Referer", { status: 403 });
 }
 
-function flashRedirect(
+export function flashRedirect(
   location: string,
   flash: { text: string; kind: "ok" | "warn" | "err" },
 ): Response {
