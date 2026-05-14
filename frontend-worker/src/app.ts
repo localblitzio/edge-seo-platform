@@ -83,6 +83,8 @@ export interface ClientRow {
   created_at: string;
   updated_at: string;
   owner_id: number | null;
+  /** ISO timestamp when soft-deleted; NULL means the client is live. */
+  deleted_at: string | null;
 }
 
 export interface AttestationRow {
@@ -121,15 +123,23 @@ export function canSeeAllClients(user: User): boolean {
   return user.role === "super_admin";
 }
 
-export async function loadVisibleClients(env: AppEnv, user: User): Promise<ClientRow[]> {
+export async function loadVisibleClients(
+  env: AppEnv,
+  user: User,
+  opts: { includeDeleted?: boolean } = {},
+): Promise<ClientRow[]> {
+  // Soft-deleted clients (`deleted_at IS NOT NULL`) are hidden by
+  // default — they keep returning 410 Gone but stop cluttering the
+  // working list. Opt in via `?show_deleted=1` on the index page.
+  const deletedFilter = opts.includeDeleted ? "" : " AND deleted_at IS NULL";
   if (canSeeAllClients(user)) {
     const r = await env.CONFIG_DB.prepare(
-      "SELECT * FROM clients ORDER BY client_id",
+      `SELECT * FROM clients WHERE 1=1${deletedFilter} ORDER BY client_id`,
     ).all<ClientRow>();
     return r.results ?? [];
   }
   const r = await env.CONFIG_DB.prepare(
-    "SELECT * FROM clients WHERE owner_id = ? ORDER BY client_id",
+    `SELECT * FROM clients WHERE owner_id = ?${deletedFilter} ORDER BY client_id`,
   )
     .bind(user.id)
     .all<ClientRow>();
@@ -542,8 +552,12 @@ export function renderClientsList(
   clusters: readonly ClusterFilterOption[],
   clusterMembers: ReadonlyMap<number, readonly string[]>,
   user: User,
+  opts: { showDeleted?: boolean } = {},
 ): string {
   const headerActions = `<span style="float:right;display:inline-flex;gap:.4rem"><a href="/app/clients/serp-new" class="btn">From SERP</a> <a href="/app/clients/bulk-new" class="btn">Bulk-create</a> <a href="/app/clients/new" class="btn btn-primary">+ New proxied site</a></span>`;
+  const deletedToggle = opts.showDeleted
+    ? `<a href="/app/clients" class="btn" style="font-size:.82rem;padding:.3rem .65rem">Hide deleted</a>`
+    : `<a href="/app/clients?show_deleted=1" class="btn" style="font-size:.82rem;padding:.3rem .65rem;color:var(--fg-muted)">Show deleted</a>`;
   if (clients.length === 0) {
     return `<h1>Proxied sites ${headerActions}</h1>
       <p class="subtitle">${user.role === "super_admin" ? "No proxied sites in the platform yet." : "You don't have any proxied sites yet."}</p>
@@ -570,12 +584,15 @@ export function renderClientsList(
       // Lowercased substring soup for the search filter — JS just
       // .includes() against the input value to decide visibility.
       const searchHaystack = `${c.client_id} ${c.proxy_domain} ${c.source_domain}`.toLowerCase();
+      const deletedBadge = c.deleted_at
+        ? ` <span class="pill" style="background:var(--amber-bg);color:var(--amber);font-size:.7rem;padding:.05rem .4rem">deleted</span>`
+        : "";
       return `<tr
           data-search="${esc(searchHaystack)}"
           data-status="${esc(c.status)}"
           data-zone="${esc(zone)}"
-          data-clusters="${memberOf.join(",")}">
-        <td><a href="/app/clients/${esc(c.client_id)}" class="mono">${esc(c.client_id)}</a></td>
+          data-clusters="${memberOf.join(",")}"${c.deleted_at ? ' style="opacity:.65"' : ""}>
+        <td><a href="/app/clients/${esc(c.client_id)}" class="mono">${esc(c.client_id)}</a>${deletedBadge}</td>
         <td class="mono">${esc(c.proxy_domain)}</td>
         <td class="mono">${esc(c.source_domain)}</td>
         <td>${statusPill(c.status)}</td>
@@ -607,7 +624,7 @@ export function renderClientsList(
       ),
   ].join("");
   return `<h1>Proxied sites ${headerActions}</h1>
-    <p class="subtitle">${ownership}</p>
+    <p class="subtitle">${ownership} ${deletedToggle}</p>
     <div class="card" style="padding:.75rem 1rem;margin-bottom:.75rem">
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:.6rem;align-items:end">
         <div>
@@ -1079,6 +1096,7 @@ export async function renderClientDetail(env: AppEnv, user: User, id: string): P
   return `<div class="crumbs"><a href="/app/clients">← Proxied sites</a></div>
     <h1>${esc(client.client_id)} ${statusPill(client.status)} ${modePill}</h1>
     <p class="subtitle">${subtitle}</p>
+    ${renderDeletedBanner(client)}
     ${renderActionsRow(client)}
     ${parseError ? `<div class="empty">⚠ Config JSON parse error: ${esc(parseError)}</div>` : ""}
     ${mode === "in_place" ? renderInPlaceSetupCard(client) : ""}
@@ -1141,7 +1159,9 @@ type AuditEventType =
   | "revocation"
   | "authorization_update"
   | "embed_apply"
-  | "embed_remove";
+  | "embed_remove"
+  | "soft_delete"
+  | "restore";
 
 export interface AuditEntry {
   client_id: string;
@@ -1345,6 +1365,12 @@ function renderActionsRow(client: ClientRow): string {
       <button class="btn ${cls}" type="submit"${onclick}>${esc(label)}</button>
     </form>`;
   };
+  // Delete button is separated visually from the status flips because
+  // it's the most destructive non-terminal action and we want it
+  // harder to hit accidentally.
+  const deleteBtn = client.deleted_at
+    ? `<form method="POST" action="/app/clients/${esc(client.client_id)}/restore" style="margin-left:auto"><button class="btn btn-primary" type="submit">Restore site</button></form>`
+    : `<a class="btn" style="margin-left:auto;color:var(--red);border-color:color-mix(in srgb,var(--red) 40%,transparent)" href="/app/clients/${esc(client.client_id)}/delete">Delete site…</a>`;
   return `<div class="actions-row">
     <a class="btn btn-primary" href="/app/clients/${esc(client.client_id)}/edit">Edit config</a>
     <a class="btn" href="/app/clients/${esc(client.client_id)}/indexing">Indexing</a>
@@ -1354,6 +1380,7 @@ function renderActionsRow(client: ClientRow): string {
     ${statusBtn("active", "Activate", "btn-success", null)}
     ${statusBtn("paused", "Pause", "btn-warn", "Pause this client? The Worker will return 410 for all requests.")}
     ${statusBtn("terminated", "Terminate", "btn-danger", "Terminate is a one-way door per PRD §6.3. Requests will return 410 permanently. Are you sure?")}
+    ${deleteBtn}
   </div>`;
 }
 
@@ -2354,6 +2381,199 @@ export async function handleStatusPost(
   return flashRedirect(`/app/clients/${clientId}`, {
     text: `Status: ${client.status} → ${target}.`,
     kind: target === "terminated" ? "warn" : "ok",
+  });
+}
+
+/**
+ * Confirmation page for soft-deleting a client. Renders a type-to-
+ * confirm form — the operator must type the exact client_id before
+ * the submit button POSTs the actual delete. This is the same
+ * pattern GitHub/AWS/Vercel use for destructive ops.
+ */
+export function renderSoftDeleteConfirm(opts: {
+  client: ClientRow;
+  errors: string[];
+}): string {
+  const { client } = opts;
+  const errBox =
+    opts.errors.length > 0 ? `<div class="error-box">${opts.errors.map(esc).join("\n")}</div>` : "";
+  return `<div class="client-detail" style="max-width:680px">
+    <div class="crumbs"><a href="/app/clients/${esc(client.client_id)}">← ${esc(client.client_id)}</a></div>
+    <h1 style="color:var(--red)">Delete site</h1>
+    ${errBox}
+    <div style="background:var(--red-bg);border:1px solid color-mix(in srgb,var(--red) 30%,transparent);border-radius:var(--radius);padding:1rem 1.25rem;margin-bottom:1.25rem">
+      <strong>This will soft-delete the site.</strong>
+      <ul style="margin:.5rem 0 0;padding-left:1.2rem;line-height:1.7">
+        <li>Status flips to <code>paused</code>; worker returns <code>410 Gone</code> immediately.</li>
+        <li>Hidden from the proxied sites list (toggle "Show deleted" to see it again).</li>
+        <li>Cluster memberships and embed placements: kept for now.</li>
+        <li>R2 content and the client row are preserved for <strong>30 days</strong>, then a future cron sweep will hard-delete.</li>
+        <li><strong>Reversible</strong> via the "Restore" button until the 30-day cron sweep runs.</li>
+      </ul>
+    </div>
+    <form method="POST" action="/app/clients/${esc(client.client_id)}/delete">
+      <div class="form-section">
+        <label for="confirm_id">Type the client_id to confirm: <code style="font-family:var(--mono)">${esc(client.client_id)}</code></label>
+        <input id="confirm_id" name="confirm_id" type="text" required autocomplete="off" autofocus placeholder="${esc(client.client_id)}" style="font-family:var(--mono);font-size:1rem">
+      </div>
+      <div class="form-actions">
+        <button class="btn" type="submit" style="background:var(--red);border-color:var(--red);color:#fff">Soft-delete this site</button>
+        <a class="btn" href="/app/clients/${esc(client.client_id)}">Cancel</a>
+      </div>
+    </form>
+  </div>`;
+}
+
+/**
+ * Banner shown at the top of a soft-deleted client's detail page,
+ * with the restore action.
+ */
+export function renderDeletedBanner(client: ClientRow): string {
+  if (!client.deleted_at) return "";
+  return `<div style="background:var(--amber-bg);color:var(--amber);border:1px solid color-mix(in srgb,var(--amber) 30%,transparent);border-radius:var(--radius);padding:.85rem 1rem;margin-bottom:1rem;display:flex;align-items:center;justify-content:space-between;gap:1rem">
+    <div>
+      <strong>This site is soft-deleted</strong> (returns 410 Gone).
+      <span style="color:var(--fg-muted);font-size:.85rem">Deleted at ${esc(client.deleted_at)} · will be hard-deleted after 30 days.</span>
+    </div>
+    <form method="POST" action="/app/clients/${esc(client.client_id)}/restore" style="margin:0">
+      <button class="btn btn-primary" type="submit">Restore site</button>
+    </form>
+  </div>`;
+}
+
+export async function handleSoftDeletePost(
+  request: Request,
+  env: AppEnv,
+  url: URL,
+  user: User,
+  clientId: string,
+): Promise<{ redirect: Response } | { errors: string[] }> {
+  const csrf = checkCsrf(request, url);
+  if (csrf) return { redirect: csrf };
+  const client = await loadVisibleClient(env, user, clientId);
+  if (!client) return { redirect: new Response("Not found", { status: 404 }) };
+  if (client.deleted_at) {
+    return {
+      redirect: flashRedirect(`/app/clients/${clientId}`, {
+        text: "Already soft-deleted.",
+        kind: "warn",
+      }),
+    };
+  }
+
+  const form = await request.formData();
+  const confirm = String(form.get("confirm_id") ?? "").trim();
+  if (confirm !== clientId) {
+    return {
+      errors: [`Confirmation didn't match: expected "${clientId}", got "${confirm || "(empty)"}".`],
+    };
+  }
+
+  let parsedCfg: Record<string, unknown>;
+  try {
+    parsedCfg = JSON.parse(client.config_json);
+  } catch (e) {
+    return {
+      redirect: flashRedirect(`/app/clients/${clientId}`, {
+        text: `Cannot soft-delete: config_json is invalid: ${(e as Error).message}`,
+        kind: "err",
+      }),
+    };
+  }
+  parsedCfg.status = "paused";
+  const newJson = JSON.stringify(parsedCfg);
+
+  await env.CONFIG_DB.prepare(
+    `UPDATE clients
+       SET status = 'paused',
+           deleted_at = CURRENT_TIMESTAMP,
+           config_json = ?,
+           updated_at = CURRENT_TIMESTAMP
+     WHERE client_id = ?`,
+  )
+    .bind(newJson, clientId)
+    .run();
+  await invalidateKv(env, clientId, client.proxy_domain);
+
+  const actor = actorOf(user, request);
+  await writeAudit(env, {
+    client_id: clientId,
+    actor_email: actor.user.email,
+    actor_ip: actor.ip,
+    event_type: "soft_delete",
+    before_hash: fnvHash(client.config_json),
+    after_hash: fnvHash(newJson),
+    previous_status: client.status,
+    new_status: "paused",
+    notes: "Soft-deleted — recoverable for 30 days.",
+  });
+
+  return {
+    redirect: flashRedirect("/app/clients", {
+      text: `Soft-deleted "${clientId}" — restore from the list view if needed.`,
+      kind: "ok",
+    }),
+  };
+}
+
+export async function handleRestorePost(
+  request: Request,
+  env: AppEnv,
+  url: URL,
+  user: User,
+  clientId: string,
+): Promise<Response> {
+  const csrf = checkCsrf(request, url);
+  if (csrf) return csrf;
+  const client = await loadVisibleClient(env, user, clientId);
+  if (!client) return new Response("Not found", { status: 404 });
+  if (!client.deleted_at) {
+    return flashRedirect(`/app/clients/${clientId}`, {
+      text: "Not soft-deleted — nothing to restore.",
+      kind: "warn",
+    });
+  }
+
+  let parsedCfg: Record<string, unknown>;
+  try {
+    parsedCfg = JSON.parse(client.config_json);
+  } catch (e) {
+    return flashRedirect(`/app/clients/${clientId}`, {
+      text: `Cannot restore: config_json is invalid: ${(e as Error).message}`,
+      kind: "err",
+    });
+  }
+  parsedCfg.status = "active";
+  const newJson = JSON.stringify(parsedCfg);
+
+  await env.CONFIG_DB.prepare(
+    `UPDATE clients
+       SET status = 'active',
+           deleted_at = NULL,
+           config_json = ?,
+           updated_at = CURRENT_TIMESTAMP
+     WHERE client_id = ?`,
+  )
+    .bind(newJson, clientId)
+    .run();
+  await invalidateKv(env, clientId, client.proxy_domain);
+
+  const actor = actorOf(user, request);
+  await writeAudit(env, {
+    client_id: clientId,
+    actor_email: actor.user.email,
+    actor_ip: actor.ip,
+    event_type: "restore",
+    before_hash: fnvHash(client.config_json),
+    after_hash: fnvHash(newJson),
+    previous_status: client.status,
+    new_status: "active",
+    notes: null,
+  });
+
+  return flashRedirect(`/app/clients/${clientId}`, {
+    text: `Restored "${clientId}".`,
+    kind: "ok",
   });
 }
 

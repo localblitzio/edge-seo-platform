@@ -46,10 +46,12 @@ import {
   handleNewCustomPagePost,
   handleNewStaticSiteGet,
   handleNewStaticSitePost,
+  handleRestorePost,
   handleSiteFileDeletePost,
   handleSiteFileEditGet,
   handleSiteFileEditPost,
   handleSiteFilesGet,
+  handleSoftDeletePost,
   handleStatusPost,
   literalPathFromMatch,
   loadVisibleClient,
@@ -67,6 +69,7 @@ import {
   renderPerPageEditor,
   renderSiteFileEditForm,
   renderSiteFilesPage,
+  renderSoftDeleteConfirm,
   summarizeEditedPages,
 } from "./app.js";
 import {
@@ -1047,7 +1050,8 @@ export default {
       // page filter dropdowns need both, so we orchestrate here
       // rather than have renderClientsList call into clusters.ts
       // (which would be a circular import).
-      const clients = await loadVisibleClients(env, user);
+      const showDeleted = url.searchParams.get("show_deleted") === "1";
+      const clients = await loadVisibleClients(env, user, { includeDeleted: showDeleted });
       const visibleClusters = await loadVisibleClusters(env, user);
       const clusterMembers = await loadAllClusterMembersByCluster(
         env,
@@ -1058,7 +1062,9 @@ export default {
           title: "Proxied sites — Edge SEO Platform",
           body: appLayout({
             title: "Proxied sites",
-            content: renderClientsList(clients, visibleClusters, clusterMembers, user),
+            content: renderClientsList(clients, visibleClusters, clusterMembers, user, {
+              showDeleted,
+            }),
             activeNav: "clients",
             user,
             flash,
@@ -1432,6 +1438,58 @@ export default {
       // Cache purge (POST only)
       if (sub === "cache-purge" && method === "POST") {
         return handleCachePurgePost(request, env, url, user, id);
+      }
+
+      // Soft-delete: GET shows the type-to-confirm page; POST executes.
+      if (sub === "delete" && method === "GET") {
+        const client = await loadVisibleClient(env, user, id);
+        if (!client) {
+          return new Response(null, { status: 303, headers: { location: "/app/clients" } });
+        }
+        return htmlResponse(
+          htmlPage({
+            title: `Delete ${client.client_id}? — Edge SEO Platform`,
+            body: appLayout({
+              title: "Delete site",
+              content: renderSoftDeleteConfirm({ client, errors: [] }),
+              activeNav: "clients",
+              user,
+              flash,
+              clients: await loadVisibleClients(env, user),
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+
+      if (sub === "delete" && method === "POST") {
+        const result = await handleSoftDeletePost(request, env, url, user, id);
+        if ("redirect" in result) return result.redirect;
+        const client = await loadVisibleClient(env, user, id);
+        if (!client) {
+          return new Response(null, { status: 303, headers: { location: "/app/clients" } });
+        }
+        return htmlResponse(
+          htmlPage({
+            title: `Delete ${client.client_id}? — Edge SEO Platform`,
+            body: appLayout({
+              title: "Delete site",
+              content: renderSoftDeleteConfirm({ client, errors: result.errors }),
+              activeNav: "clients",
+              user,
+              flash,
+              clients: await loadVisibleClients(env, user),
+            }),
+            user,
+            flash: null,
+          }),
+          { status: 400 },
+        );
+      }
+
+      if (sub === "restore" && method === "POST") {
+        return handleRestorePost(request, env, url, user, id);
       }
 
       // Per-site "Reindex now" — fan-out to every configured indexer
