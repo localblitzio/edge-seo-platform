@@ -1,56 +1,86 @@
 name = "edge-seo-frontend"
 main = "src/index.ts"
 compatibility_date = "2026-04-01"
-workers_dev = true
 
-# Apex zone route: edgeseo.app is the user-facing application domain
-# (landing, /login, /app, /admin). Customer proxy traffic flows through
-# *.localpage.us.com on a different worker. edgeseo.app is the only
-# place auth lives — emails come from noreply@edgeseo.app, reset/verify
-# links land on edgeseo.app.
-[[routes]]
+# `wrangler deploy` (no --env) is INTENTIONALLY misconfigured. Every
+# real deploy must specify `--env production` or `--env staging`.
+# The top-level bindings here are placeholders that point at the
+# production resources — they exist only so `wrangler dev` (which
+# doesn't take --env) has something to bind. Operator should never
+# run `wrangler deploy` without --env.
+
+# ---------------------------------------------------------------------------
+# Production (admin UI for live customer data on edgeseo.app)
+# ---------------------------------------------------------------------------
+[env.production]
+name = "edge-seo-frontend"
+workers_dev = false
+
+[[env.production.routes]]
 pattern = "edgeseo.app/*"
 zone_name = "edgeseo.app"
 
-# The frontend worker reads + writes the SAME D1 + KV bindings the main
-# edge worker uses. Auth state, client CRUD, attestations, audit log all
-# live in the same D1 (multi-user, multi-tenant via owner_id since
-# migration 0002).
-
-[[kv_namespaces]]
+[[env.production.kv_namespaces]]
 binding = "CONFIG_KV"
 id = "dc95f90063cd4493bb3ea462759f4002"
 
-[[d1_databases]]
+[[env.production.d1_databases]]
 binding = "CONFIG_DB"
 database_name = "edge-seo-platform-staging"
 database_id = "a6c1786a-4999-4ac5-ad60-7faafec61283"
 migrations_dir = "../migrations"
 
-# Custom-page HTML uploads. Same bucket the proxy worker reads from on
-# custom_page route hits — admin writes here, edge reads. Per-client
-# scoping uses the storage-key convention `<client_id>/<path…>` so
-# pages from different clients can't collide.
-[[r2_buckets]]
+[[env.production.r2_buckets]]
 binding = "CONTENT_R2"
 bucket_name = "edge-seo-content-staging"
 
-# EMAIL binding — Cloudflare Email Service (public beta, April 2026).
-# Requires Workers paid plan, Email Sending enabled on the account, and
-# the sender domain (edgeseo.app) onboarded into Email Sending so SPF +
-# DKIM + DMARC TXT records auto-populate on the zone.
-# `allowed_sender_addresses` locks the From: header at the binding layer
-# so a bug in our code can't send From: arbitrary addresses.
-[[send_email]]
+# Email Sending binding (production sender — noreply@edgeseo.app).
+# Locked to the apex sender; the staging env shares this same
+# binding intentionally (one Email Sending setup per Cloudflare
+# account is plenty, no point doubling the DKIM/DMARC config).
+[[env.production.send_email]]
+name = "EMAIL"
+allowed_sender_addresses = ["noreply@edgeseo.app"]
+
+# ---------------------------------------------------------------------------
+# Staging (admin UI on staging.edgeseo.app — empty DB sandbox)
+# ---------------------------------------------------------------------------
+# Same shape as production but bound to the fresh staging D1/KV/R2
+# provisioned on 2026-05-13. No customer data; operator iterates on
+# new features here before merging.
+[env.staging]
+name = "edge-seo-frontend-stage"
+workers_dev = true
+
+[[env.staging.routes]]
+pattern = "staging.edgeseo.app/*"
+zone_name = "edgeseo.app"
+
+[[env.staging.kv_namespaces]]
+binding = "CONFIG_KV"
+id = "e1ad7d59d73d4097956b4c8d46327dce"
+
+[[env.staging.d1_databases]]
+binding = "CONFIG_DB"
+database_name = "edge-seo-platform-stage"
+database_id = "a2757965-faf9-4713-8449-d1f379e872ba"
+migrations_dir = "../migrations"
+
+[[env.staging.r2_buckets]]
+binding = "CONTENT_R2"
+bucket_name = "edge-seo-content-stage"
+
+# Email Sending shares the production sender. Staging password-reset
+# emails arrive from noreply@edgeseo.app — easier than spinning up
+# a second Email Sending domain. Operator can tell staging vs prod
+# by the reset link host (staging.edgeseo.app vs edgeseo.app).
+[[env.staging.send_email]]
 name = "EMAIL"
 allowed_sender_addresses = ["noreply@edgeseo.app"]
 
 # Secrets set via wrangler:
-#   npx wrangler secret put SESSION_SECRET --config=frontend-worker/wrangler.toml
-#
-# SESSION_SECRET — 32 random bytes (hex) used as HMAC key for signed
-# session cookies. Rotate to invalidate all active sessions at once.
-
-# The worker is reachable at:
-#   https://edgeseo.app                          (apex route above)
-#   https://edge-seo-frontend.localblitzio.workers.dev  (workers.dev fallback)
+#   npx wrangler secret put SESSION_SECRET --env production --config=frontend-worker/wrangler.toml
+#   npx wrangler secret put SESSION_SECRET --env staging --config=frontend-worker/wrangler.toml
+# (staging needs its own SESSION_SECRET — sessions are signed with
+# this, so reusing the prod value would let staging cookies work
+# against prod which is a bad idea.)
