@@ -619,6 +619,9 @@ export function renderClusterDetail(
       <a class="btn btn-primary" href="/app/clusters/${row.id}/edit">Edit</a>
       <a class="btn" href="/app/clients/bulk-new?cluster_id=${row.id}" title="Open the bulk-create form with this cluster pre-selected — every site you create joins this cluster">+ Bulk-create sites for this cluster</a>
       <a class="btn" href="/app/embeds" title="Pick an embed from the library, then apply it to this cluster">Apply embed</a>
+      <form method="POST" action="/app/clusters/${row.id}/check-indexation" style="display:inline" onsubmit="return confirm('Check indexation of every URL on every site in this cluster?\\n\\nUses DataForSEO — ~$0.0006 per URL. The 24h cache is respected. Capped at 200 URLs per click.');">
+        <button type="submit" class="btn" title="Bulk-check every URL on every member site against Google site:URL via DataForSEO">Check indexation (cluster)</button>
+      </form>
       ${statusActions}
     </div>
     ${

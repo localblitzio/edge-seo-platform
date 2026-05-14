@@ -183,7 +183,18 @@
       "Bash(CLOUDFLARE_ACCOUNT_ID=cf2aaefcc5131a72802197c727a911b9 npx wrangler d1 migrations apply CONFIG_DB --env staging --remote)",
       "Bash(CLOUDFLARE_ACCOUNT_ID=cf2aaefcc5131a72802197c727a911b9 npx wrangler d1 execute edge-seo-platform-staging --remote --command=\"SELECT name FROM sqlite_master WHERE type='table' AND name='embeds'\")",
       "Bash(CLOUDFLARE_ACCOUNT_ID=cf2aaefcc5131a72802197c727a911b9 npx wrangler d1 execute edge-seo-platform-staging --remote --file=migrations/0010_embeds.sql)",
-      "Bash(CLOUDFLARE_ACCOUNT_ID=cf2aaefcc5131a72802197c727a911b9 npx wrangler d1 execute edge-seo-platform-staging --remote --file=migrations/0011_audit_event_types.sql)"
+      "Bash(CLOUDFLARE_ACCOUNT_ID=cf2aaefcc5131a72802197c727a911b9 npx wrangler d1 execute edge-seo-platform-staging --remote --file=migrations/0011_audit_event_types.sql)",
+      "Bash(CLOUDFLARE_ACCOUNT_ID=cf2aaefcc5131a72802197c727a911b9 npx wrangler d1 execute edge-seo-platform-staging --remote --command=\"SELECT name FROM sqlite_master WHERE type='table' AND name IN \\('embeds','embed_placements','audit_log'\\) ORDER BY name\" --json)",
+      "Bash(CLOUDFLARE_ACCOUNT_ID=cf2aaefcc5131a72802197c727a911b9 npx wrangler d1 execute edge-seo-platform-staging --remote --command=\"SELECT sql FROM sqlite_master WHERE type='table' AND name='audit_log'\" --json)",
+      "Bash(CLOUDFLARE_ACCOUNT_ID=cf2aaefcc5131a72802197c727a911b9 npx wrangler d1 execute edge-seo-platform-staging --remote --command=\"SELECT sql FROM sqlite_master WHERE type='table' AND name='audit_log'\")",
+      "Bash(CLOUDFLARE_ACCOUNT_ID=cf2aaefcc5131a72802197c727a911b9 npx wrangler d1 execute edge-seo-platform-staging --remote --command=\"SELECT name FROM sqlite_master WHERE type='table' AND name IN \\('embeds','embed_placements','audit_log'\\) ORDER BY name\")",
+      "Bash(curl -sI https://edgeseo.app/app/embeds)",
+      "Bash(gh pr *)",
+      "Bash(gh api *)",
+      "Bash(gh run *)",
+      "Bash(grep -c \"!\\\\\\\\.\" tests/unit/frontend-worker/embeds.test.ts)",
+      "Bash(git ls-remote *)",
+      "Bash(CLOUDFLARE_ACCOUNT_ID=cf2aaefcc5131a72802197c727a911b9 npx wrangler d1 execute edge-seo-platform-staging --remote --file=migrations/0012_indexation_checks.sql)"
     ]
   }
 }

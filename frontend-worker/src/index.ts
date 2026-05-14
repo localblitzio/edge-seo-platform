@@ -108,26 +108,44 @@ import {
 } from "./clusters.js";
 import { type EmailBinding, resetPasswordMessage, sendEmail } from "./email.js";
 import {
+  type PlacementFilters,
   handleClusterSubmitIndexersPost,
+  handleEmbedApplyConfirmPost,
   handleEmbedApplyPost,
   handleEmbedDeletePost,
   handleEmbedEditPost,
   handleEmbedNewPost,
   handleEmbedReapplyPost,
+  handlePlacementRemovePost,
   loadPlacementsForEmbed,
   loadVisibleEmbed,
   loadVisibleEmbeds,
+  loadVisiblePlacements,
   renderClusterSubmitIndexersFormBlock,
   renderClusterSubmitResult,
   renderEmbedApplyForm,
+  renderEmbedApplyPicker,
   renderEmbedApplyResult,
   renderEmbedDetail,
   renderEmbedForm,
   renderEmbedsList,
+  renderPlacementsList,
 } from "./embeds.js";
 import { FAVICON_DATA_URL } from "./favicon-data-url.js";
 import {
+  type IndexationFilters,
+  LAST_CHECK_AGE_FILTERS,
+  type LastCheckAgeFilter,
+  handleBulkRecheck,
+  handleClusterBulkCheck,
+  loadIndexationOverview,
+  renderBulkRecheckResult,
+  renderIndexationOverviewPage,
+} from "./indexation-overview.js";
+import {
+  handleIndexationCheck,
   handleIndexingSubmit,
+  handleMakeIndexable,
   handleProbeUrl,
   handleReindexAll,
   loadIndexingPageData,
@@ -1286,6 +1304,26 @@ export default {
         return handleProbeUrl(request, env, user, id);
       }
 
+      // Per-URL "Check indexed" — DataForSEO site:URL probe.
+      // Always force=true so the operator's click bypasses the 24h
+      // cache and gets fresh data. Result rendered as flash on the
+      // indexing page after redirect.
+      if (sub === "indexing/check" && method === "POST") {
+        const csrf = checkCsrf(request, url);
+        if (csrf) return csrf;
+        return handleIndexationCheck(request, env, user, id);
+      }
+
+      // Per-URL "Make indexable" — upsert path-anchored
+      // canonical=self + index,follow rules on this client's config.
+      // Idempotent: re-clicking replaces the same rule rather than
+      // stacking.
+      if (sub === "indexing/make-indexable" && method === "POST") {
+        const csrf = checkCsrf(request, url);
+        if (csrf) return csrf;
+        return handleMakeIndexable(request, env, user, id);
+      }
+
       // Per-site Bot activity dashboard: search engine + AI bot crawl counts.
       if (sub === "bots" && method === "GET") {
         const data = await loadBotActivityData(env, user, id);
@@ -1853,6 +1891,119 @@ export default {
       );
     }
 
+    /* ─── Indexation overview (platform-wide) ─── */
+
+    if (path === "/app/indexation" && method === "GET") {
+      if (!user) return redirectToLogin(url);
+      const clients = await loadVisibleClients(env, user);
+      const visibleClusters = await loadVisibleClusters(env, user);
+      const filters: IndexationFilters = {};
+      const statusRaw = url.searchParams.get("status");
+      if (
+        statusRaw === "indexed" ||
+        statusRaw === "not_indexed" ||
+        statusRaw === "unknown" ||
+        statusRaw === "unchecked"
+      ) {
+        filters.status = statusRaw;
+      }
+      const clusterIdRaw = url.searchParams.get("cluster_id");
+      if (clusterIdRaw) {
+        const n = Number.parseInt(clusterIdRaw, 10);
+        if (Number.isFinite(n) && n > 0) filters.cluster_id = n;
+      }
+      const search = url.searchParams.get("search");
+      if (search && search.trim().length > 0) filters.search = search;
+      const ageRaw = url.searchParams.get("last_check_age");
+      if (ageRaw && (LAST_CHECK_AGE_FILTERS as readonly string[]).includes(ageRaw)) {
+        filters.last_check_age = ageRaw as LastCheckAgeFilter;
+      }
+      const data = await loadIndexationOverview(env, user, filters, visibleClusters);
+      return htmlResponse(
+        htmlPage({
+          title: "Indexation — Edge SEO Platform",
+          body: appLayout({
+            title: "Indexation",
+            content: renderIndexationOverviewPage(data),
+            activeNav: "indexation",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+      );
+    }
+
+    if (path === "/app/indexation/recheck" && method === "POST") {
+      if (!user) return redirectToLogin(url);
+      const result = await handleBulkRecheck(request, env, url, user);
+      if (result.response) return result.response;
+      if (!result.result) return new Response("Internal error", { status: 500 });
+      const clients = await loadVisibleClients(env, user);
+      return htmlResponse(
+        htmlPage({
+          title: "Recheck result — Edge SEO Platform",
+          body: appLayout({
+            title: "Recheck result",
+            content: renderBulkRecheckResult(result.result),
+            activeNav: "indexation",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+      );
+    }
+
+    // Placements analytics — MUST come before the /app/embeds/:id catch-all.
+    if (path === "/app/embeds/placements" && method === "GET") {
+      if (!user) return redirectToLogin(url);
+      const clients = await loadVisibleClients(env, user);
+      const filters: PlacementFilters = {};
+      const embedIdRaw = url.searchParams.get("embed_id");
+      if (embedIdRaw) {
+        const n = Number.parseInt(embedIdRaw, 10);
+        if (Number.isFinite(n) && n > 0) filters.embed_id = n;
+      }
+      const clusterIdRaw = url.searchParams.get("cluster_id");
+      if (clusterIdRaw) {
+        const n = Number.parseInt(clusterIdRaw, 10);
+        if (Number.isFinite(n) && n > 0) filters.cluster_id = n;
+      }
+      const search = url.searchParams.get("client_search");
+      if (search && search.trim().length > 0) filters.client_search = search;
+      const [rows, embeds, allClusters] = await Promise.all([
+        loadVisiblePlacements(env, user, filters),
+        loadVisibleEmbeds(env, user),
+        loadVisibleClusters(env, user),
+      ]);
+      return htmlResponse(
+        htmlPage({
+          title: "Embed placements — Edge SEO Platform",
+          body: appLayout({
+            title: "Embed placements",
+            content: renderPlacementsList({
+              rows,
+              embeds,
+              clusters: allClusters,
+              filters,
+              user,
+            }),
+            activeNav: "embeds",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+      );
+    }
+
     if (path.startsWith("/app/embeds/")) {
       if (!user) return redirectToLogin(url);
       const rest = path.slice("/app/embeds/".length);
@@ -1981,7 +2132,32 @@ export default {
       }
 
       if (sub === "apply" && method === "POST") {
+        // Step-1 POST: renders the per-site picker (step 2).
         const result = await handleEmbedApplyPost(request, env, url, user, embedId);
+        if ("response" in result) return result.response;
+        return htmlResponse(
+          htmlPage({
+            title: `Pick sites — ${embed.name} — Edge SEO Platform`,
+            body: appLayout({
+              title: `Pick sites — ${embed.name}`,
+              content: renderEmbedApplyPicker({
+                ...result.picker,
+                errors: [],
+              }),
+              activeNav: "embeds",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+
+      if (sub === "apply/confirm" && method === "POST") {
+        // Step-2 POST: actually apply to operator-selected client_ids.
+        const result = await handleEmbedApplyConfirmPost(request, env, url, user, embedId);
         if ("response" in result) return result.response;
         return htmlResponse(
           htmlPage({
@@ -1998,6 +2174,12 @@ export default {
             flash: null,
           }),
         );
+      }
+
+      if (sub.startsWith("remove/") && method === "POST") {
+        const clientId = decodeURIComponent(sub.slice("remove/".length));
+        if (!clientId) return new Response("Missing client_id", { status: 400 });
+        return handlePlacementRemovePost(request, env, url, user, embedId, clientId);
       }
 
       if (sub === "reapply" && method === "POST") {
@@ -2155,6 +2337,30 @@ export default {
                 data.visibleClients,
                 submitBlock,
               ),
+              activeNav: "clusters",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+
+      if (sub === "check-indexation" && method === "POST") {
+        const result = await handleClusterBulkCheck(request, env, url, user, data.cluster.id);
+        if (result.response) return result.response;
+        if (!result.result) return new Response("Internal error", { status: 500 });
+        return htmlResponse(
+          htmlPage({
+            title: `Indexation check — ${data.cluster.label} — Edge SEO Platform`,
+            body: appLayout({
+              title: `Indexation check — ${data.cluster.label}`,
+              content: renderBulkRecheckResult({
+                scope: `cluster: ${data.cluster.label}`,
+                results: result.result.results,
+              }),
               activeNav: "clusters",
               user,
               flash,

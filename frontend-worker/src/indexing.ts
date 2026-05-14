@@ -22,10 +22,25 @@ import { collectSitemapUrls } from "../../src/sitemap/generator.js";
 import { probeUrl } from "../../src/sitemap/probe.js";
 
 import type { AppEnv, ClientRow, FlashMessage } from "./app.js";
-import { canSeeAllClients, esc } from "./app.js";
+import { canSeeAllClients, esc, fnvHash, writeAudit } from "./app.js";
 import type { User } from "./auth.js";
 
 import { ClientConfig } from "../../src/config/schema.js";
+import {
+  type IndexationCheckRow,
+  checkUrlIndexation,
+  loadLatestChecksForClient,
+} from "./indexation-check.js";
+
+/**
+ * Anchor-regex for a literal path. Used as the `match` field of
+ * config rules so the rule matches THIS path exactly, not as a
+ * substring or prefix. Special regex metacharacters are escaped.
+ */
+function pathToAnchorRegex(path: string): string {
+  const escaped = path.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+  return `^${escaped}$`;
+}
 
 /* ─── Types ─── */
 
@@ -109,24 +124,41 @@ function renderVerdict(diag: PathDiagnostic): string {
   return `<span class="verdict verdict-err" title="${esc(reason.detail)}"><strong>✗</strong> ${esc(reasonLabel)}</span>`;
 }
 
-function renderRow(diag: PathDiagnostic): string {
+function renderIndexationCell(check: IndexationCheckRow | undefined): string {
+  if (!check) {
+    return `<span class="indexation-pill indexation-unchecked" title="No check run yet — click 'Check indexed' to query DataForSEO">unchecked</span>`;
+  }
+  if (check.indexed === 1) {
+    return `<span class="indexation-pill indexation-yes" title="Last check ${esc(check.checked_at)} — Google site:URL returned an organic match">indexed</span> <span class="muted small" style="font-size:.7rem">${esc(check.checked_at)}</span>`;
+  }
+  if (check.indexed === 0) {
+    return `<span class="indexation-pill indexation-no" title="Last check ${esc(check.checked_at)} — Google site:URL returned 0 organic results">not indexed</span> <span class="muted small" style="font-size:.7rem">${esc(check.checked_at)}</span>`;
+  }
+  return `<span class="indexation-pill indexation-unknown" title="Last check ${esc(check.checked_at)} — DataForSEO error or unparseable response">unknown</span> <span class="muted small" style="font-size:.7rem">${esc(check.checked_at)}</span>`;
+}
+
+function renderRow(diag: PathDiagnostic, check: IndexationCheckRow | undefined): string {
   const sources = diag.sources.map((s) => SOURCE_LABELS[s] ?? s).join(", ");
   const canonicalCell =
     diag.canonical === "custom" && diag.canonicalCustomUrl
       ? `custom → <code class="mono small">${esc(diag.canonicalCustomUrl)}</code>`
       : esc(diag.canonical);
   const robotsCell = diag.robots ? `<code class="mono small">${esc(diag.robots)}</code>` : "—";
-  // All rows have enabled checkboxes — eligible rows are checked by
-  // default, blocked rows unchecked. Operators can override the
-  // verdict by ticking a blocked row (e.g. to submit anyway because
-  // the engines will index regardless, or to test the indexer end
-  // to end).
   const isInclude = diag.verdict.kind === "include";
   const checkbox = `<input type="checkbox" name="path" value="${esc(diag.path)}" data-eligible="${isInclude ? "1" : "0"}"${isInclude ? " checked" : ""} aria-label="Include ${esc(diag.path)} in submission">`;
   const rowClass = isInclude ? "" : ' class="row-blocked"';
-  // Probe button — JS handler fetches the URL through the proxy and
-  // injects a sub-row with HTTP status + title + meta + canonical.
   const probeBtn = `<button type="button" class="probe-btn" data-path="${esc(diag.path)}" title="Fetch this URL through the proxy and show live SEO diagnostics">Probe</button>`;
+  // `name="target_path"` (not `path`) so the click doesn't collide
+  // with the row checkboxes' `name="path"` when the parent form
+  // posts. `formaction="indexing/check"` resolves relative to the
+  // form's action (`.../indexing`) → `.../indexing/check`.
+  const indexedBtn = `<button type="submit" name="target_path" value="${esc(diag.path)}" class="probe-btn" formaction="indexing/check" formmethod="POST" title="Query DataForSEO site:URL — checks if Google has this URL indexed">Check indexed</button>`;
+  // "Make indexable" — only shown when the row's current verdict is
+  // exclude (already-indexable rows don't need it). Upserts a path-
+  // anchored canonical=self + index,follow rule for THIS path.
+  const makeIndexableBtn = !isInclude
+    ? `<button type="submit" name="target_path" value="${esc(diag.path)}" class="probe-btn" formaction="indexing/make-indexable" formmethod="POST" title="Add a path-anchored canonical=self + indexation=index,follow rule for this URL so it can be indexed">Make indexable</button>`
+    : "";
   return `<tr${rowClass} data-path-row="${esc(diag.path)}">
     <td>${checkbox}</td>
     <td><a href="${esc(diag.url)}" target="_blank" rel="noopener noreferrer" class="mono small">${esc(diag.path)}</a></td>
@@ -134,7 +166,8 @@ function renderRow(diag: PathDiagnostic): string {
     <td class="small">${canonicalCell}</td>
     <td class="small">${robotsCell}</td>
     <td>${renderVerdict(diag)}</td>
-    <td>${probeBtn}</td>
+    <td class="small">${renderIndexationCell(check)}</td>
+    <td>${probeBtn} ${indexedBtn} ${makeIndexableBtn}</td>
   </tr>`;
 }
 
@@ -173,6 +206,11 @@ const INDEXING_CSS = `
 .probe-result .status-err{color:var(--red)}
 .probe-result .status-warn{color:var(--amber)}
 .probe-result .empty-val{color:var(--fg-muted);font-style:italic}
+.indexation-pill{display:inline-block;padding:.15rem .5rem;border-radius:9999px;font-size:.75rem;font-weight:500;line-height:1.2}
+.indexation-yes{background:var(--green-bg);color:var(--green)}
+.indexation-no{background:var(--red-bg);color:var(--red)}
+.indexation-unknown{background:var(--amber-bg);color:var(--amber)}
+.indexation-unchecked{background:var(--bg-elevated);color:var(--fg-muted);border:1px dashed var(--border)}
 `;
 
 /* ─── Render ─── */
@@ -182,14 +220,22 @@ export function renderIndexingPage(opts: {
   config: ClientConfig;
   diagnostics: PathDiagnostic[];
   configuredIndexers: ConfiguredIndexer[];
+  /**
+   * Latest known indexation-check result per URL (keyed on absolute
+   * URL, not path). When a row has no entry, the cell renders
+   * "unchecked." Pass an empty Map when the caller doesn't load them.
+   */
+  latestChecks?: Map<string, IndexationCheckRow>;
 }): string {
-  const { client, diagnostics, configuredIndexers } = opts;
+  const { client, diagnostics, configuredIndexers, latestChecks } = opts;
   const includeCount = diagnostics.filter((d) => d.verdict.kind === "include").length;
   const excludeCount = diagnostics.length - includeCount;
 
   const tableRows = diagnostics.length
-    ? diagnostics.map(renderRow).join("")
-    : `<tr><td colspan="7" class="muted small" style="text-align:center;padding:1.25rem">No paths pinned. Add per-page rules or <code>seed_paths</code> entries in this site's config to start indexing.</td></tr>`;
+    ? diagnostics
+        .map((d) => renderRow(d, latestChecks ? latestChecks.get(d.url) : undefined))
+        .join("")
+    : `<tr><td colspan="8" class="muted small" style="text-align:center;padding:1.25rem">No paths pinned. Add per-page rules or <code>seed_paths</code> entries in this site's config to start indexing.</td></tr>`;
 
   const indexerButtons = configuredIndexers.length
     ? configuredIndexers
@@ -241,7 +287,8 @@ export function renderIndexingPage(opts: {
       <th>Canonical</th>
       <th>Robots</th>
       <th>Verdict</th>
-      <th style="width:5.5rem">Probe</th>
+      <th>Indexed?</th>
+      <th style="width:11rem">Actions</th>
     </tr>
   </thead>
   <tbody>${tableRows}</tbody>
@@ -548,16 +595,172 @@ export async function loadIndexingPageData(
   config: ClientConfig;
   diagnostics: PathDiagnostic[];
   configuredIndexers: ConfiguredIndexer[];
+  latestChecks: Map<string, IndexationCheckRow>;
 } | null> {
   const loaded = await loadClientForIndexing(env, user, clientId);
   if (!loaded) return null;
   const diagnostics = computePathDiagnostics(loaded.config);
-  const configuredIndexers = await loadConfiguredIndexers(env);
-  return { client: loaded.row, config: loaded.config, diagnostics, configuredIndexers };
+  const [configuredIndexers, latestChecks] = await Promise.all([
+    loadConfiguredIndexers(env),
+    loadLatestChecksForClient(
+      env,
+      clientId,
+      diagnostics.map((d) => d.url),
+    ),
+  ]);
+  return {
+    client: loaded.row,
+    config: loaded.config,
+    diagnostics,
+    configuredIndexers,
+    latestChecks,
+  };
+}
+
+/**
+ * Handle a single per-URL "Check indexed" POST. Looks up the
+ * client, validates the path is one we expose in diagnostics, runs
+ * `checkUrlIndexation`, and flash-redirects back to the indexing
+ * page with the result message. Bypasses the 24h cache when the
+ * operator clicks (force=true) so the button is always meaningful.
+ */
+export async function handleIndexationCheck(
+  request: Request,
+  env: AppEnv,
+  user: User,
+  clientId: string,
+): Promise<Response> {
+  const form = await request.formData();
+  // `target_path` (not `path`) — the per-row button uses this name
+  // to avoid colliding with the parent form's `path` checkboxes
+  // (the parent form is the submit-to-indexers form and posts every
+  // row's checkbox when ANY submit button fires).
+  const path = String(form.get("target_path") ?? "");
+  if (!path) {
+    return flashRedirect(`/app/clients/${encodeURIComponent(clientId)}/indexing`, {
+      text: "Missing target_path.",
+      kind: "err",
+    });
+  }
+  const loaded = await loadClientForIndexing(env, user, clientId);
+  if (!loaded) return new Response("Not found", { status: 404 });
+  const diagnostics = computePathDiagnostics(loaded.config);
+  const diag = diagnostics.find((d) => d.path === path);
+  if (!diag) {
+    return flashRedirect(`/app/clients/${encodeURIComponent(clientId)}/indexing`, {
+      text: "Path not in diagnostics — re-check from this site's indexing page.",
+      kind: "err",
+    });
+  }
+  const result = await checkUrlIndexation(env, clientId, diag.url, user.email, true);
+  return flashRedirect(`/app/clients/${encodeURIComponent(clientId)}/indexing`, {
+    text: `${diag.path}: ${result.message}`,
+    kind: result.status === "indexed" ? "ok" : result.status === "not_indexed" ? "warn" : "err",
+  });
 }
 
 function flashRedirect(location: string, flash: FlashMessage): Response {
   const sep = location.includes("?") ? "&" : "?";
   const target = `${location}${sep}flash=${encodeURIComponent(flash.text)}&flash_kind=${flash.kind}`;
   return new Response(null, { status: 303, headers: { location: target } });
+}
+
+/**
+ * "Make indexable" quick-action — upserts a path-anchored
+ * canonical=self + indexation=index,follow rule pair for `path`.
+ * Idempotent: if a rule with the same anchored `match` already
+ * exists, replace it (no duplicates).
+ *
+ * Why path-anchored not wildcard:
+ *   The wildcard `^/.*` would flip EVERY path on the site
+ *   indexable, including ones the operator intentionally excluded.
+ *   Path-anchored only affects this one URL. Operators can still
+ *   layer a wildcard via the embed apply flow or per-page editor.
+ */
+export async function handleMakeIndexable(
+  request: Request,
+  env: AppEnv,
+  user: User,
+  clientId: string,
+): Promise<Response> {
+  const form = await request.formData();
+  const path = String(form.get("target_path") ?? "");
+  if (!path || !path.startsWith("/")) {
+    return flashRedirect(`/app/clients/${encodeURIComponent(clientId)}/indexing`, {
+      text: "Missing or invalid target_path.",
+      kind: "err",
+    });
+  }
+  const loaded = await loadClientForIndexing(env, user, clientId);
+  if (!loaded) return new Response("Not found", { status: 404 });
+  const { row } = loaded;
+  const match = pathToAnchorRegex(path);
+
+  // Build the mutated config. Casting to a plain dict is safe — we
+  // only touch the two arrays we own (canonicals, indexation) and
+  // re-stringify. The original was Zod-validated at admin-write
+  // time, and the resulting object is structurally equivalent.
+  const configObj = JSON.parse(row.config_json) as Record<string, unknown>;
+  const canonicals = Array.isArray(configObj.canonicals)
+    ? (configObj.canonicals as Array<Record<string, unknown>>)
+    : [];
+  const cIdx = canonicals.findIndex((r) => r.match === match);
+  const selfCanonical = {
+    match,
+    strategy: { type: "self" },
+    sync_og_url: true,
+    sync_twitter_url: true,
+    sync_jsonld_url: true,
+  };
+  if (cIdx >= 0) canonicals[cIdx] = selfCanonical;
+  else canonicals.push(selfCanonical);
+  configObj.canonicals = canonicals;
+
+  const indexation = Array.isArray(configObj.indexation)
+    ? (configObj.indexation as Array<Record<string, unknown>>)
+    : [];
+  const iIdx = indexation.findIndex((r) => r.match === match);
+  const indexableRule = { match, robots: "index,follow", additional_directives: [] };
+  if (iIdx >= 0) indexation[iIdx] = indexableRule;
+  else indexation.push(indexableRule);
+  configObj.indexation = indexation;
+
+  const beforeHash = fnvHash(row.config_json);
+  const newJson = JSON.stringify(configObj);
+  const afterHash = fnvHash(newJson);
+
+  try {
+    await env.CONFIG_DB.prepare(
+      "UPDATE clients SET config_json = ?, updated_at = CURRENT_TIMESTAMP WHERE client_id = ?",
+    )
+      .bind(newJson, clientId)
+      .run();
+    await env.CONFIG_KV.put(`config:${clientId}`, newJson);
+  } catch (e) {
+    return flashRedirect(`/app/clients/${encodeURIComponent(clientId)}/indexing`, {
+      text: `Update failed: ${e instanceof Error ? e.message : String(e)}`,
+      kind: "err",
+    });
+  }
+
+  try {
+    await writeAudit(env, {
+      client_id: clientId,
+      actor_email: user.email,
+      actor_ip: request.headers.get("cf-connecting-ip") ?? "0.0.0.0",
+      event_type: "config_update",
+      before_hash: beforeHash,
+      after_hash: afterHash,
+      previous_status: null,
+      new_status: null,
+      notes: `make_indexable path=${path} (canonical=self + index,follow upserted for ${match})`,
+    });
+  } catch (e) {
+    console.warn("indexing: audit write failed", e);
+  }
+
+  return flashRedirect(`/app/clients/${encodeURIComponent(clientId)}/indexing`, {
+    text: `${path} is now indexable — canonical=self + index,follow upserted.`,
+    kind: "ok",
+  });
 }

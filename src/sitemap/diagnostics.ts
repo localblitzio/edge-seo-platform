@@ -164,6 +164,14 @@ function collectAllCandidates(
   for (const r of config.element_removals) eat(r.match, "element_removals");
   for (const p of config.seed_paths) eat(p, "seed_paths", true);
 
+  // Implicit homepage: every site gets `/` as a candidate, sourced
+  // as a seed_path. Falls through the same eligibility checks
+  // (noindex / redirect_source / explicit canonical) as any other
+  // seed — operator can still exclude the homepage by adding the
+  // right rule, but the indexing page will show it (so the row
+  // exists to Probe / Check indexed / Make indexable).
+  if (!map.has("/")) eat("/", "seed_paths", true);
+
   // Stable source priority for UI display: seed_paths first, then
   // routing, then the rest in declaration order.
   const priority: PathSource[] = [

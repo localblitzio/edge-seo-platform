@@ -216,9 +216,18 @@ export function collectSitemapUrls(config: ClientConfig): string[] {
   // active blockers.
   const seedEligible = config.seed_paths.filter((p) => isPathSeedEligible(p, config));
 
+  // Implicit homepage seed. Every site gets `/` in its sitemap by
+  // default — same seed-path semantics as if the operator had
+  // listed it. Excluded only by an explicit noindex / redirect /
+  // canonical-not-self rule on `/`. Skip when operator already
+  // listed it in seed_paths (the eligible filter dedupes too, but
+  // this keeps intent explicit).
+  const homepageImplicit =
+    !config.seed_paths.includes("/") && isPathSeedEligible("/", config) ? ["/"] : [];
+
   // Merge + dedupe so seed_paths that overlap with literal-rule paths
   // don't get double-listed.
-  const merged = Array.from(new Set([...eligible, ...seedEligible]));
+  const merged = Array.from(new Set([...eligible, ...seedEligible, ...homepageImplicit]));
   // Sort lexicographically so the output is deterministic (test-friendly
   // and easier on operators reading the XML).
   merged.sort();

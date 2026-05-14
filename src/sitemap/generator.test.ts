@@ -121,13 +121,17 @@ describe("isPathSitemapEligible", () => {
 });
 
 describe("collectSitemapUrls", () => {
-  it("returns an empty list when no rules pin a literal path", () => {
+  it("returns just the implicit homepage when no rules pin a literal path", () => {
+    // Behavior changed: every site gets `/` in /sitemap.xml by
+    // default (treated as an implicit seed). Pre-change this
+    // returned []. The implicit homepage is still subject to the
+    // same eligibility filters (noindex, redirect, explicit
+    // canonical=origin), so operators can still exclude it.
     const config = configWith(() => {});
-    // Lantern Crest fixture only has wildcard `^/.*` rules.
-    expect(collectSitemapUrls(config)).toEqual([]);
+    expect(collectSitemapUrls(config)).toEqual(["https://lanterncrest.com/"]);
   });
 
-  it("collects literal paths across routing + per-page-rule sections", () => {
+  it("collects literal paths across routing + per-page-rule sections (plus implicit homepage)", () => {
     const config = configWith((cfg) => {
       (cfg.routing as Array<Record<string, unknown>>) = [
         { match: "^/about$", type: "custom_page", custom_page_key: "" },
@@ -146,13 +150,14 @@ describe("collectSitemapUrls", () => {
       ];
     });
     expect(collectSitemapUrls(config)).toEqual([
+      "https://lanterncrest.com/",
       "https://lanterncrest.com/about",
       "https://lanterncrest.com/contact",
       "https://lanterncrest.com/services",
     ]);
   });
 
-  it("dedupes the same path appearing in multiple sections", () => {
+  it("dedupes the same path appearing in multiple sections (plus implicit homepage)", () => {
     const config = configWith((cfg) => {
       (cfg.routing as Array<Record<string, unknown>>) = [
         { match: "^/about$", type: "custom_page", custom_page_key: "" },
@@ -165,10 +170,13 @@ describe("collectSitemapUrls", () => {
       ];
       (cfg.canonicals as Array<Record<string, unknown>>) = [];
     });
-    expect(collectSitemapUrls(config)).toEqual(["https://lanterncrest.com/about"]);
+    expect(collectSitemapUrls(config)).toEqual([
+      "https://lanterncrest.com/",
+      "https://lanterncrest.com/about",
+    ]);
   });
 
-  it("returns paths sorted lexicographically", () => {
+  it("returns paths sorted lexicographically (with implicit homepage first)", () => {
     const config = configWith((cfg) => {
       (cfg.routing as Array<Record<string, unknown>>) = [
         { match: "^/zebra$", type: "custom_page", custom_page_key: "" },
@@ -178,6 +186,7 @@ describe("collectSitemapUrls", () => {
       (cfg.canonicals as Array<Record<string, unknown>>) = [];
     });
     expect(collectSitemapUrls(config)).toEqual([
+      "https://lanterncrest.com/",
       "https://lanterncrest.com/apple",
       "https://lanterncrest.com/mango",
       "https://lanterncrest.com/zebra",
@@ -205,10 +214,11 @@ describe("collectSitemapUrls", () => {
   it("includes operator seed_paths even when no canonical rule matches (bypasses default-origin filter)", () => {
     const config = configWith((cfg) => {
       // Wildcard-only routing — default canonical for proxy routes is `origin`.
-      // Without seed_paths, sitemap would be empty.
+      // Without seed_paths, sitemap is just the implicit homepage.
       cfg.seed_paths = ["/about", "/services/seo", "/contact"];
     });
     expect(collectSitemapUrls(config)).toEqual([
+      "https://lanterncrest.com/",
       "https://lanterncrest.com/about",
       "https://lanterncrest.com/contact",
       "https://lanterncrest.com/services/seo",
@@ -223,6 +233,7 @@ describe("collectSitemapUrls", () => {
       cfg.seed_paths = ["/about", "/extra"];
     });
     expect(collectSitemapUrls(config)).toEqual([
+      "https://lanterncrest.com/",
       "https://lanterncrest.com/about",
       "https://lanterncrest.com/extra",
     ]);
@@ -235,7 +246,10 @@ describe("collectSitemapUrls", () => {
         { match: "^/private$", robots: "noindex,follow", additional_directives: [] },
       ];
     });
-    expect(collectSitemapUrls(config)).toEqual(["https://lanterncrest.com/keep"]);
+    expect(collectSitemapUrls(config)).toEqual([
+      "https://lanterncrest.com/",
+      "https://lanterncrest.com/keep",
+    ]);
   });
 
   it("respects redirect-source on seed_paths (the path redirects away)", () => {
@@ -245,7 +259,33 @@ describe("collectSitemapUrls", () => {
         { from: "/old", to: "/new", status: "301" },
       ];
     });
-    expect(collectSitemapUrls(config)).toEqual(["https://lanterncrest.com/new"]);
+    expect(collectSitemapUrls(config)).toEqual([
+      "https://lanterncrest.com/",
+      "https://lanterncrest.com/new",
+    ]);
+  });
+
+  it("excludes the implicit homepage when an explicit indexation noindex rule matches `/`", () => {
+    // The implicit homepage seed flows through the same eligibility
+    // filters as any other seed — operator can still opt out by
+    // adding a noindex rule for `/`.
+    const config = configWith((cfg) => {
+      (cfg.indexation as Array<Record<string, unknown>>) = [
+        { match: "^/$", robots: "noindex,follow", additional_directives: [] },
+      ];
+    });
+    expect(collectSitemapUrls(config)).toEqual([]);
+  });
+
+  it("excludes the implicit homepage when an explicit canonical=origin rule matches `/`", () => {
+    // An explicit canonical-origin rule wins over the implicit-seed
+    // bypass (matches the rule for operator-listed seed_paths).
+    const config = configWith((cfg) => {
+      (cfg.canonicals as Array<Record<string, unknown>>) = [
+        { match: "^/$", strategy: { type: "origin" } },
+      ];
+    });
+    expect(collectSitemapUrls(config)).toEqual([]);
   });
 });
 
@@ -266,8 +306,15 @@ describe("generateSitemapXml", () => {
     expect(xml).toContain("</urlset>");
   });
 
-  it("emits an empty urlset when no eligible paths exist", () => {
-    const config = configWith(() => {});
+  it("emits an empty urlset when no eligible paths exist (implicit homepage excluded by noindex)", () => {
+    // With the implicit-homepage change, the only way to get an
+    // empty urlset is to explicitly noindex `/` (or canonical=origin
+    // it). Default Lantern Crest fixture now serves `/` by default.
+    const config = configWith((cfg) => {
+      (cfg.indexation as Array<Record<string, unknown>>) = [
+        { match: "^/$", robots: "noindex,follow", additional_directives: [] },
+      ];
+    });
     const xml = generateSitemapXml(config);
     expect(xml).toContain("<urlset");
     expect(xml).toContain("</urlset>");
