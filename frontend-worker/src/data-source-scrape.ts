@@ -360,7 +360,10 @@ export function renderScrapeForm(opts: {
       <div class="form-section">
         <label for="sc_locations">locations (one per line)</label>
         <textarea id="sc_locations" name="locations" rows="8" required placeholder="San Diego,California,United States&#10;La Jolla,California,United States&#10;Chula Vista,California,United States" style="font-family:var(--mono);font-size:.85rem;width:100%">${esc(opts.prefill.locations)}</textarea>
-        <div class="field-hint">DataForSEO geocodes each line. ${taskCount > 0 ? `<strong>${taskCount}</strong> task${taskCount === 1 ? "" : "s"} will run` : 'Format: "City,Region,Country"'}. Max ${MAX_LOCATIONS_PER_SCRAPE}.</div>
+        <div class="field-hint">
+          <strong>Format:</strong> <code>City,Region,Country</code> — DataForSEO only resolves <em>full</em> region + country names (e.g. <code>California</code>, not <code>CA</code>; <code>United States</code>, not <code>US</code>). Unresolved locations return 0 rows with a per-task error.<br>
+          ${taskCount > 0 ? `<strong>${taskCount}</strong> task${taskCount === 1 ? "" : "s"} will run.` : ""} Max ${MAX_LOCATIONS_PER_SCRAPE}.
+        </div>
       </div>
       <div class="form-section">
         <label for="sc_depth">businesses per location (1–${BUSINESS_LISTING_MAX_DEPTH})</label>

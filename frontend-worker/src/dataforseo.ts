@@ -437,6 +437,35 @@ export async function fetchBusinessListings(
     const msg = typeof json.status_message === "string" ? json.status_message : "DataForSEO error";
     throw new DataForSeoApiError(`DataForSEO ${json.status_code}: ${msg}`, json.status_code);
   }
+  // DataForSEO returns top-level 20000 (success) even when an individual
+  // task fails to resolve (e.g. unknown `location_name`). Surface that
+  // per-task status so the caller can show a useful per-location error
+  // instead of silently returning 0 rows.
+  const taskErr = firstTaskError(json);
+  if (taskErr) throw new DataForSeoApiError(taskErr.message, taskErr.code);
+
   const parsed = parseMapsResponse(json, { keyword: q.keyword, location: q.location_name });
   return parsed.slice(0, q.depth);
+}
+
+/**
+ * Walk the task list and return the first task whose `status_code` is in
+ * the error range (>= 40000) — DataForSEO uses these for things like
+ * "location_name not resolved" (40501) and quota errors.
+ */
+function firstTaskError(
+  json: Record<string, unknown> | null,
+): { code: number; message: string } | null {
+  if (!json) return null;
+  const tasks = Array.isArray(json.tasks) ? json.tasks : [];
+  for (const t of tasks) {
+    if (typeof t !== "object" || t === null) continue;
+    const obj = t as Record<string, unknown>;
+    const code = typeof obj.status_code === "number" ? obj.status_code : 0;
+    if (code >= 40000) {
+      const msg = typeof obj.status_message === "string" ? obj.status_message : "task failed";
+      return { code, message: `task ${code}: ${msg}` };
+    }
+  }
+  return null;
 }

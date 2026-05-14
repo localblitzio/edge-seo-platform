@@ -146,6 +146,22 @@ describe("parseMapsResponse", () => {
     };
     expect(parseMapsResponse(payload, ctx)).toEqual([]);
   });
+
+  it("returns empty when result is null (DataForSEO returns this for unresolved locations)", () => {
+    // Top-level OK, but the task itself failed: status_code >= 40000.
+    // parseMapsResponse just sees no items and returns []. The caller
+    // (fetchBusinessListings) is responsible for surfacing the task error.
+    const payload = {
+      tasks: [
+        {
+          status_code: 40501,
+          status_message: "location_name not found in DataForSEO Google database",
+          result: null,
+        },
+      ],
+    };
+    expect(parseMapsResponse(payload, ctx)).toEqual([]);
+  });
 });
 
 describe("validateScrapeForm", () => {
