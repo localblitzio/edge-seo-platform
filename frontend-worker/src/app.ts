@@ -372,6 +372,8 @@ const NAV_ICONS: Record<string, string> = {
   clusters: `<svg ${NAV_SVG_ATTRS}><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>`,
   // package (Embeds — reusable HTML blocks)
   embeds: `<svg ${NAV_SVG_ATTRS}><path d="M16.5 9.4L7.5 4.21"/><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>`,
+  // bar-chart (Indexation — overview / stats)
+  indexation: `<svg ${NAV_SVG_ATTRS}><line x1="12" y1="20" x2="12" y2="10"/><line x1="18" y1="20" x2="18" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>`,
   // key (Settings → API keys)
   "settings:api-keys": `<svg ${NAV_SVG_ATTRS}><circle cx="7.5" cy="15.5" r="3.5"/><line x1="10" y1="13" x2="20" y2="3"/><line x1="16" y1="7" x2="19" y2="4"/><line x1="14" y1="9" x2="17" y2="6"/></svg>`,
   // shield-user (Super-admin Users)
@@ -422,6 +424,12 @@ export function appSidebar(opts: { activeNav: string; clients: ClientRow[]; user
       id: "embeds",
       label: "Embeds",
       icon: NAV_ICONS.embeds ?? "",
+    },
+    {
+      href: "/app/indexation",
+      id: "indexation",
+      label: "Indexation",
+      icon: NAV_ICONS.indexation ?? "",
     },
     { href: "/app/audit", id: "audit", label: "Audit log", icon: NAV_ICONS.audit ?? "" },
   ];

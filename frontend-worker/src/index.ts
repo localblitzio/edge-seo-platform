@@ -133,6 +133,16 @@ import {
 } from "./embeds.js";
 import { FAVICON_DATA_URL } from "./favicon-data-url.js";
 import {
+  type IndexationFilters,
+  LAST_CHECK_AGE_FILTERS,
+  type LastCheckAgeFilter,
+  handleBulkRecheck,
+  handleClusterBulkCheck,
+  loadIndexationOverview,
+  renderBulkRecheckResult,
+  renderIndexationOverviewPage,
+} from "./indexation-overview.js";
+import {
   handleIndexationCheck,
   handleIndexingSubmit,
   handleMakeIndexable,
@@ -1881,6 +1891,74 @@ export default {
       );
     }
 
+    /* ─── Indexation overview (platform-wide) ─── */
+
+    if (path === "/app/indexation" && method === "GET") {
+      if (!user) return redirectToLogin(url);
+      const clients = await loadVisibleClients(env, user);
+      const visibleClusters = await loadVisibleClusters(env, user);
+      const filters: IndexationFilters = {};
+      const statusRaw = url.searchParams.get("status");
+      if (
+        statusRaw === "indexed" ||
+        statusRaw === "not_indexed" ||
+        statusRaw === "unknown" ||
+        statusRaw === "unchecked"
+      ) {
+        filters.status = statusRaw;
+      }
+      const clusterIdRaw = url.searchParams.get("cluster_id");
+      if (clusterIdRaw) {
+        const n = Number.parseInt(clusterIdRaw, 10);
+        if (Number.isFinite(n) && n > 0) filters.cluster_id = n;
+      }
+      const search = url.searchParams.get("search");
+      if (search && search.trim().length > 0) filters.search = search;
+      const ageRaw = url.searchParams.get("last_check_age");
+      if (ageRaw && (LAST_CHECK_AGE_FILTERS as readonly string[]).includes(ageRaw)) {
+        filters.last_check_age = ageRaw as LastCheckAgeFilter;
+      }
+      const data = await loadIndexationOverview(env, user, filters, visibleClusters);
+      return htmlResponse(
+        htmlPage({
+          title: "Indexation — Edge SEO Platform",
+          body: appLayout({
+            title: "Indexation",
+            content: renderIndexationOverviewPage(data),
+            activeNav: "indexation",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+      );
+    }
+
+    if (path === "/app/indexation/recheck" && method === "POST") {
+      if (!user) return redirectToLogin(url);
+      const result = await handleBulkRecheck(request, env, url, user);
+      if (result.response) return result.response;
+      if (!result.result) return new Response("Internal error", { status: 500 });
+      const clients = await loadVisibleClients(env, user);
+      return htmlResponse(
+        htmlPage({
+          title: "Recheck result — Edge SEO Platform",
+          body: appLayout({
+            title: "Recheck result",
+            content: renderBulkRecheckResult(result.result),
+            activeNav: "indexation",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+      );
+    }
+
     // Placements analytics — MUST come before the /app/embeds/:id catch-all.
     if (path === "/app/embeds/placements" && method === "GET") {
       if (!user) return redirectToLogin(url);
@@ -2259,6 +2337,30 @@ export default {
                 data.visibleClients,
                 submitBlock,
               ),
+              activeNav: "clusters",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+
+      if (sub === "check-indexation" && method === "POST") {
+        const result = await handleClusterBulkCheck(request, env, url, user, data.cluster.id);
+        if (result.response) return result.response;
+        if (!result.result) return new Response("Internal error", { status: 500 });
+        return htmlResponse(
+          htmlPage({
+            title: `Indexation check — ${data.cluster.label} — Edge SEO Platform`,
+            body: appLayout({
+              title: `Indexation check — ${data.cluster.label}`,
+              content: renderBulkRecheckResult({
+                scope: `cluster: ${data.cluster.label}`,
+                results: result.result.results,
+              }),
               activeNav: "clusters",
               user,
               flash,

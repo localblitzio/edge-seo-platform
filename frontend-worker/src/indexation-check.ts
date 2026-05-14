@@ -353,3 +353,106 @@ function safeJsonParse(s: string): Record<string, unknown> {
     return {};
   }
 }
+
+/**
+ * Run `checkUrlIndexation` for every `(client_id, url)` pair in
+ * `targets`, sequentially. Returns a per-URL result list suitable
+ * for rendering as a results table. Used by both the cluster bulk
+ * check (Phase B) and the platform-wide recheck (Phase C).
+ *
+ * Sequential rather than parallel — DataForSEO has per-account rate
+ * limits and a parallel burst can trip them. The 24h cache means
+ * repeat calls within a window read from D1 and are effectively
+ * free, so the loop only blocks on URLs that genuinely need an API
+ * call.
+ *
+ * @param force when true, bypass the 24h cache for every URL.
+ */
+export interface BulkCheckTarget {
+  client_id: string;
+  url: string;
+}
+
+export interface BulkCheckRowResult {
+  client_id: string;
+  url: string;
+  status: IndexationStatus;
+  message: string;
+  cached: boolean;
+}
+
+export async function bulkCheckUrls(
+  env: AppEnv,
+  targets: readonly BulkCheckTarget[],
+  checkerEmail: string,
+  force = false,
+): Promise<BulkCheckRowResult[]> {
+  const out: BulkCheckRowResult[] = [];
+  for (const t of targets) {
+    const result = await checkUrlIndexation(env, t.client_id, t.url, checkerEmail, force);
+    out.push({
+      client_id: t.client_id,
+      url: t.url,
+      status: result.status,
+      message: result.message,
+      cached: result.cached,
+    });
+  }
+  return out;
+}
+
+/**
+ * Return every `(client_id, url)` pair across `clientIds` that has
+ * never been checked (no indexation_checks row). Used by Phase C's
+ * "Recheck unchecked" bulk action — the caller pairs this with the
+ * client's diagnostics to figure out which URLs are missing.
+ *
+ * Returns the set of URLs that HAVE been checked. Caller subtracts
+ * from the diagnostics-derived URL list to find the unchecked set.
+ */
+export async function loadCheckedUrlSet(
+  env: AppEnv,
+  clientIds: readonly string[],
+): Promise<Set<string>> {
+  const out = new Set<string>();
+  if (clientIds.length === 0) return out;
+  const placeholders = clientIds.map(() => "?").join(", ");
+  const rows = await env.CONFIG_DB.prepare(
+    `SELECT DISTINCT client_id, url FROM indexation_checks WHERE client_id IN (${placeholders})`,
+  )
+    .bind(...clientIds)
+    .all<{ client_id: string; url: string }>();
+  for (const r of rows.results ?? []) {
+    out.add(`${r.client_id}|${r.url}`);
+  }
+  return out;
+}
+
+/**
+ * Return every (client_id, url) where the latest check is older than
+ * `staleDays` (or has indexed=NULL, treated as needing re-check).
+ * Used by Phase C's "Recheck stale" bulk action.
+ */
+export async function loadStaleTargets(
+  env: AppEnv,
+  clientIds: readonly string[],
+  staleDays = 7,
+): Promise<BulkCheckTarget[]> {
+  if (clientIds.length === 0) return [];
+  const placeholders = clientIds.map(() => "?").join(", ");
+  const sql = `
+    SELECT t.client_id, t.url FROM indexation_checks t
+    INNER JOIN (
+      SELECT client_id, url, MAX(checked_at) AS max_at
+      FROM indexation_checks
+      WHERE client_id IN (${placeholders})
+      GROUP BY client_id, url
+    ) m ON m.client_id = t.client_id AND m.url = t.url AND m.max_at = t.checked_at
+    WHERE t.checked_at < datetime('now', ?)
+       OR t.indexed IS NULL
+  `;
+  const rows = await env.CONFIG_DB.prepare(sql)
+    .bind(...clientIds, `-${staleDays} days`)
+    .all<BulkCheckTarget>();
+  return rows.results ?? [];
+}
