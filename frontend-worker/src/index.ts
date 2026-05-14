@@ -108,6 +108,14 @@ import {
   renderEditClusterForm,
   renderNewClusterForm,
 } from "./clusters.js";
+import {
+  defaultScrapeFormPrefill,
+  handleRescrapePost,
+  handleScrapeConfirmPost,
+  handleScrapePreviewPost,
+  renderScrapeForm,
+  renderScrapePreview,
+} from "./data-source-scrape.js";
 import { type EmailBinding, resetPasswordMessage, sendEmail } from "./email.js";
 import {
   type PlacementFilters,
@@ -3292,6 +3300,75 @@ export default {
       );
     }
 
+    /* ─── Phase B: DataForSEO Maps scrape → data source ─── */
+    // These string paths MUST come before the numeric-id catch-all
+    // below, otherwise `new-scrape` gets parsed as id=NaN.
+
+    if (path === "/app/data-sources/new-scrape" && method === "GET") {
+      if (!user) return redirectToLogin(url);
+      const clients = await loadVisibleClients(env, user);
+      return htmlResponse(
+        htmlPage({
+          title: "Scrape Google Maps — Edge SEO Platform",
+          body: appLayout({
+            title: "Scrape Google Maps",
+            content: renderScrapeForm({ prefill: defaultScrapeFormPrefill(), errors: [] }),
+            activeNav: "data-sources",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+      );
+    }
+
+    if (path === "/app/data-sources/new-scrape/preview" && method === "POST") {
+      if (!user) return redirectToLogin(url);
+      const outcome = await handleScrapePreviewPost(request, env, url, user);
+      if ("response" in outcome) return outcome.response;
+      const clients = await loadVisibleClients(env, user);
+      if ("errors" in outcome) {
+        return htmlResponse(
+          htmlPage({
+            title: "Scrape Google Maps — Edge SEO Platform",
+            body: appLayout({
+              title: "Scrape Google Maps",
+              content: renderScrapeForm({ prefill: outcome.prefill, errors: outcome.errors }),
+              activeNav: "data-sources",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+          { status: 400 },
+        );
+      }
+      return htmlResponse(
+        htmlPage({
+          title: `Preview — ${outcome.preview.name}`,
+          body: appLayout({
+            title: `Preview — ${outcome.preview.name}`,
+            content: renderScrapePreview(outcome.preview),
+            activeNav: "data-sources",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+      );
+    }
+
+    if (path === "/app/data-sources/new-scrape/confirm" && method === "POST") {
+      if (!user) return redirectToLogin(url);
+      return handleScrapeConfirmPost(request, env, url, user);
+    }
+
     if (path.startsWith("/app/data-sources/")) {
       if (!user) return redirectToLogin(url);
       const rest = path.slice("/app/data-sources/".length);
@@ -3305,6 +3382,10 @@ export default {
       const ds = await loadVisibleDataSource(env, user, id);
       if (!ds) return new Response("Data source not found", { status: 404 });
       const clients = await loadVisibleClients(env, user);
+
+      if (sub === "rescrape" && method === "POST") {
+        return handleRescrapePost(request, env, url, user, ds);
+      }
 
       if (sub === "edit" && method === "GET") {
         return htmlResponse(

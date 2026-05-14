@@ -167,7 +167,7 @@ export function renderDataSourcesList(rows: readonly SiteDataSourceRow[], user: 
     return `<div class="tmpl-page">
       <h1>Data sources</h1>
       <p class="subtitle">${ownership} Tabular data — one row per page you want to generate. Upload a CSV, paste inline, or (later) auto-scrape from DataForSEO.</p>
-      <p style="margin-bottom:1rem"><a class="btn btn-primary" href="/app/data-sources/new">+ New data source</a></p>
+      <p style="margin-bottom:1rem"><a class="btn btn-primary" href="/app/data-sources/new">+ New data source</a> <a class="btn" href="/app/data-sources/new-scrape">⚡ Scrape Google Maps</a></p>
       <div class="empty">No data sources yet.</div>
     </div>`;
   }
@@ -187,7 +187,7 @@ export function renderDataSourcesList(rows: readonly SiteDataSourceRow[], user: 
   return `<div class="tmpl-page">
     <h1>Data sources</h1>
     <p class="subtitle">${ownership}</p>
-    <p style="margin-bottom:1rem"><a class="btn btn-primary" href="/app/data-sources/new">+ New data source</a></p>
+    <p style="margin-bottom:1rem"><a class="btn btn-primary" href="/app/data-sources/new">+ New data source</a> <a class="btn" href="/app/data-sources/new-scrape">⚡ Scrape Google Maps</a></p>
     <table class="data">
       <thead><tr><th>Name</th><th>Kind</th><th>Columns</th><th class="num">Rows</th><th>Updated</th></tr></thead>
       <tbody>${tbody}</tbody>
@@ -217,10 +217,28 @@ export function renderDataSourceForm(opts: {
         ? "csv — paste a CSV blob"
         : k === "inline"
           ? "inline — small table edited in the browser"
-          : `${k} — Phase B (DataForSEO scrape, not yet wired)`;
+          : k === "dataforseo_business_listings"
+            ? "dataforseo_business_listings — Google Maps scrape (create via /app/data-sources/new-scrape)"
+            : `${k} — Phase B+ (not yet wired)`;
+    // Scraped kinds aren't manually selectable in the form — they
+    // come from the dedicated scrape flow. Editor still shows the
+    // current kind for read-only context.
     const disabled = k === "dataforseo_business_listings" || k === "dataforseo_serp";
     return `<option value="${esc(k)}"${kindRaw === k ? " selected" : ""}${disabled ? " disabled" : ""}>${esc(label)}</option>`;
   }).join("");
+  const isScraped = kindRaw === "dataforseo_business_listings";
+  const rescrapeBlock =
+    opts.mode === "edit" && isScraped && opts.prefill.id
+      ? `<form method="POST" action="/app/data-sources/${opts.prefill.id}/rescrape" style="margin:0 0 1.25rem">
+          <div style="background:var(--accent-soft);border:1px solid var(--accent-bg);border-radius:var(--radius);padding:.85rem 1rem;display:flex;align-items:center;justify-content:space-between;gap:1rem">
+            <div>
+              <strong>Maps-scraped data source.</strong>
+              <div style="color:var(--fg-muted);font-size:.85rem">Re-run the original DataForSEO query and overwrite all rows.</div>
+            </div>
+            <button class="btn btn-primary" type="submit">Re-scrape →</button>
+          </div>
+        </form>`
+      : "";
 
   const columns = safeParseArray<string>(opts.prefill.columns ?? "[]");
   const rows = safeParseArray<Record<string, string>>(opts.prefill.rows ?? "[]");
@@ -236,6 +254,7 @@ export function renderDataSourceForm(opts: {
     <div class="crumbs"><a href="/app/data-sources">← Data sources</a></div>
     <h1>${opts.mode === "new" ? "New data source" : "Edit data source"}</h1>
     ${errBox}
+    ${rescrapeBlock}
     <form class="editor" method="POST" action="${esc(action)}">
       <div class="form-section">
         <label for="ds_name">name</label>

@@ -19,6 +19,7 @@ import { getSecret } from "../../src/secrets/store.js";
 import type { AppEnv } from "./app.js";
 
 const ENDPOINT = "https://api.dataforseo.com/v3/serp/google/organic/live/advanced";
+const MAPS_ENDPOINT = "https://api.dataforseo.com/v3/serp/google/maps/live/advanced";
 
 /** Single organic result the caller can offer to the operator. */
 export interface SerpResult {
@@ -215,5 +216,227 @@ export async function fetchSerpResults(env: AppEnv, q: SerpQuery): Promise<SerpR
     throw new DataForSeoApiError(`DataForSEO ${json.status_code}: ${msg}`, json.status_code);
   }
   const parsed = parseSerpResponse(json);
+  return parsed.slice(0, q.depth);
+}
+
+/* ─── Google Maps SERP — business listings ─── */
+
+/**
+ * One business pulled from a Maps SERP. All fields are strings so the
+ * row can drop straight into a `site_data_sources.rows` entry — the
+ * template render engine expects `Record<string, string>` rows. Empty
+ * strings stand in for absent fields so column lookups stay consistent.
+ */
+export interface BusinessListingRow {
+  /** 1-based position within the Maps SERP for this (keyword, location). */
+  position: string;
+  /** Business name. */
+  title: string;
+  /** Free-form address as DataForSEO returns it. */
+  address: string;
+  /** City extracted from the address_info block, if available. */
+  city: string;
+  /** Region / state code. */
+  state: string;
+  /** ISO country code. */
+  country: string;
+  /** ZIP / postal code. */
+  zip: string;
+  /** Phone number (digits + formatting as DataForSEO returns). */
+  phone: string;
+  /** Website URL of the business, if listed. */
+  website: string;
+  /** Average rating ("4.7") or "" when unavailable. */
+  rating: string;
+  /** Number of ratings ("128") or "". */
+  rating_count: string;
+  /** Comma-joined categories ("Pool Builder, Contractor"). */
+  categories: string;
+  /** The location/keyword pair this row was scraped under — useful when
+   *  one scrape spans multiple cities and the operator templates per row. */
+  keyword: string;
+  /** Location string the operator typed (e.g. "San Diego, California"). */
+  location: string;
+}
+
+export interface BusinessListingQuery {
+  keyword: string;
+  /** Free-form location name DataForSEO can resolve (e.g. "San Diego,California,United States"). */
+  location_name: string;
+  language_code: string;
+  /** Max organic businesses to return per location. 1..20. */
+  depth: number;
+}
+
+export const BUSINESS_LISTING_MAX_DEPTH = 20;
+export const BUSINESS_LISTING_COLUMNS: readonly (keyof BusinessListingRow)[] = [
+  "position",
+  "title",
+  "address",
+  "city",
+  "state",
+  "country",
+  "zip",
+  "phone",
+  "website",
+  "rating",
+  "rating_count",
+  "categories",
+  "keyword",
+  "location",
+];
+
+/**
+ * Build the Maps SERP request body. DataForSEO accepts an array of
+ * tasks; we always send one. Location is supplied as a free-form name
+ * — DataForSEO geocodes it internally (no need to look up location
+ * codes the way organic SERP does).
+ */
+export function buildMapsSerpRequestBody(q: BusinessListingQuery): string {
+  const depth = Math.max(1, Math.min(BUSINESS_LISTING_MAX_DEPTH, q.depth));
+  return JSON.stringify([
+    {
+      keyword: q.keyword,
+      location_name: q.location_name,
+      language_code: q.language_code,
+      depth,
+    },
+  ]);
+}
+
+/**
+ * Pull organic business rows out of a Maps SERP response. DataForSEO
+ * wraps results in `tasks[].result[].items[]` with `type === "maps_search"`.
+ *
+ * Pure — exercised by unit tests.
+ */
+export function parseMapsResponse(
+  payload: unknown,
+  context: { keyword: string; location: string },
+): BusinessListingRow[] {
+  if (typeof payload !== "object" || payload === null) return [];
+  const root = payload as Record<string, unknown>;
+  const tasks = Array.isArray(root.tasks) ? root.tasks : [];
+  const out: BusinessListingRow[] = [];
+  for (const task of tasks) {
+    if (typeof task !== "object" || task === null) continue;
+    const result = (task as Record<string, unknown>).result;
+    if (!Array.isArray(result)) continue;
+    for (const r of result) {
+      if (typeof r !== "object" || r === null) continue;
+      const items = (r as Record<string, unknown>).items;
+      if (!Array.isArray(items)) continue;
+      for (const item of items) {
+        if (typeof item !== "object" || item === null) continue;
+        const obj = item as Record<string, unknown>;
+        // DataForSEO uses several item types here. The business
+        // listings live under `maps_search`.
+        if (obj.type !== "maps_search") continue;
+        const title = typeof obj.title === "string" ? obj.title : "";
+        if (!title) continue;
+        const address = typeof obj.address === "string" ? obj.address : "";
+        const addressInfo =
+          typeof obj.address_info === "object" && obj.address_info !== null
+            ? (obj.address_info as Record<string, unknown>)
+            : {};
+        const city = typeof addressInfo.city === "string" ? addressInfo.city : "";
+        const state = typeof addressInfo.region === "string" ? addressInfo.region : "";
+        const country =
+          typeof addressInfo.country_code === "string" ? addressInfo.country_code : "";
+        const zip = typeof addressInfo.zip === "string" ? addressInfo.zip : "";
+        const phone = typeof obj.phone === "string" ? obj.phone : "";
+        const website = typeof obj.url === "string" ? obj.url : "";
+        const ratingObj =
+          typeof obj.rating === "object" && obj.rating !== null
+            ? (obj.rating as Record<string, unknown>)
+            : {};
+        const rating =
+          typeof ratingObj.value === "number"
+            ? ratingObj.value.toString()
+            : typeof ratingObj.value === "string"
+              ? ratingObj.value
+              : "";
+        const ratingCount =
+          typeof ratingObj.votes_count === "number" ? ratingObj.votes_count.toString() : "";
+        const categoryList = Array.isArray(obj.additional_categories)
+          ? (obj.additional_categories as unknown[]).filter(
+              (c): c is string => typeof c === "string",
+            )
+          : [];
+        const primaryCategory = typeof obj.category === "string" ? obj.category : "";
+        const categories = [primaryCategory, ...categoryList]
+          .filter((c) => c.length > 0)
+          .join(", ");
+
+        out.push({
+          position: (out.length + 1).toString(),
+          title,
+          address,
+          city,
+          state,
+          country,
+          zip,
+          phone,
+          website,
+          rating,
+          rating_count: ratingCount,
+          categories,
+          keyword: context.keyword,
+          location: context.location,
+        });
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Fetch business listings for a single (keyword, location). Throws on
+ * missing creds or non-2xx API response — caller decides how to surface.
+ *
+ * @throws DataForSeoConfigError when credentials aren't set or query is empty
+ * @throws DataForSeoApiError on transport or DataForSEO error status
+ */
+export async function fetchBusinessListings(
+  env: AppEnv,
+  q: BusinessListingQuery,
+): Promise<BusinessListingRow[]> {
+  if (!q.keyword.trim()) throw new DataForSeoConfigError("keyword is empty");
+  if (!q.location_name.trim()) throw new DataForSeoConfigError("location_name is empty");
+  if (q.depth < 1 || q.depth > BUSINESS_LISTING_MAX_DEPTH) {
+    throw new DataForSeoConfigError(`depth must be 1..${BUSINESS_LISTING_MAX_DEPTH}`);
+  }
+  const sharedEnv = env as unknown as Parameters<typeof getSecret>[0];
+  const [login, password] = await Promise.all([
+    getSecret(sharedEnv, "DATAFORSEO_LOGIN"),
+    getSecret(sharedEnv, "DATAFORSEO_PASSWORD"),
+  ]);
+  if (!login || !password) {
+    throw new DataForSeoConfigError(
+      "DataForSEO credentials are not configured. Set DATAFORSEO_LOGIN and DATAFORSEO_PASSWORD on the Settings → API keys page.",
+    );
+  }
+  const body = buildMapsSerpRequestBody(q);
+  const res = await fetch(MAPS_ENDPOINT, {
+    method: "POST",
+    headers: {
+      authorization: basicAuthHeader(login, password),
+      "content-type": "application/json",
+    },
+    body,
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new DataForSeoApiError(
+      `DataForSEO HTTP ${res.status}${text ? `: ${text.slice(0, 200)}` : ""}`,
+      res.status,
+    );
+  }
+  const json = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+  if (json && typeof json.status_code === "number" && json.status_code >= 40000) {
+    const msg = typeof json.status_message === "string" ? json.status_message : "DataForSEO error";
+    throw new DataForSeoApiError(`DataForSEO ${json.status_code}: ${msg}`, json.status_code);
+  }
+  const parsed = parseMapsResponse(json, { keyword: q.keyword, location: q.location_name });
   return parsed.slice(0, q.depth);
 }
