@@ -535,22 +535,25 @@ function statusPill(
 }
 
 const OVERVIEW_CSS = `
-.idx-overview .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(9rem,1fr));gap:.75rem;margin-bottom:1.5rem}
-.idx-overview .stats .card{padding:.7rem .9rem;background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius)}
-.idx-overview .stats .card .label{font-size:.7rem;text-transform:uppercase;letter-spacing:.06em;color:var(--fg-muted);margin:0}
-.idx-overview .stats .card .value{font-size:1.6rem;font-weight:600;margin:.1rem 0 0}
-.idx-overview .stats .card .pct{font-size:.7rem;color:var(--fg-muted);margin-top:.05rem}
-.idx-overview h2{font-size:1rem;margin:1.5rem 0 .5rem}
-.idx-overview .filter-strip{padding:.7rem .9rem;background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:1rem;display:flex;gap:.6rem;flex-wrap:wrap;align-items:flex-end}
-.idx-overview .filter-strip label{display:block;font-size:.7rem;color:var(--fg-muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:.15rem}
-.idx-overview .filter-strip select,.idx-overview .filter-strip input{font:inherit;padding:.3rem .45rem;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg);font-size:.85rem}
+.idx-overview .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(10rem,1fr));gap:1rem;margin-bottom:1.75rem}
+.idx-overview .stats .card{padding:1rem 1.15rem;background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-lg);box-shadow:var(--shadow-sm);transition:all .2s ease;position:relative;overflow:hidden;margin-bottom:0}
+.idx-overview .stats .card:hover{transform:translateY(-2px);box-shadow:var(--shadow-md);border-color:color-mix(in srgb,var(--accent) 30%,var(--border))}
+.idx-overview .stats .card::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--accent);opacity:.85}
+.idx-overview .stats .card .label{font-size:.68rem;text-transform:uppercase;letter-spacing:.08em;color:var(--fg-muted);margin:0;font-weight:700}
+.idx-overview .stats .card .value{font-size:1.85rem;font-weight:800;margin:.2rem 0 0;letter-spacing:-.025em;line-height:1}
+.idx-overview .stats .card .pct{font-size:.7rem;color:var(--fg-muted);margin-top:.15rem;font-weight:500}
+.idx-overview h2{font-size:1.05rem;margin:1.75rem 0 .6rem;font-weight:600;letter-spacing:-.005em}
+.idx-overview .filter-strip{padding:.85rem 1rem;background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-lg);margin-bottom:1.25rem;display:flex;gap:.75rem;flex-wrap:wrap;align-items:flex-end;box-shadow:var(--shadow-sm)}
+.idx-overview .filter-strip label{display:block;font-size:.68rem;color:var(--fg-muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:.2rem;font-weight:700}
+.idx-overview .filter-strip select,.idx-overview .filter-strip input{font:inherit;padding:.4rem .55rem;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg);color:var(--fg);font-size:.85rem;transition:border-color .15s,box-shadow .15s}
+.idx-overview .filter-strip select:focus,.idx-overview .filter-strip input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-bg)}
 .idx-overview .filter-strip .grow{flex:1;min-width:10rem}
 .idx-overview table.data td.num{text-align:right;font-variant-numeric:tabular-nums}
 .idx-overview .activity{font-size:.85rem}
-.idx-overview .activity li{margin-bottom:.25rem}
+.idx-overview .activity li{margin-bottom:.4rem;padding:.5rem .75rem;background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-sm)}
 .idx-overview .embed-badge{display:inline-block;margin-left:.3rem;font-size:.7rem;color:var(--fg-muted)}
 .idx-overview .recheck-row{display:flex;gap:.5rem;margin-top:.6rem;flex-wrap:wrap}
-.indexation-pill{display:inline-block;padding:.1rem .45rem;border-radius:9999px;font-size:.72rem;font-weight:500;line-height:1.2}
+.indexation-pill{display:inline-flex;align-items:center;padding:.15rem .55rem;border-radius:9999px;font-size:.72rem;font-weight:600;line-height:1.3}
 .indexation-yes{background:var(--green-bg);color:var(--green)}
 .indexation-no{background:var(--red-bg);color:var(--red)}
 .indexation-unknown{background:var(--amber-bg);color:var(--amber)}

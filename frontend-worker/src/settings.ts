@@ -133,13 +133,15 @@ function renderSlotRow(
 }
 
 const SETTINGS_CSS = `
-.settings-slot{margin-bottom:1.5rem}
+.settings-slot{margin-bottom:1.25rem;padding:1.15rem 1.3rem;background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-lg);box-shadow:var(--shadow-sm);transition:box-shadow .15s ease}
+.settings-slot:hover{box-shadow:var(--shadow)}
 .settings-slot-header{display:flex;align-items:baseline;justify-content:space-between;gap:1rem}
-.settings-slot-header h3{margin:0;font-size:1rem}
-.settings-slot-desc{color:var(--fg-muted);margin:.35rem 0 .75rem;font-size:.9rem}
+.settings-slot-header h3{margin:0;font-size:1rem;font-weight:600}
+.settings-slot-desc{color:var(--fg-muted);margin:.35rem 0 .75rem;font-size:.88rem;line-height:1.5}
 .settings-slot-current{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.85rem;margin-bottom:.25rem}
 .settings-slot .meta{color:var(--fg-muted);font-size:.78rem;margin-bottom:.6rem}
-.settings-slot input[type=password],.settings-slot input[type=text],.settings-slot textarea{width:100%;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.85rem;padding:.5rem;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg);margin-bottom:.4rem}
+.settings-slot input[type=password],.settings-slot input[type=text],.settings-slot textarea{width:100%;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.85rem;padding:.55rem .7rem;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg);color:var(--fg);margin-bottom:.4rem;transition:border-color .15s,box-shadow .15s}
+.settings-slot input:focus,.settings-slot textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-bg)}
 .settings-slot textarea{resize:vertical}
 .settings-slot .form-actions{margin-top:.5rem;display:flex;gap:.5rem}
 .settings-test-result{margin-top:.85rem;padding:.7rem .9rem;border-radius:var(--radius);display:flex;gap:.7rem;align-items:flex-start;border:1px solid transparent}
