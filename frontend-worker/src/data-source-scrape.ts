@@ -37,6 +37,7 @@ import {
   DataForSeoConfigError,
   fetchBusinessListings,
 } from "./dataforseo.js";
+import { LOCATION_PACKS } from "./location-packs.js";
 import { type SiteDataSourceRow, checkCsrf, flashRedirect } from "./site-templates.js";
 
 const MAX_LOCATIONS_PER_SCRAPE = 25;
@@ -359,12 +360,50 @@ export function renderScrapeForm(opts: {
       </div>
       <div class="form-section">
         <label for="sc_locations">locations (one per line)</label>
+        <div style="display:flex;flex-wrap:wrap;gap:.4rem;margin:.25rem 0 .55rem">
+          ${LOCATION_PACKS.map(
+            (p) =>
+              `<button type="button" class="btn" data-pack="${esc(p.id)}" data-pack-locations="${esc(p.locations.join("\n"))}" style="font-size:.82rem;padding:.3rem .7rem">+ ${esc(p.label)}</button>`,
+          ).join("")}
+          <button type="button" class="btn" data-pack-clear="1" style="font-size:.82rem;padding:.3rem .7rem;opacity:.8">Clear</button>
+        </div>
         <textarea id="sc_locations" name="locations" rows="8" required placeholder="San Diego,California,United States&#10;La Jolla,California,United States&#10;Chula Vista,California,United States" style="font-family:var(--mono);font-size:.85rem;width:100%">${esc(opts.prefill.locations)}</textarea>
         <div class="field-hint">
           <strong>Format:</strong> <code>City,Region,Country</code> — DataForSEO only resolves <em>full</em> region + country names (e.g. <code>California</code>, not <code>CA</code>; <code>United States</code>, not <code>US</code>). Unresolved locations return 0 rows with a per-task error.<br>
-          ${taskCount > 0 ? `<strong>${taskCount}</strong> task${taskCount === 1 ? "" : "s"} will run.` : ""} Max ${MAX_LOCATIONS_PER_SCRAPE}.
+          <span id="sc_task_count">${taskCount > 0 ? `<strong>${taskCount}</strong> task${taskCount === 1 ? "" : "s"} will run.` : ""}</span> Max ${MAX_LOCATIONS_PER_SCRAPE}.
         </div>
       </div>
+      <script>
+        (function(){
+          var ta = document.getElementById('sc_locations');
+          var counter = document.getElementById('sc_task_count');
+          function recount(){
+            if (!ta || !counter) return;
+            var n = ta.value.split(/\\r?\\n/).filter(function(s){return s.trim().length>0}).length;
+            counter.innerHTML = n > 0 ? '<strong>' + n + '</strong> task' + (n===1?'':'s') + ' will run.' : '';
+          }
+          function appendPack(packLines){
+            if (!ta) return;
+            var existing = ta.value.split(/\\r?\\n/).map(function(s){return s.trim()}).filter(function(s){return s.length>0});
+            var seen = Object.create(null);
+            existing.forEach(function(s){ seen[s] = true; });
+            packLines.split(/\\r?\\n/).forEach(function(line){
+              var t = line.trim();
+              if (t && !seen[t]) { existing.push(t); seen[t] = true; }
+            });
+            ta.value = existing.join('\\n');
+            recount();
+          }
+          document.querySelectorAll('[data-pack]').forEach(function(btn){
+            btn.addEventListener('click', function(){
+              appendPack(btn.getAttribute('data-pack-locations') || '');
+            });
+          });
+          var clear = document.querySelector('[data-pack-clear]');
+          if (clear) clear.addEventListener('click', function(){ if(ta){ ta.value=''; recount(); } });
+          if (ta) ta.addEventListener('input', recount);
+        })();
+      </script>
       <div class="form-section">
         <label for="sc_depth">businesses per location (1–${BUSINESS_LISTING_MAX_DEPTH})</label>
         <input id="sc_depth" name="depth" type="number" min="1" max="${BUSINESS_LISTING_MAX_DEPTH}" required value="${opts.prefill.depth}">
