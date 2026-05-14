@@ -34,11 +34,7 @@
 // Order doesn't matter for matching since the staging zone
 // (`localsitestage.us`) is a separate TLD — no suffix-overlap
 // risk with the production zones below.
-export const PROXY_ZONES = [
-  "localpage.us.com",
-  "localsite.us.com",
-  "localsitestage.us",
-] as const;
+export const PROXY_ZONES = ["localpage.us.com", "localsite.us.com", "localsitestage.us"] as const;
 
 export type ProxyZone = (typeof PROXY_ZONES)[number];
 
