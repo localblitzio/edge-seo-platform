@@ -375,6 +375,10 @@ const NAV_ICONS: Record<string, string> = {
   embeds: `<svg ${NAV_SVG_ATTRS}><path d="M16.5 9.4L7.5 4.21"/><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>`,
   // bar-chart (Indexation — overview / stats)
   indexation: `<svg ${NAV_SVG_ATTRS}><line x1="12" y1="20" x2="12" y2="10"/><line x1="18" y1="20" x2="18" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>`,
+  // layers (Templates — stacked content)
+  templates: `<svg ${NAV_SVG_ATTRS}><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>`,
+  // database (Data sources — tabular data)
+  "data-sources": `<svg ${NAV_SVG_ATTRS}><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v6c0 1.66 4 3 9 3s9-1.34 9-3V5"/><path d="M3 11v6c0 1.66 4 3 9 3s9-1.34 9-3v-6"/></svg>`,
   // key (Settings → API keys)
   "settings:api-keys": `<svg ${NAV_SVG_ATTRS}><circle cx="7.5" cy="15.5" r="3.5"/><line x1="10" y1="13" x2="20" y2="3"/><line x1="16" y1="7" x2="19" y2="4"/><line x1="14" y1="9" x2="17" y2="6"/></svg>`,
   // shield-user (Super-admin Users)
@@ -431,6 +435,18 @@ export function appSidebar(opts: { activeNav: string; clients: ClientRow[]; user
       id: "indexation",
       label: "Indexation",
       icon: NAV_ICONS.indexation ?? "",
+    },
+    {
+      href: "/app/templates",
+      id: "templates",
+      label: "Templates",
+      icon: NAV_ICONS.templates ?? "",
+    },
+    {
+      href: "/app/data-sources",
+      id: "data-sources",
+      label: "Data sources",
+      icon: NAV_ICONS["data-sources"] ?? "",
     },
     { href: "/app/audit", id: "audit", label: "Audit log", icon: NAV_ICONS.audit ?? "" },
   ];
@@ -2424,7 +2440,7 @@ const CUSTOM_PAGE_MAX_HTML_BYTES = 1_000_000; // 1 MB
  * can't collide on the same path. The trailing path always starts with
  * `/`, giving keys like `lantern-crest/lp/austin`.
  */
-function customPageStorageKey(clientId: string, path: string): string {
+export function customPageStorageKey(clientId: string, path: string): string {
   return `${clientId}${path}`;
 }
 
@@ -2432,7 +2448,7 @@ function customPageStorageKey(clientId: string, path: string): string {
  * The match regex emitted for a custom_page route. Mirrors the per-page
  * editor convention: `/?$` so both `/lp/austin` and `/lp/austin/` match.
  */
-function customPageMatch(path: string): string {
+export function customPageMatch(path: string): string {
   const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return `^${escaped}/?$`;
 }

@@ -27,6 +27,7 @@
  */
 
 import { defaultZoneForEnv } from "../../src/config/proxy-zone.js";
+import { PRODUCTION_PROXY_ZONES, STAGING_PROXY_ZONES } from "../../src/config/proxy-zone.js";
 import { ACTIVE_INDEXERS } from "../../src/secrets/indexer-registry.js";
 import { getSecret } from "../../src/secrets/store.js";
 import {
@@ -180,6 +181,27 @@ import {
   renderSerpPicker,
 } from "./serp-new.js";
 import { handleSettingsApiKeysPost, renderSettingsApiKeysPage } from "./settings.js";
+import {
+  handleDataSourceEditPost,
+  handleDataSourceNewPost,
+  handleGenerateConfirmPost,
+  handleGeneratePreviewPost,
+  handleTemplateEditPost,
+  handleTemplateNewPost,
+  renderDataSourceForm,
+  renderDataSourcesList,
+  renderGenerateForm,
+  renderGeneratePreview,
+  renderGenerateResult,
+  renderTemplateForm,
+  renderTemplatesList,
+} from "./site-templates-ui.js";
+import {
+  loadVisibleDataSource,
+  loadVisibleDataSources,
+  loadVisibleTemplate,
+  loadVisibleTemplates,
+} from "./site-templates.js";
 
 interface Env {
   CONFIG_KV: KVNamespace;
@@ -2979,6 +3001,363 @@ export default {
       return new Response(JSON.stringify(out, null, 2), {
         headers: { "content-type": "application/json; charset=utf-8" },
       });
+    }
+
+    /* ─── Programmatic SEO: site templates + data sources ─── */
+    // Templates list / new / edit live under /app/templates. The fixed
+    // `/new` route MUST come before the catch-all `/:id` so it isn't
+    // shadowed.
+
+    if (path === "/app/templates" && method === "GET") {
+      if (!user) return redirectToLogin(url);
+      const clients = await loadVisibleClients(env, user);
+      const rows = await loadVisibleTemplates(env, user);
+      return htmlResponse(
+        htmlPage({
+          title: "Templates — Edge SEO Platform",
+          body: appLayout({
+            title: "Templates",
+            content: renderTemplatesList(rows, user),
+            activeNav: "templates",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+      );
+    }
+
+    if (path === "/app/templates/new" && method === "GET") {
+      if (!user) return redirectToLogin(url);
+      const clients = await loadVisibleClients(env, user);
+      return htmlResponse(
+        htmlPage({
+          title: "New template — Edge SEO Platform",
+          body: appLayout({
+            title: "New template",
+            content: renderTemplateForm({ prefill: {}, errors: [], mode: "new" }),
+            activeNav: "templates",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+      );
+    }
+
+    if (path === "/app/templates/new" && method === "POST") {
+      if (!user) return redirectToLogin(url);
+      const result = await handleTemplateNewPost(request, env, url, user);
+      if ("redirect" in result) return result.redirect;
+      const clients = await loadVisibleClients(env, user);
+      return htmlResponse(
+        htmlPage({
+          title: "New template — Edge SEO Platform",
+          body: appLayout({
+            title: "New template",
+            content: renderTemplateForm({
+              prefill: result.prefill,
+              errors: result.errors,
+              mode: "new",
+            }),
+            activeNav: "templates",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+        { status: 400 },
+      );
+    }
+
+    if (path.startsWith("/app/templates/")) {
+      if (!user) return redirectToLogin(url);
+      const rest = path.slice("/app/templates/".length);
+      const slash = rest.indexOf("/");
+      const idStr = slash === -1 ? rest : rest.slice(0, slash);
+      const sub = slash === -1 ? "" : rest.slice(slash + 1);
+      const id = Number.parseInt(idStr, 10);
+      if (!Number.isFinite(id) || id <= 0) {
+        return new Response(null, { status: 303, headers: { location: "/app/templates" } });
+      }
+      const tmpl = await loadVisibleTemplate(env, user, id);
+      if (!tmpl) return new Response("Template not found", { status: 404 });
+      const clients = await loadVisibleClients(env, user);
+
+      // GET /app/templates/:id/edit
+      if (sub === "edit" && method === "GET") {
+        return htmlResponse(
+          htmlPage({
+            title: `Edit ${tmpl.name} — Edge SEO Platform`,
+            body: appLayout({
+              title: `Edit ${tmpl.name}`,
+              content: renderTemplateForm({
+                prefill: {
+                  id: tmpl.id,
+                  name: tmpl.name,
+                  kind: tmpl.kind,
+                  html_template: tmpl.html_template,
+                  path_pattern: tmpl.path_pattern,
+                },
+                errors: [],
+                mode: "edit",
+              }),
+              activeNav: "templates",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+
+      if (sub === "edit" && method === "POST") {
+        const result = await handleTemplateEditPost(request, env, url, user, id);
+        if ("redirect" in result) return result.redirect;
+        return htmlResponse(
+          htmlPage({
+            title: `Edit ${tmpl.name} — Edge SEO Platform`,
+            body: appLayout({
+              title: `Edit ${tmpl.name}`,
+              content: renderTemplateForm({
+                prefill: { ...result.prefill, id },
+                errors: result.errors,
+                mode: "edit",
+              }),
+              activeNav: "templates",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+          { status: 400 },
+        );
+      }
+
+      // GET /app/templates/:id/generate — pick data source + target
+      if (sub === "generate" && method === "GET") {
+        const dataSources = await loadVisibleDataSources(env, user);
+        const zones =
+          (env as { ENV?: string }).ENV === "staging"
+            ? Array.from(STAGING_PROXY_ZONES)
+            : Array.from(PRODUCTION_PROXY_ZONES);
+        return htmlResponse(
+          htmlPage({
+            title: `Generate — ${tmpl.name}`,
+            body: appLayout({
+              title: `Generate — ${tmpl.name}`,
+              content: renderGenerateForm({
+                template: tmpl,
+                dataSources,
+                visibleClients: clients.map((c) => ({
+                  client_id: c.client_id,
+                  proxy_domain: c.proxy_domain,
+                })),
+                zones,
+                errors: [],
+              }),
+              activeNav: "templates",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+
+      // POST /app/templates/:id/generate/preview
+      if (sub === "generate/preview" && method === "POST") {
+        const result = await handleGeneratePreviewPost(request, env, url, user, id);
+        if ("response" in result) return result.response;
+        return htmlResponse(
+          htmlPage({
+            title: `Preview — ${tmpl.name}`,
+            body: appLayout({
+              title: `Preview — ${tmpl.name}`,
+              content: renderGeneratePreview(result.preview),
+              activeNav: "templates",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+
+      // POST /app/templates/:id/generate/confirm — execute the render
+      if (sub === "generate/confirm" && method === "POST") {
+        const result = await handleGenerateConfirmPost(request, env, url, user, id);
+        if ("response" in result) return result.response;
+        return htmlResponse(
+          htmlPage({
+            title: `Result — ${tmpl.name}`,
+            body: appLayout({
+              title: `Result — ${tmpl.name}`,
+              content: renderGenerateResult(result.result),
+              activeNav: "templates",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+
+      // Unknown sub-route → 404 below.
+    }
+
+    // Data sources
+
+    if (path === "/app/data-sources" && method === "GET") {
+      if (!user) return redirectToLogin(url);
+      const clients = await loadVisibleClients(env, user);
+      const rows = await loadVisibleDataSources(env, user);
+      return htmlResponse(
+        htmlPage({
+          title: "Data sources — Edge SEO Platform",
+          body: appLayout({
+            title: "Data sources",
+            content: renderDataSourcesList(rows, user),
+            activeNav: "data-sources",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+      );
+    }
+
+    if (path === "/app/data-sources/new" && method === "GET") {
+      if (!user) return redirectToLogin(url);
+      const clients = await loadVisibleClients(env, user);
+      return htmlResponse(
+        htmlPage({
+          title: "New data source — Edge SEO Platform",
+          body: appLayout({
+            title: "New data source",
+            content: renderDataSourceForm({ prefill: {}, errors: [], mode: "new" }),
+            activeNav: "data-sources",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+      );
+    }
+
+    if (path === "/app/data-sources/new" && method === "POST") {
+      if (!user) return redirectToLogin(url);
+      const result = await handleDataSourceNewPost(request, env, url, user);
+      if ("redirect" in result) return result.redirect;
+      const clients = await loadVisibleClients(env, user);
+      return htmlResponse(
+        htmlPage({
+          title: "New data source — Edge SEO Platform",
+          body: appLayout({
+            title: "New data source",
+            content: renderDataSourceForm({
+              prefill: result.prefill,
+              errors: result.errors,
+              mode: "new",
+            }),
+            activeNav: "data-sources",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+        { status: 400 },
+      );
+    }
+
+    if (path.startsWith("/app/data-sources/")) {
+      if (!user) return redirectToLogin(url);
+      const rest = path.slice("/app/data-sources/".length);
+      const slash = rest.indexOf("/");
+      const idStr = slash === -1 ? rest : rest.slice(0, slash);
+      const sub = slash === -1 ? "" : rest.slice(slash + 1);
+      const id = Number.parseInt(idStr, 10);
+      if (!Number.isFinite(id) || id <= 0) {
+        return new Response(null, { status: 303, headers: { location: "/app/data-sources" } });
+      }
+      const ds = await loadVisibleDataSource(env, user, id);
+      if (!ds) return new Response("Data source not found", { status: 404 });
+      const clients = await loadVisibleClients(env, user);
+
+      if (sub === "edit" && method === "GET") {
+        return htmlResponse(
+          htmlPage({
+            title: `Edit ${ds.name} — Edge SEO Platform`,
+            body: appLayout({
+              title: `Edit ${ds.name}`,
+              content: renderDataSourceForm({
+                prefill: {
+                  id: ds.id,
+                  name: ds.name,
+                  source_kind: ds.source_kind,
+                  columns: ds.columns,
+                  rows: ds.rows,
+                },
+                errors: [],
+                mode: "edit",
+              }),
+              activeNav: "data-sources",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+
+      if (sub === "edit" && method === "POST") {
+        const result = await handleDataSourceEditPost(request, env, url, user, id);
+        if ("redirect" in result) return result.redirect;
+        return htmlResponse(
+          htmlPage({
+            title: `Edit ${ds.name} — Edge SEO Platform`,
+            body: appLayout({
+              title: `Edit ${ds.name}`,
+              content: renderDataSourceForm({
+                prefill: { ...result.prefill, id },
+                errors: result.errors,
+                mode: "edit",
+              }),
+              activeNav: "data-sources",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+          { status: 400 },
+        );
+      }
     }
 
     /* ─── Super-admin (Phase F fills these in) ─── */
