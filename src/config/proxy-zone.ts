@@ -22,19 +22,58 @@
  * Order matters for UI defaults: PROXY_ZONES[0] is the default zone.
  * Add new zones to the end of the array — never reorder, since the
  * "default zone" semantics ripple through fixtures and templates.
+ *
+ * Staging zones (`stage.localpage.us.com`, `stage.localsite.us.com`)
+ * are included so the admin UI's zone picker offers them as valid
+ * destinations on staging. Per-env enforcement is operator-discipline
+ * only — the admin UI on production lets you pick a stage zone (and
+ * vice versa) but DNS routes only send each zone's traffic to the
+ * correct worker, so picking the wrong zone produces a "not
+ * configured" page rather than a security issue.
  */
-export const PROXY_ZONES = ["localpage.us.com", "localsite.us.com"] as const;
+// Order doesn't matter for matching since the staging zone
+// (`localsitestage.us`) is a separate TLD — no suffix-overlap
+// risk with the production zones below.
+export const PROXY_ZONES = ["localpage.us.com", "localsite.us.com", "localsitestage.us"] as const;
 
 export type ProxyZone = (typeof PROXY_ZONES)[number];
 
 /**
- * Default proxy zone for auto-derived client subdomains.
- *
- * Convention: `<client_id>.${DEFAULT_PROXY_ZONE}`. The default is the
- * first entry in `PROXY_ZONES` — a UI/template convention only; the
- * worker accepts any registered zone.
+ * Production zones — the original two. Used as the default-zone
+ * candidate set on production frontend. Staging frontend overrides
+ * this via `defaultZoneForEnv` (below).
  */
-export const DEFAULT_PROXY_ZONE: ProxyZone = PROXY_ZONES[0];
+export const PRODUCTION_PROXY_ZONES = ["localpage.us.com", "localsite.us.com"] as const;
+
+/**
+ * Staging zones. Currently a single dedicated zone
+ * (`localsitestage.us`, registered via CF Registrar) so Universal
+ * SSL covers `*.localsitestage.us` for free — a nested wildcard
+ * like `*.stage.localpage.us.com` would have required Advanced
+ * Certificate Manager ($10/mo per zone).
+ */
+export const STAGING_PROXY_ZONES = ["localsitestage.us"] as const;
+
+/**
+ * Default proxy zone for auto-derived client subdomains on
+ * PRODUCTION. The staging frontend overrides this via
+ * `defaultZoneForEnv` (returns the staging zone instead).
+ */
+export const DEFAULT_PROXY_ZONE: ProxyZone = PRODUCTION_PROXY_ZONES[0];
+
+/**
+ * Pick the default-zone candidate the admin UI should pre-select.
+ * Returns the first zone in PRODUCTION_PROXY_ZONES on production
+ * frontend, and the first in STAGING_PROXY_ZONES on staging.
+ *
+ * "Which env am I?" is determined by an explicit `ENV` worker var
+ * — `ENV=staging` set in the staging env block of
+ * `frontend-worker/wrangler.toml`. Defaults to production behavior
+ * when the var is absent (safer default).
+ */
+export function defaultZoneForEnv(env: { ENV?: string }): ProxyZone {
+  return env.ENV === "staging" ? STAGING_PROXY_ZONES[0] : PRODUCTION_PROXY_ZONES[0];
+}
 
 /**
  * Returns the matching proxy zone for a domain, or null if it isn't on

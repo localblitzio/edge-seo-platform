@@ -39,9 +39,15 @@ binding = "METRICS"
 dataset = "edge_seo_metrics_local"
 
 # ---------------------------------------------------------------------------
-# Staging
+# Production (proxy worker — serves real customer traffic)
 # ---------------------------------------------------------------------------
-[env.staging]
+# History note: Cloudflare resource names use the legacy "staging"
+# suffix (the script + D1 + R2 buckets were created when this was
+# the only environment). The wrangler env label is `production`
+# because that's what this environment IS — live traffic. Don't
+# let the names confuse you; the migration to rename CF-side
+# resources isn't worth the risk.
+[env.production]
 name = "edge-seo-platform-staging"
 workers_dev = true
 
@@ -53,84 +59,89 @@ workers_dev = true
 # Zone list is mirrored in src/config/proxy-zone.ts (PROXY_ZONES).
 # Adding a new zone requires: (1) DNS wildcard A on the zone,
 # (2) a route entry here, (3) appending to PROXY_ZONES.
-[[env.staging.routes]]
+[[env.production.routes]]
 pattern = "*.localpage.us.com/*"
 zone_name = "localpage.us.com"
 
-[[env.staging.routes]]
+[[env.production.routes]]
 pattern = "*.localsite.us.com/*"
 zone_name = "localsite.us.com"
 
-# In-place mode: 404-media.com client. Apex only — WordPress's
-# built-in www → apex redirect handles www traffic before it would
-# reach our worker (since the loader looks up config by Host header
-# and we only have a config row keyed to the apex). If we ever need
-# the worker to intercept www directly, add a separate config row
-# with proxy_domain = www.404-media.com.
-[[env.staging.routes]]
+# In-place mode: 404-media.com client.
+[[env.production.routes]]
 pattern = "404-media.com/*"
 zone_name = "404-media.com"
 
-# In-place mode: seoinencinitas.com client. Pages-hosted (origin
-# fetched from seoinencinitas.pages.dev — no resolve_override
-# needed). Routes registered out-of-band via the admin auto-onboard
-# form get clobbered by `wrangler deploy` route reconciliation, so
-# every in_place client must also be listed here for persistence.
-[[env.staging.routes]]
+# In-place mode: seoinencinitas.com client (Pages-hosted).
+[[env.production.routes]]
 pattern = "seoinencinitas.com/*"
 zone_name = "seoinencinitas.com"
 
-[[env.staging.kv_namespaces]]
+[[env.production.kv_namespaces]]
 binding = "CONFIG_KV"
 id = "dc95f90063cd4493bb3ea462759f4002"
 
-[[env.staging.d1_databases]]
+[[env.production.d1_databases]]
 binding = "CONFIG_DB"
 database_name = "edge-seo-platform-staging"
 database_id = "a6c1786a-4999-4ac5-ad60-7faafec61283"
 migrations_dir = "migrations"
 
-[[env.staging.r2_buckets]]
+[[env.production.r2_buckets]]
 binding = "CONTENT_R2"
 bucket_name = "edge-seo-content-staging"
 
-[[env.staging.r2_buckets]]
+[[env.production.r2_buckets]]
 binding = "LOGS_R2"
 bucket_name = "edge-seo-logs-staging"
 
-[[env.staging.analytics_engine_datasets]]
+[[env.production.analytics_engine_datasets]]
 binding = "METRICS"
 dataset = "edge_seo_metrics_staging"
 
 # ---------------------------------------------------------------------------
-# Production
+# Staging (proxy worker — sandbox for end-to-end testing)
 # ---------------------------------------------------------------------------
-[env.production]
-name = "edge-seo-platform-production"
-workers_dev = false
-# Routes per client domain are added on onboarding (see docs/runbooks).
+# Resources provisioned 2026-05-13. Empty DB, separate KV/R2 — no
+# real customer data. Staging-created sites use the dedicated
+# `localsitestage.us` zone (registered via Cloudflare Registrar)
+# so CF Universal SSL covers `*.localsitestage.us` for free.
+# Previous attempt used `stage.localpage.us.com` (nested wildcard)
+# which Universal SSL doesn't cover — replaced 2026-05-13.
+[env.staging]
+name = "edge-seo-platform-stage"
+workers_dev = true
 
-[[env.production.kv_namespaces]]
+# Single staging zone. Wildcard `*` DNS record on this zone routes
+# all `<id>.localsitestage.us` traffic to the staging proxy worker.
+[[env.staging.routes]]
+pattern = "*.localsitestage.us/*"
+zone_name = "localsitestage.us"
+
+[env.staging.vars]
+ENV = "staging"
+
+[[env.staging.kv_namespaces]]
 binding = "CONFIG_KV"
-id = "REPLACE_WITH_PRODUCTION_KV_ID"
+id = "e1ad7d59d73d4097956b4c8d46327dce"
 
-[[env.production.d1_databases]]
+[[env.staging.d1_databases]]
 binding = "CONFIG_DB"
-database_name = "edge-seo-platform-production"
-database_id = "REPLACE_WITH_PRODUCTION_D1_ID"
+database_name = "edge-seo-platform-stage"
+database_id = "a2757965-faf9-4713-8449-d1f379e872ba"
 migrations_dir = "migrations"
 
-[[env.production.r2_buckets]]
+[[env.staging.r2_buckets]]
 binding = "CONTENT_R2"
-bucket_name = "edge-seo-content-production"
+bucket_name = "edge-seo-content-stage"
 
-[[env.production.r2_buckets]]
+[[env.staging.r2_buckets]]
 binding = "LOGS_R2"
-bucket_name = "edge-seo-logs-production"
+bucket_name = "edge-seo-logs-stage"
 
-[[env.production.analytics_engine_datasets]]
+[[env.staging.analytics_engine_datasets]]
 binding = "METRICS"
-dataset = "edge_seo_metrics_production"
+dataset = "edge_seo_metrics_stage"
 
 # mTLS certificate bindings are added per-client on onboarding when a route
 # uses `origin_auth: { type: "mtls" }`. Example:

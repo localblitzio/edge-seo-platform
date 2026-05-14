@@ -20,7 +20,7 @@
  * want to clone. Audit log records `config_create_bypass` when used.
  */
 
-import { PROXY_ZONES, type ProxyZone } from "../../src/config/proxy-zone.js";
+import { PROXY_ZONES, type ProxyZone, defaultZoneForEnv } from "../../src/config/proxy-zone.js";
 import type { AppEnv } from "./app.js";
 import { esc } from "./app.js";
 import type { User } from "./auth.js";
@@ -62,7 +62,12 @@ export interface SerpQueryFormPrefill {
   status: "active" | "paused";
 }
 
-export function defaultSerpPrefill(): SerpQueryFormPrefill {
+/**
+ * `env` is the AppEnv (with optional `ENV` var) so the staging
+ * frontend pre-selects the `stage.*` zone in the SERP create flow.
+ * Passing nothing falls back to production defaults.
+ */
+export function defaultSerpPrefill(env?: { ENV?: string }): SerpQueryFormPrefill {
   return {
     keyword: "",
     location_code: SERP_LOCATIONS[0].code,
@@ -70,7 +75,7 @@ export function defaultSerpPrefill(): SerpQueryFormPrefill {
     device: "desktop",
     depth: SERP_MAX_DEPTH,
     zone_strategy: "mixed",
-    zone: PROXY_ZONES[0],
+    zone: defaultZoneForEnv(env ?? {}),
     canonical_mode: "self",
     bypass_attestation: false,
     cluster_id: null,

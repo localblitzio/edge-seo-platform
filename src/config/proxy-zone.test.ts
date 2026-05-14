@@ -11,8 +11,13 @@ import {
 } from "./proxy-zone.js";
 
 describe("PROXY_ZONES", () => {
-  it("has DEFAULT_PROXY_ZONE as the first entry", () => {
-    expect(PROXY_ZONES[0]).toBe(DEFAULT_PROXY_ZONE);
+  it("has DEFAULT_PROXY_ZONE pointing at a production zone (not stage)", () => {
+    // After the staging split, PROXY_ZONES[0] is the most-specific
+    // stage zone (so matchProxyZone returns the right match for
+    // nested hostnames). DEFAULT_PROXY_ZONE is now pinned to the
+    // first PRODUCTION zone explicitly.
+    expect(DEFAULT_PROXY_ZONE).toBe("localpage.us.com");
+    expect(PROXY_ZONES).toContain(DEFAULT_PROXY_ZONE);
   });
 
   it("contains both registered zones", () => {

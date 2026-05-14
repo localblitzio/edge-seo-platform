@@ -19,7 +19,12 @@
  * form produces — empty canonical/indexation/etc rules, status=active,
  * caching=600s, owner_id = current user.
  */
-import { PROXY_ZONES, type ProxyZone, RESERVED_SUBDOMAINS } from "../../src/config/proxy-zone.js";
+import {
+  PRODUCTION_PROXY_ZONES,
+  PROXY_ZONES,
+  type ProxyZone,
+  RESERVED_SUBDOMAINS,
+} from "../../src/config/proxy-zone.js";
 import type { AppEnv, FlashMessage } from "./app.js";
 import { esc, fnvHash, validateConfigJson, writeAudit } from "./app.js";
 import type { User } from "./auth.js";
@@ -301,11 +306,25 @@ export function validateBulkFormSettings(
  * through the registered `PROXY_ZONES`. Operators can override per
  * row in the preview table.
  */
-export function defaultZoneForRow(index: number): ProxyZone {
-  // PROXY_ZONES has length ≥ 1 (compile-time tuple), so the modulo
-  // access is always defined — the `?? PROXY_ZONES[0]` satisfies
-  // `noUncheckedIndexedAccess` without changing behavior.
-  return PROXY_ZONES[index % PROXY_ZONES.length] ?? PROXY_ZONES[0];
+/**
+ * Round-robin a default zone for the i-th row in a `mixed` batch.
+ *
+ * `zoneSet` is the set of zones to alternate between — typically
+ * `PRODUCTION_PROXY_ZONES` on prod and `STAGING_PROXY_ZONES` on
+ * staging. Defaults to `PRODUCTION_PROXY_ZONES` for backwards
+ * compatibility with tests + callers that pre-date the staging
+ * split.
+ */
+export function defaultZoneForRow(
+  index: number,
+  zoneSet: readonly ProxyZone[] = PRODUCTION_PROXY_ZONES,
+): ProxyZone {
+  if (zoneSet.length === 0) return PRODUCTION_PROXY_ZONES[0];
+  // `?? zoneSet[0] ?? PRODUCTION_PROXY_ZONES[0]` avoids a non-null
+  // assertion while satisfying noUncheckedIndexedAccess: the modulo
+  // access can't actually be undefined when length > 0, but tsc
+  // doesn't know that.
+  return zoneSet[index % zoneSet.length] ?? zoneSet[0] ?? PRODUCTION_PROXY_ZONES[0];
 }
 
 /**
