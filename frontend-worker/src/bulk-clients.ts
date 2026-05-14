@@ -320,7 +320,11 @@ export function defaultZoneForRow(
   zoneSet: readonly ProxyZone[] = PRODUCTION_PROXY_ZONES,
 ): ProxyZone {
   if (zoneSet.length === 0) return PRODUCTION_PROXY_ZONES[0];
-  return zoneSet[index % zoneSet.length] ?? zoneSet[0]!;
+  // `?? zoneSet[0] ?? PRODUCTION_PROXY_ZONES[0]` avoids a non-null
+  // assertion while satisfying noUncheckedIndexedAccess: the modulo
+  // access can't actually be undefined when length > 0, but tsc
+  // doesn't know that.
+  return zoneSet[index % zoneSet.length] ?? zoneSet[0] ?? PRODUCTION_PROXY_ZONES[0];
 }
 
 /**
