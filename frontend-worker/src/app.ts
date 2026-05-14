@@ -1508,7 +1508,14 @@ function renderStructuredFormBody(opts: {
     // already edited it. If custom is selected, do nothing.
     "var cidEl=document.getElementById('f_client_id');if(cidEl&&!cidEl.readOnly){cidEl.addEventListener('input',function(){var idx=checkedZoneIndex();if(idx<0)return;var sE=document.getElementById('f_proxy_subdomain_'+idx);if(!sE)return;if(sE.dataset.userEdited!=='1'){sE.value=cidEl.value;syncToJson();}});}",
     "for(var zi=0;zi<ZONES.length;zi++){(function(i){var ee=document.getElementById('f_proxy_subdomain_'+i);if(ee)ee.addEventListener('input',function(){ee.dataset.userEdited='1';});})(zi);}",
-    "var srcEl=document.getElementById('f_source_domain'),orgEl=document.getElementById('f_origin');function shouldFillOrigin(){if(!orgEl)return false;if(orgEl.dataset.userEdited==='1')return false;var v=orgEl.value||'';return v===''||v.indexOf('REPLACE_')!==-1;}if(srcEl&&orgEl){srcEl.addEventListener('input',function(){if(!shouldFillOrigin())return;var s=srcEl.value.trim();orgEl.value=s===''?'':'https://'+s.replace(/^https?:\\/\\//i,'');syncToJson();});orgEl.addEventListener('input',function(){orgEl.dataset.userEdited='1';});if(shouldFillOrigin()&&srcEl.value&&srcEl.value.indexOf('REPLACE_')===-1){orgEl.value='https://'+srcEl.value.replace(/^https?:\\/\\//i,'');syncToJson();}}",
+    // Auto-mirror source_domain → routing[0].origin as the operator
+    // types. The earlier version of shouldFillOrigin stopped after
+    // the first keystroke (because the field was then non-empty), so
+    // typing "localblitz.ai" produced origin "https://l" frozen at
+    // keystroke #1. Now we keep mirroring as long as the operator has
+    // NOT explicitly edited the origin field — that's the only signal
+    // to stop. The initial "REPLACE_" sentinel is still overwritten.
+    "var srcEl=document.getElementById('f_source_domain'),orgEl=document.getElementById('f_origin');function shouldFillOrigin(){if(!orgEl)return false;return orgEl.dataset.userEdited!=='1';}if(srcEl&&orgEl){srcEl.addEventListener('input',function(){if(!shouldFillOrigin())return;var s=srcEl.value.trim();orgEl.value=s===''?'':'https://'+s.replace(/^https?:\\/\\//i,'');syncToJson();});orgEl.addEventListener('input',function(){orgEl.dataset.userEdited='1';});if(shouldFillOrigin()&&srcEl.value&&srcEl.value.indexOf('REPLACE_')===-1){orgEl.value='https://'+srcEl.value.replace(/^https?:\\/\\//i,'');syncToJson();}}",
     "function onMode(){var idx=checkedZoneIndex();for(var i=0;i<ZONES.length;i++){var ee=document.getElementById('f_proxy_subdomain_'+i);if(ee)ee.disabled=(i!==idx);}var cE=document.getElementById('f_proxy_custom');if(cE)cE.disabled=(idx>=0);syncToJson();}",
     "for(var zj=0;zj<ZONES.length;zj++){var zr=document.getElementById('f_proxy_mode_zone_'+zj);if(zr)zr.addEventListener('change',onMode);}",
     "var cRel=document.getElementById('f_proxy_mode_custom');if(cRel)cRel.addEventListener('change',onMode);",
