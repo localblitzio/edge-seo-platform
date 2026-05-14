@@ -175,24 +175,42 @@ export function renderDataSourcesList(rows: readonly SiteDataSourceRow[], user: 
     .map((r) => {
       const cols = safeParseArray<string>(r.columns).join(", ");
       const rowCount = safeParseArray<unknown>(r.rows).length;
+      const statusChip = renderDataSourceStatusChip(r);
       return `<tr>
       <td><a href="/app/data-sources/${r.id}/edit" class="mono">${esc(r.name)}</a></td>
       <td><code>${esc(r.source_kind)}</code></td>
+      <td>${statusChip}</td>
       <td class="mono" style="font-size:.78rem;color:var(--fg-muted)">${esc(cols.slice(0, 60))}${cols.length > 60 ? "…" : ""}</td>
       <td class="num" style="font-variant-numeric:tabular-nums;text-align:right">${rowCount}</td>
       <td class="mono" style="font-size:.78rem;color:var(--fg-muted)">${esc(r.updated_at)}</td>
     </tr>`;
     })
     .join("");
-  return `<div class="tmpl-page">
+  return `<style>${TEMPLATES_CSS}</style><div class="tmpl-page">
     <h1>Data sources</h1>
     <p class="subtitle">${ownership}</p>
     <p style="margin-bottom:1rem"><a class="btn btn-primary" href="/app/data-sources/new">+ New data source</a> <a class="btn" href="/app/data-sources/new-scrape">⚡ Scrape Google Maps</a></p>
     <table class="data">
-      <thead><tr><th>Name</th><th>Kind</th><th>Columns</th><th class="num">Rows</th><th>Updated</th></tr></thead>
+      <thead><tr><th>Name</th><th>Kind</th><th>Status</th><th>Columns</th><th class="num">Rows</th><th>Updated</th></tr></thead>
       <tbody>${tbody}</tbody>
     </table>
   </div>`;
+}
+
+function renderDataSourceStatusChip(r: SiteDataSourceRow): string {
+  if (r.source_kind !== "dataforseo_business_listings") return "";
+  if (r.scrape_status === "running") {
+    const total = Math.max(1, r.scrape_progress_total);
+    const pct = Math.min(100, Math.round((r.scrape_progress_done / total) * 100));
+    return `<span class="result-pill result-updated">${pct}% · ${r.scrape_progress_done}/${r.scrape_progress_total}</span>`;
+  }
+  if (r.scrape_status === "done") {
+    return `<span class="result-pill result-created">done</span>`;
+  }
+  if (r.scrape_status === "error") {
+    return `<span class="result-pill result-error" title="${esc(r.scrape_error ?? "")}">error</span>`;
+  }
+  return "";
 }
 
 export function renderDataSourceForm(opts: {
@@ -226,19 +244,8 @@ export function renderDataSourceForm(opts: {
     const disabled = k === "dataforseo_business_listings" || k === "dataforseo_serp";
     return `<option value="${esc(k)}"${kindRaw === k ? " selected" : ""}${disabled ? " disabled" : ""}>${esc(label)}</option>`;
   }).join("");
-  const isScraped = kindRaw === "dataforseo_business_listings";
-  const rescrapeBlock =
-    opts.mode === "edit" && isScraped && opts.prefill.id
-      ? `<form method="POST" action="/app/data-sources/${opts.prefill.id}/rescrape" style="margin:0 0 1.25rem">
-          <div style="background:var(--accent-soft);border:1px solid var(--accent-bg);border-radius:var(--radius);padding:.85rem 1rem;display:flex;align-items:center;justify-content:space-between;gap:1rem">
-            <div>
-              <strong>Maps-scraped data source.</strong>
-              <div style="color:var(--fg-muted);font-size:.85rem">Re-run the original DataForSEO query and overwrite all rows.</div>
-            </div>
-            <button class="btn btn-primary" type="submit">Re-scrape →</button>
-          </div>
-        </form>`
-      : "";
+  // Re-scrape lives on the live progress block (renderScrapeProgress)
+  // which is prepended by the route handler for scraped sources.
 
   const columns = safeParseArray<string>(opts.prefill.columns ?? "[]");
   const rows = safeParseArray<Record<string, string>>(opts.prefill.rows ?? "[]");
@@ -254,7 +261,6 @@ export function renderDataSourceForm(opts: {
     <div class="crumbs"><a href="/app/data-sources">← Data sources</a></div>
     <h1>${opts.mode === "new" ? "New data source" : "Edit data source"}</h1>
     ${errBox}
-    ${rescrapeBlock}
     <form class="editor" method="POST" action="${esc(action)}">
       <div class="form-section">
         <label for="ds_name">name</label>

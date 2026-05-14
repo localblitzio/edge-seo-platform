@@ -85,6 +85,15 @@ export interface SiteDataSourceRow {
   /** JSON of scrape params, or null. */
   source_config: string | null;
   llm_enrichment_status: "none" | "pending" | "complete" | "error";
+  /** Async scrape state (Phase B.2). `none` for CSV/inline sources. */
+  scrape_status: "none" | "running" | "done" | "error";
+  scrape_progress_total: number;
+  scrape_progress_done: number;
+  /** ISO timestamp; null means never written yet. */
+  scrape_progress_updated_at: string | null;
+  /** JSON `Array<{location, rows_returned, error}>` accumulated as the job runs. */
+  scrape_per_location: string;
+  scrape_error: string | null;
   created_at: string;
   updated_at: string;
 }

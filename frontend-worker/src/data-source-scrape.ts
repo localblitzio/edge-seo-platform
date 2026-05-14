@@ -2,22 +2,28 @@
  * Phase B — auto-populate a `site_data_sources` row by scraping
  * DataForSEO Google Maps for a (keyword × locations) cross-product.
  *
- * Flow:
- *   1. Operator hits /app/data-sources/new-scrape with keyword +
- *      locations (one per line) + max-per-location.
- *   2. We fetch the Maps SERP for each (keyword, location) in
- *      sequence and flatten into a single `rows` array.
- *   3. Preview page shows the rows; operator picks a name + confirms.
- *   4. Stored as a `dataforseo_business_listings` data source with
- *      `source_config` preserving the scrape params for re-scrape.
+ * v2 (async): scrapes can be long (25 locations × ~3s ≈ 75s). v1 ran
+ * the whole batch inline in the POST handler, which blocked the
+ * operator's browser and lost the work if they navigated away. v2
+ * splits the flow so:
  *
- * Re-scrape replaces `rows` + `columns` in place. The data source's
- * existing `id` and any downstream `generated_pages` references stay
- * intact, so the operator can re-render templates against fresh data.
+ *   1. POST /new-scrape/start validates + creates the data source row
+ *      with `scrape_status='running'`, empty `rows`, and a known
+ *      `scrape_progress_total` (= location count). Redirects
+ *      immediately to the data source detail page.
  *
- * Cost: every (keyword × location) costs one DataForSEO task
- * (~$0.003 at current pricing). We surface the call count in the
- * preview so the operator can decide before confirming.
+ *   2. `ctx.waitUntil(runScrapeJob(...))` runs the actual scrape after
+ *      the response is sent. After each location it updates
+ *      `scrape_progress_done`, appends rows, and bumps
+ *      `scrape_progress_updated_at` as a heartbeat.
+ *
+ *   3. Detail page meta-refreshes every 2 seconds while
+ *      `scrape_status='running'` and renders a progress bar. Operator
+ *      can navigate away and come back — state survives in D1.
+ *
+ *   4. On completion the row is set to `done` (or `error` with a
+ *      message). Heartbeat older than 2 minutes while status='running'
+ *      is treated as "stuck" — UI offers a retry.
  */
 
 import type { AppEnv, FlashMessage } from "./app.js";
@@ -36,6 +42,8 @@ import { type SiteDataSourceRow, checkCsrf, flashRedirect } from "./site-templat
 const MAX_LOCATIONS_PER_SCRAPE = 25;
 const MAX_KEYWORD_LENGTH = 200;
 const MAX_LOCATION_LENGTH = 200;
+/** Older than this while status=running ⇒ treat as stuck. */
+export const STUCK_HEARTBEAT_MS = 2 * 60 * 1000;
 
 /* ─── Scrape config ─── */
 
@@ -132,87 +140,6 @@ export function validateScrapeForm(
   };
 }
 
-/* ─── Scrape execution ─── */
-
-export interface ScrapeResult {
-  rows: BusinessListingRow[];
-  /** Per-location status — surfaced in preview so partial failures are visible. */
-  perLocation: Array<{
-    location: string;
-    rows_returned: number;
-    error: string | null;
-  }>;
-  total_tasks: number;
-}
-
-/**
- * Run the scrape sequentially. Sequential not parallel so:
- *   - partial failures don't waste budget (we can abort on auth error)
- *   - operators see progress when we add streaming later
- *   - we stay under DataForSEO rate limits without juggling semaphores
- *
- * On a fatal credentials error we abort the whole scrape and surface
- * the message. On a per-location API error we record it and move on.
- */
-export async function runScrape(env: AppEnv, config: ScrapeConfig): Promise<ScrapeResult> {
-  const allRows: BusinessListingRow[] = [];
-  const perLocation: ScrapeResult["perLocation"] = [];
-  for (const location of config.locations) {
-    try {
-      const rows = await fetchBusinessListings(env, {
-        keyword: config.keyword,
-        location_name: location,
-        language_code: config.language_code,
-        depth: config.depth,
-      });
-      allRows.push(...rows);
-      perLocation.push({ location, rows_returned: rows.length, error: null });
-    } catch (e) {
-      if (e instanceof DataForSeoConfigError) {
-        // Credentials / input issue — re-throw so the caller bails out.
-        throw e;
-      }
-      const msg =
-        e instanceof DataForSeoApiError
-          ? `HTTP ${e.statusCode}: ${e.message}`
-          : e instanceof Error
-            ? e.message
-            : String(e);
-      perLocation.push({ location, rows_returned: 0, error: msg });
-    }
-  }
-  return { rows: allRows, perLocation, total_tasks: config.locations.length };
-}
-
-/* ─── Persist + re-scrape ─── */
-
-/**
- * Persist a scrape result as a new `site_data_sources` row. Stores the
- * scrape config in `source_config` so we can re-run the same query
- * later from the edit page.
- */
-export async function persistScrapeResult(
-  env: AppEnv,
-  user: User,
-  name: string,
-  config: ScrapeConfig,
-  result: ScrapeResult,
-): Promise<number> {
-  const columns = JSON.stringify(BUSINESS_LISTING_COLUMNS);
-  const rows = JSON.stringify(result.rows);
-  const sourceConfig = JSON.stringify(config);
-  const r = await env.CONFIG_DB.prepare(
-    `INSERT INTO site_data_sources
-       (owner_id, name, source_kind, columns, rows, source_config)
-     VALUES (?, ?, 'dataforseo_business_listings', ?, ?, ?)
-     RETURNING id`,
-  )
-    .bind(user.id, name, columns, rows, sourceConfig)
-    .first<{ id: number }>();
-  if (!r) throw new Error("Insert returned no row");
-  return r.id;
-}
-
 export function parseStoredConfig(json: string | null): ScrapeConfig | null {
   if (!json) return null;
   try {
@@ -230,6 +157,183 @@ export function parseStoredConfig(json: string | null): ScrapeConfig | null {
   }
 }
 
+/* ─── Async job execution ─── */
+
+export interface PerLocationStatus {
+  location: string;
+  rows_returned: number;
+  error: string | null;
+}
+
+/**
+ * Run a scrape job against an EXISTING data source row. Updates the row
+ * after each location (rows, progress, heartbeat). Sets terminal status
+ * (`done` or `error`) on exit.
+ *
+ * This is meant to be invoked via `ctx.waitUntil(runScrapeJob(...))` so
+ * the operator's POST returns immediately. The function MUST NOT throw
+ * — any errors are written into `scrape_error` + `scrape_status='error'`.
+ */
+export async function runScrapeJob(
+  env: AppEnv,
+  dataSourceId: number,
+  config: ScrapeConfig,
+): Promise<void> {
+  const allRows: BusinessListingRow[] = [];
+  const perLocation: PerLocationStatus[] = [];
+  try {
+    for (let i = 0; i < config.locations.length; i++) {
+      const location = config.locations[i];
+      if (!location) continue;
+      try {
+        const rows = await fetchBusinessListings(env, {
+          keyword: config.keyword,
+          location_name: location,
+          language_code: config.language_code,
+          depth: config.depth,
+        });
+        allRows.push(...rows);
+        perLocation.push({ location, rows_returned: rows.length, error: null });
+      } catch (e) {
+        if (e instanceof DataForSeoConfigError) {
+          // Credentials / fatal input — abort the whole job.
+          await markJobError(env, dataSourceId, e.message);
+          return;
+        }
+        const msg =
+          e instanceof DataForSeoApiError
+            ? `HTTP ${e.statusCode}: ${e.message}`
+            : e instanceof Error
+              ? e.message
+              : String(e);
+        perLocation.push({ location, rows_returned: 0, error: msg });
+      }
+      // Persist progress after every location so the UI can show the
+      // operator how far we've gotten — and so a worker death after
+      // this point preserves the partial result.
+      await env.CONFIG_DB.prepare(
+        `UPDATE site_data_sources
+           SET rows = ?,
+               scrape_progress_done = ?,
+               scrape_per_location = ?,
+               scrape_progress_updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+               updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+      )
+        .bind(JSON.stringify(allRows), i + 1, JSON.stringify(perLocation), dataSourceId)
+        .run();
+    }
+    // Final flip to `done` happens in a separate statement so
+    // intermediate updates don't accidentally mark the job complete
+    // mid-loop.
+    await env.CONFIG_DB.prepare(
+      `UPDATE site_data_sources
+         SET scrape_status = 'done',
+             scrape_progress_updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+             updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`,
+    )
+      .bind(dataSourceId)
+      .run();
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    await markJobError(env, dataSourceId, msg);
+  }
+}
+
+async function markJobError(env: AppEnv, dataSourceId: number, message: string): Promise<void> {
+  try {
+    await env.CONFIG_DB.prepare(
+      `UPDATE site_data_sources
+         SET scrape_status = 'error',
+             scrape_error = ?,
+             scrape_progress_updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+             updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`,
+    )
+      .bind(message, dataSourceId)
+      .run();
+  } catch {
+    // Best-effort — the operator will see "stuck running" via the
+    // heartbeat-stale UI path if even the error-write fails.
+  }
+}
+
+/**
+ * Create the data source row + queue the background scrape job.
+ * Returns the new id so the route handler can redirect to the detail
+ * page. Throws on unique-name conflict so the caller can surface a
+ * friendly error.
+ */
+export async function startScrapeJob(
+  env: AppEnv,
+  user: User,
+  name: string,
+  config: ScrapeConfig,
+): Promise<number> {
+  const r = await env.CONFIG_DB.prepare(
+    `INSERT INTO site_data_sources
+       (owner_id, name, source_kind, columns, rows, source_config,
+        scrape_status, scrape_progress_total, scrape_progress_done,
+        scrape_progress_updated_at, scrape_per_location)
+     VALUES (?, ?, 'dataforseo_business_listings', ?, '[]', ?,
+             'running', ?, 0, strftime('%Y-%m-%dT%H:%M:%SZ','now'), '[]')
+     RETURNING id`,
+  )
+    .bind(
+      user.id,
+      name,
+      JSON.stringify(BUSINESS_LISTING_COLUMNS),
+      JSON.stringify(config),
+      config.locations.length,
+    )
+    .first<{ id: number }>();
+  if (!r) throw new Error("Insert returned no row");
+  return r.id;
+}
+
+/**
+ * Reset an existing data source for re-scrape: zero progress, switch
+ * back to `running`, then return so the caller can `ctx.waitUntil` the
+ * job. Used for both re-scrape and stuck-job retry.
+ */
+export async function resetForRescrape(
+  env: AppEnv,
+  dataSourceId: number,
+  config: ScrapeConfig,
+): Promise<void> {
+  await env.CONFIG_DB.prepare(
+    `UPDATE site_data_sources
+       SET scrape_status = 'running',
+           scrape_progress_total = ?,
+           scrape_progress_done = 0,
+           scrape_progress_updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+           scrape_per_location = '[]',
+           scrape_error = NULL,
+           rows = '[]',
+           updated_at = CURRENT_TIMESTAMP
+     WHERE id = ?`,
+  )
+    .bind(config.locations.length, dataSourceId)
+    .run();
+}
+
+/**
+ * Whether a row with `scrape_status='running'` has gone silent past
+ * the stuck threshold. Pure — exercised by unit tests.
+ */
+export function isStuck(
+  status: string,
+  progressUpdatedAt: string | null,
+  nowMs: number = Date.now(),
+): boolean {
+  if (status !== "running") return false;
+  if (!progressUpdatedAt) return false;
+  const t = Date.parse(progressUpdatedAt);
+  if (!Number.isFinite(t)) return false;
+  return nowMs - t > STUCK_HEARTBEAT_MS;
+}
+
 /* ─── UI ─── */
 
 export function renderScrapeForm(opts: {
@@ -242,9 +346,9 @@ export function renderScrapeForm(opts: {
   return `<div class="tmpl-page">
     <div class="crumbs"><a href="/app/data-sources">← Data sources</a></div>
     <h1>Scrape Google Maps → data source</h1>
-    <p class="subtitle">Searches Google Maps for <code>keyword</code> in each location, then flattens the businesses into a data source. One DataForSEO task per location (≈ \$0.003 each).</p>
+    <p class="subtitle">Each location is one DataForSEO task (≈ \$0.003). The scrape runs in the background — you can navigate away and come back to check progress.</p>
     ${errBox}
-    <form class="editor" method="POST" action="/app/data-sources/new-scrape/preview">
+    <form class="editor" method="POST" action="/app/data-sources/new-scrape/start">
       <div class="form-section">
         <label for="sc_name">data source name</label>
         <input id="sc_name" name="name" type="text" required value="${esc(opts.prefill.name)}" placeholder="San Diego pool builders — Maps scrape">
@@ -267,92 +371,158 @@ export function renderScrapeForm(opts: {
         <input id="sc_lang" name="language_code" type="text" required value="${esc(opts.prefill.language_code)}" style="width:6rem" maxlength="2">
       </div>
       <div class="form-actions">
-        <button class="btn btn-primary" type="submit">Run scrape →</button>
+        <button class="btn btn-primary" type="submit">Start scrape →</button>
         <a class="btn" href="/app/data-sources">Cancel</a>
       </div>
     </form>
   </div>`;
 }
 
-export function renderScrapePreview(opts: {
-  name: string;
-  config: ScrapeConfig;
-  result: ScrapeResult;
+const PROGRESS_CSS = `
+.scrape-progress{background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius);padding:1rem 1.25rem;margin-bottom:1.25rem}
+.scrape-progress .bar{position:relative;height:.55rem;background:var(--bg-code);border-radius:9999px;overflow:hidden;margin:.5rem 0 .75rem}
+.scrape-progress .bar .fill{position:absolute;inset:0 auto 0 0;background:linear-gradient(90deg,var(--accent),var(--accent-hover));border-radius:9999px;transition:width .4s ease}
+.scrape-progress .pct{font-variant-numeric:tabular-nums;color:var(--fg-muted);font-size:.85rem;margin-left:.4rem}
+.scrape-progress .running-pulse{display:inline-block;width:.5rem;height:.5rem;background:var(--accent);border-radius:50%;animation:pulse 1.2s infinite;vertical-align:middle;margin-right:.4rem}
+@keyframes pulse{0%,100%{opacity:.4}50%{opacity:1}}
+.scrape-progress .loc-list{margin-top:.85rem;display:grid;gap:.25rem;font-family:var(--mono);font-size:.78rem}
+.scrape-progress .loc-list .loc{display:flex;align-items:center;justify-content:space-between;padding:.3rem .55rem;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm)}
+.scrape-progress .loc-list .loc.pending{opacity:.5}
+.scrape-progress .loc-list .loc-err{color:var(--red)}
+.scrape-progress .scrape-stuck{background:var(--amber-bg);color:var(--amber);border-color:color-mix(in srgb,var(--amber) 30%,transparent)}
+`;
+
+/**
+ * Render the live scrape-progress block shown on a Maps-scraped data
+ * source page while `scrape_status='running'` (or terminal states).
+ * Called inside the data source edit page renderer.
+ */
+export function renderScrapeProgress(opts: {
+  ds: SiteDataSourceRow;
+  stuck: boolean;
 }): string {
-  const perLoc = opts.result.perLocation
-    .map((p) => {
-      const errChip = p.error
-        ? `<span class="result-pill result-error" title="${esc(p.error)}">error</span>`
-        : `<span class="result-pill result-created">${p.rows_returned}</span>`;
-      return `<tr>
-        <td class="mono" style="font-size:.85rem">${esc(p.location)}</td>
-        <td>${errChip}</td>
-        <td style="font-size:.8rem;color:var(--fg-muted)">${esc(p.error ?? "")}</td>
-      </tr>`;
+  const { ds, stuck } = opts;
+  const perLoc = parsePerLocation(ds.scrape_per_location);
+  const total = Math.max(1, ds.scrape_progress_total);
+  const done = ds.scrape_progress_done;
+  const pct = Math.min(100, Math.round((done / total) * 100));
+  const config = parseStoredConfig(ds.source_config);
+  const locationList = config?.locations ?? [];
+
+  const statusChip = (() => {
+    if (ds.scrape_status === "done") {
+      return `<span class="result-pill result-created">done</span>`;
+    }
+    if (ds.scrape_status === "error") {
+      return `<span class="result-pill result-error">error</span>`;
+    }
+    if (stuck) {
+      return `<span class="result-pill result-skipped">stuck</span>`;
+    }
+    if (ds.scrape_status === "running") {
+      return `<span class="running-pulse"></span><strong>scraping…</strong>`;
+    }
+    return "";
+  })();
+
+  const locRows = locationList
+    .map((loc, i) => {
+      const status = perLoc[i];
+      if (status) {
+        if (status.error) {
+          return `<div class="loc loc-err"><span>${esc(loc)}</span><span title="${esc(status.error)}">error</span></div>`;
+        }
+        return `<div class="loc"><span>${esc(loc)}</span><span>${status.rows_returned} rows</span></div>`;
+      }
+      return `<div class="loc pending"><span>${esc(loc)}</span><span>pending</span></div>`;
     })
     .join("");
-  const tbody = opts.result.rows
-    .slice(0, 100)
-    .map(
-      (r) => `<tr>
-      <td class="num">${esc(r.position)}</td>
-      <td>${esc(r.title)}</td>
-      <td style="font-size:.8rem">${esc(r.address)}</td>
-      <td>${esc(r.phone)}</td>
-      <td>${esc(r.rating)} ${r.rating_count ? `<span style="color:var(--fg-muted);font-size:.78rem">(${esc(r.rating_count)})</span>` : ""}</td>
-      <td style="font-size:.78rem;color:var(--fg-muted)">${esc(r.website)}</td>
-    </tr>`,
-    )
-    .join("");
-  const more =
-    opts.result.rows.length > 100
-      ? `<p style="color:var(--fg-muted);font-size:.85rem">… and ${opts.result.rows.length - 100} more rows (full set saves on confirm).</p>`
-      : "";
 
-  const configJson = JSON.stringify(opts.config);
-  return `<div class="tmpl-page">
-    <div class="crumbs"><a href="/app/data-sources/new-scrape">← Scrape config</a></div>
-    <h1>Preview — ${esc(opts.name)}</h1>
-    <p class="subtitle">Keyword: <code>${esc(opts.config.keyword)}</code> · ${opts.result.total_tasks} task${opts.result.total_tasks === 1 ? "" : "s"} · <strong>${opts.result.rows.length}</strong> business${opts.result.rows.length === 1 ? "" : "es"} returned</p>
-    <h3 style="margin-top:1.25rem">Per-location summary</h3>
-    <table class="data">
-      <thead><tr><th>Location</th><th>Rows</th><th>Error</th></tr></thead>
-      <tbody>${perLoc}</tbody>
-    </table>
-    <h3 style="margin-top:1.25rem">Sample rows ${opts.result.rows.length > 100 ? "(first 100)" : ""}</h3>
-    <table class="data">
-      <thead><tr><th class="num">#</th><th>Title</th><th>Address</th><th>Phone</th><th>Rating</th><th>Website</th></tr></thead>
-      <tbody>${tbody}</tbody>
-    </table>
-    ${more}
-    <form method="POST" action="/app/data-sources/new-scrape/confirm" style="margin-top:1.25rem">
-      <input type="hidden" name="name" value="${esc(opts.name)}">
-      <input type="hidden" name="config" value='${esc(configJson)}'>
-      <input type="hidden" name="rows_json" value='${esc(JSON.stringify(opts.result.rows))}'>
-      <div class="form-actions">
-        <button class="btn btn-primary" type="submit"${opts.result.rows.length === 0 ? " disabled" : ""}>Save as data source</button>
-        <a class="btn" href="/app/data-sources/new-scrape">← Back</a>
+  const errorBlock = ds.scrape_error ? `<div class="error-box">${esc(ds.scrape_error)}</div>` : "";
+
+  const stuckBlock = stuck
+    ? `<form method="POST" action="/app/data-sources/${ds.id}/rescrape" style="margin-top:.5rem">
+        <div class="scrape-stuck" style="border:1px solid;border-radius:var(--radius);padding:.65rem .9rem;display:flex;align-items:center;justify-content:space-between;gap:.8rem">
+          <div>Heartbeat stale (no update for &gt; 2 min). The worker likely died — retry to start fresh.</div>
+          <button class="btn btn-primary" type="submit">Retry →</button>
+        </div>
+      </form>`
+    : "";
+
+  return `<style>${PROGRESS_CSS}</style><div class="scrape-progress">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:1rem">
+      <div>
+        <strong>Scrape progress</strong> ${statusChip}
+        <div style="color:var(--fg-muted);font-size:.85rem">${done} / ${ds.scrape_progress_total} location${ds.scrape_progress_total === 1 ? "" : "s"} · ${countRows(ds.rows)} business${countRows(ds.rows) === 1 ? "" : "es"} so far</div>
       </div>
-    </form>
+      ${
+        ds.scrape_status === "done" || ds.scrape_status === "error"
+          ? `<form method="POST" action="/app/data-sources/${ds.id}/rescrape" style="margin:0"><button class="btn" type="submit">Re-scrape →</button></form>`
+          : ""
+      }
+    </div>
+    <div class="bar"><div class="fill" style="width:${pct}%"></div></div>
+    <div class="pct">${pct}%</div>
+    ${errorBlock}
+    ${stuckBlock}
+    <div class="loc-list">${locRows}</div>
   </div>`;
+}
+
+/** Refresh meta tag — emitted only while scrape is live. */
+export function scrapeAutoRefreshHeader(ds: SiteDataSourceRow, stuck: boolean): string {
+  if (ds.scrape_status === "running" && !stuck) {
+    return `<meta http-equiv="refresh" content="2">`;
+  }
+  return "";
+}
+
+function parsePerLocation(json: string): PerLocationStatus[] {
+  try {
+    const parsed = JSON.parse(json);
+    return Array.isArray(parsed) ? (parsed as PerLocationStatus[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function countRows(json: string): number {
+  try {
+    const parsed = JSON.parse(json);
+    return Array.isArray(parsed) ? parsed.length : 0;
+  } catch {
+    return 0;
+  }
 }
 
 /* ─── POST handlers ─── */
 
-export async function handleScrapePreviewPost(
+/**
+ * Validate the scrape form, create the data source row in `running`
+ * state, and kick off the background job. Returns either a redirect
+ * Response (success or CSRF) or rerender data.
+ *
+ * The caller (route handler in index.ts) is responsible for invoking
+ * `ctx.waitUntil(runScrapeJob(...))` after this returns success —
+ * we can't call ctx from here since handlers don't get the
+ * ExecutionContext.
+ */
+export interface StartScrapeOutcome {
+  redirect?: Response;
+  errors?: string[];
+  prefill?: ScrapeFormPrefill;
+  /** Set on success — caller schedules the job. */
+  job?: { dataSourceId: number; config: ScrapeConfig };
+}
+
+export async function handleScrapeStartPost(
   request: Request,
   env: AppEnv,
   url: URL,
-  _user: User,
-): Promise<
-  | { response: Response }
-  | {
-      preview: { name: string; config: ScrapeConfig; result: ScrapeResult };
-    }
-  | { errors: string[]; prefill: ScrapeFormPrefill }
-> {
+  user: User,
+): Promise<StartScrapeOutcome> {
   const csrf = checkCsrf(request, url);
-  if (csrf) return { response: csrf };
+  if (csrf) return { redirect: csrf };
   const form = await request.formData();
   const raw: Record<string, string> = {};
   for (const [k, v] of form.entries()) {
@@ -361,13 +531,17 @@ export async function handleScrapePreviewPost(
   const validated = validateScrapeForm(raw);
   if (!validated.ok) return { errors: validated.errors, prefill: validated.prefill };
 
-  let result: ScrapeResult;
+  let dataSourceId: number;
   try {
-    result = await runScrape(env, validated.config);
+    dataSourceId = await startScrapeJob(env, user, validated.name, validated.config);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
+    const friendly =
+      msg.includes("UNIQUE") && msg.includes("name")
+        ? `Data source named "${validated.name}" already exists.`
+        : `DB error: ${msg}`;
     return {
-      errors: [msg],
+      errors: [friendly],
       prefill: {
         name: validated.name,
         keyword: validated.config.keyword,
@@ -377,52 +551,22 @@ export async function handleScrapePreviewPost(
       },
     };
   }
-  return { preview: { name: validated.name, config: validated.config, result } };
+  return {
+    redirect: flashRedirect(`/app/data-sources/${dataSourceId}/edit`, {
+      text: `Scrape started — ${validated.config.locations.length} task${validated.config.locations.length === 1 ? "" : "s"} queued.`,
+      kind: "ok",
+    } satisfies FlashMessage),
+    job: { dataSourceId, config: validated.config },
+  };
 }
 
-export async function handleScrapeConfirmPost(
-  request: Request,
-  env: AppEnv,
-  url: URL,
-  user: User,
-): Promise<Response> {
-  const csrf = checkCsrf(request, url);
-  if (csrf) return csrf;
-  const form = await request.formData();
-  const name = String(form.get("name") ?? "").trim();
-  const configRaw = String(form.get("config") ?? "");
-  const rowsRaw = String(form.get("rows_json") ?? "");
-  if (!name || !configRaw || !rowsRaw) {
-    return flashRedirect("/app/data-sources/new-scrape", {
-      text: "Missing required fields — start over.",
-      kind: "err",
-    });
-  }
-  let config: ScrapeConfig;
-  let rows: BusinessListingRow[];
-  try {
-    config = JSON.parse(configRaw) as ScrapeConfig;
-    rows = JSON.parse(rowsRaw) as BusinessListingRow[];
-  } catch {
-    return flashRedirect("/app/data-sources/new-scrape", {
-      text: "Could not parse hidden scrape payload — retry.",
-      kind: "err",
-    });
-  }
-  try {
-    await persistScrapeResult(env, user, name, config, { rows, perLocation: [], total_tasks: 0 });
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    const friendly =
-      msg.includes("UNIQUE") && msg.includes("name")
-        ? `Data source named "${name}" already exists.`
-        : `DB error: ${msg}`;
-    return flashRedirect("/app/data-sources/new-scrape", { text: friendly, kind: "err" });
-  }
-  return flashRedirect("/app/data-sources", {
-    text: `Saved "${name}" (${rows.length} rows).`,
-    kind: "ok",
-  } satisfies FlashMessage);
+/**
+ * Re-scrape an existing data source — resets progress + returns the
+ * config so the route handler can schedule a new background job.
+ */
+export interface RescrapeOutcome {
+  redirect?: Response;
+  job?: { dataSourceId: number; config: ScrapeConfig };
 }
 
 export async function handleRescrapePost(
@@ -431,38 +575,32 @@ export async function handleRescrapePost(
   url: URL,
   _user: User,
   ds: SiteDataSourceRow,
-): Promise<Response> {
+): Promise<RescrapeOutcome> {
   const csrf = checkCsrf(request, url);
-  if (csrf) return csrf;
+  if (csrf) return { redirect: csrf };
   if (ds.source_kind !== "dataforseo_business_listings") {
-    return flashRedirect(`/app/data-sources/${ds.id}/edit`, {
-      text: "Re-scrape only works on Maps-scraped data sources.",
-      kind: "err",
-    });
+    return {
+      redirect: flashRedirect(`/app/data-sources/${ds.id}/edit`, {
+        text: "Re-scrape only works on Maps-scraped data sources.",
+        kind: "err",
+      }),
+    };
   }
   const config = parseStoredConfig(ds.source_config);
   if (!config) {
-    return flashRedirect(`/app/data-sources/${ds.id}/edit`, {
-      text: "No scrape config stored on this data source.",
-      kind: "err",
-    });
+    return {
+      redirect: flashRedirect(`/app/data-sources/${ds.id}/edit`, {
+        text: "No scrape config stored on this data source.",
+        kind: "err",
+      }),
+    };
   }
-  let result: ScrapeResult;
-  try {
-    result = await runScrape(env, config);
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    return flashRedirect(`/app/data-sources/${ds.id}/edit`, { text: msg, kind: "err" });
-  }
-  const columns = JSON.stringify(BUSINESS_LISTING_COLUMNS);
-  const rows = JSON.stringify(result.rows);
-  await env.CONFIG_DB.prepare(
-    "UPDATE site_data_sources SET columns=?, rows=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
-  )
-    .bind(columns, rows, ds.id)
-    .run();
-  return flashRedirect(`/app/data-sources/${ds.id}/edit`, {
-    text: `Re-scraped (${result.rows.length} rows).`,
-    kind: "ok",
-  });
+  await resetForRescrape(env, ds.id, config);
+  return {
+    redirect: flashRedirect(`/app/data-sources/${ds.id}/edit`, {
+      text: "Re-scrape started.",
+      kind: "ok",
+    }),
+    job: { dataSourceId: ds.id, config },
+  };
 }

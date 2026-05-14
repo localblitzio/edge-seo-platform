@@ -111,10 +111,12 @@ import {
 import {
   defaultScrapeFormPrefill,
   handleRescrapePost,
-  handleScrapeConfirmPost,
-  handleScrapePreviewPost,
+  handleScrapeStartPost,
+  isStuck,
   renderScrapeForm,
-  renderScrapePreview,
+  renderScrapeProgress,
+  runScrapeJob,
+  scrapeAutoRefreshHeader,
 } from "./data-source-scrape.js";
 import { type EmailBinding, resetPasswordMessage, sendEmail } from "./email.js";
 import {
@@ -401,8 +403,10 @@ function htmlPage(opts: {
   body: string;
   user: User | null;
   flash?: FlashMessage | null;
+  /** Extra raw HTML to inject into <head> — e.g. an auto-refresh meta tag. */
+  headExtra?: string;
 }): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(opts.title)}</title><link rel="icon" type="image/png" href="${FAVICON_DATA_URL}">${THEME_INLINE_SCRIPT}<style>${STYLE}</style></head><body>${topbar(opts.user)}<main>${flashBanner(opts.flash ?? null)}${opts.body}</main><footer class="footer">© ${new Date().getFullYear()} Edge SEO Platform</footer></body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(opts.title)}</title><link rel="icon" type="image/png" href="${FAVICON_DATA_URL}">${opts.headExtra ?? ""}${THEME_INLINE_SCRIPT}<style>${STYLE}</style></head><body>${topbar(opts.user)}<main>${flashBanner(opts.flash ?? null)}${opts.body}</main><footer class="footer">© ${new Date().getFullYear()} Edge SEO Platform</footer></body></html>`;
 }
 
 const htmlHeadersBase: Record<string, string> = {
@@ -909,7 +913,7 @@ function redirectToLogin(url: URL): Response {
 /* ─── Router ─── */
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
     const method = request.method.toUpperCase();
@@ -3324,35 +3328,26 @@ export default {
       );
     }
 
-    if (path === "/app/data-sources/new-scrape/preview" && method === "POST") {
+    if (path === "/app/data-sources/new-scrape/start" && method === "POST") {
       if (!user) return redirectToLogin(url);
-      const outcome = await handleScrapePreviewPost(request, env, url, user);
-      if ("response" in outcome) return outcome.response;
-      const clients = await loadVisibleClients(env, user);
-      if ("errors" in outcome) {
-        return htmlResponse(
-          htmlPage({
-            title: "Scrape Google Maps — Edge SEO Platform",
-            body: appLayout({
-              title: "Scrape Google Maps",
-              content: renderScrapeForm({ prefill: outcome.prefill, errors: outcome.errors }),
-              activeNav: "data-sources",
-              user,
-              flash,
-              clients,
-            }),
-            user,
-            flash: null,
-          }),
-          { status: 400 },
-        );
+      const outcome = await handleScrapeStartPost(request, env, url, user);
+      if (outcome.redirect && outcome.job) {
+        // Kick off the background scrape — we redirect immediately
+        // and the job continues for the worker invocation lifetime.
+        ctx.waitUntil(runScrapeJob(env, outcome.job.dataSourceId, outcome.job.config));
+        return outcome.redirect;
       }
+      if (outcome.redirect) return outcome.redirect;
+      const clients = await loadVisibleClients(env, user);
       return htmlResponse(
         htmlPage({
-          title: `Preview — ${outcome.preview.name}`,
+          title: "Scrape Google Maps — Edge SEO Platform",
           body: appLayout({
-            title: `Preview — ${outcome.preview.name}`,
-            content: renderScrapePreview(outcome.preview),
+            title: "Scrape Google Maps",
+            content: renderScrapeForm({
+              prefill: outcome.prefill ?? defaultScrapeFormPrefill(),
+              errors: outcome.errors ?? ["Unknown error"],
+            }),
             activeNav: "data-sources",
             user,
             flash,
@@ -3361,12 +3356,8 @@ export default {
           user,
           flash: null,
         }),
+        { status: 400 },
       );
-    }
-
-    if (path === "/app/data-sources/new-scrape/confirm" && method === "POST") {
-      if (!user) return redirectToLogin(url);
-      return handleScrapeConfirmPost(request, env, url, user);
     }
 
     if (path.startsWith("/app/data-sources/")) {
@@ -3384,16 +3375,25 @@ export default {
       const clients = await loadVisibleClients(env, user);
 
       if (sub === "rescrape" && method === "POST") {
-        return handleRescrapePost(request, env, url, user, ds);
+        const outcome = await handleRescrapePost(request, env, url, user, ds);
+        if (outcome.job) {
+          ctx.waitUntil(runScrapeJob(env, outcome.job.dataSourceId, outcome.job.config));
+        }
+        if (outcome.redirect) return outcome.redirect;
+        return new Response("Internal error", { status: 500 });
       }
 
       if (sub === "edit" && method === "GET") {
+        const stuck = isStuck(ds.scrape_status, ds.scrape_progress_updated_at);
+        const isScraped = ds.source_kind === "dataforseo_business_listings";
+        const progressBlock = isScraped ? renderScrapeProgress({ ds, stuck }) : "";
+        const headExtra = isScraped ? scrapeAutoRefreshHeader(ds, stuck) : "";
         return htmlResponse(
           htmlPage({
             title: `Edit ${ds.name} — Edge SEO Platform`,
             body: appLayout({
               title: `Edit ${ds.name}`,
-              content: renderDataSourceForm({
+              content: `${progressBlock}${renderDataSourceForm({
                 prefill: {
                   id: ds.id,
                   name: ds.name,
@@ -3403,7 +3403,7 @@ export default {
                 },
                 errors: [],
                 mode: "edit",
-              }),
+              })}`,
               activeNav: "data-sources",
               user,
               flash,
@@ -3411,6 +3411,7 @@ export default {
             }),
             user,
             flash: null,
+            headExtra,
           }),
         );
       }

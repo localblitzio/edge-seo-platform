@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  STUCK_HEARTBEAT_MS,
+  isStuck,
   parseStoredConfig,
   validateScrapeForm,
 } from "../../../frontend-worker/src/data-source-scrape.js";
@@ -206,5 +208,29 @@ describe("parseStoredConfig", () => {
     expect(parseStoredConfig(JSON.stringify({}))).toBeNull();
     expect(parseStoredConfig(JSON.stringify({ keyword: "" }))).toBeNull();
     expect(parseStoredConfig(JSON.stringify({ keyword: "x", locations: [] }))).toBeNull();
+  });
+});
+
+describe("isStuck", () => {
+  const now = Date.UTC(2026, 4, 14, 12, 0, 0); // 2026-05-14T12:00:00Z
+
+  it("returns false for non-running statuses", () => {
+    expect(isStuck("done", "2026-05-14T11:00:00Z", now)).toBe(false);
+    expect(isStuck("error", "2026-05-14T11:00:00Z", now)).toBe(false);
+    expect(isStuck("none", null, now)).toBe(false);
+  });
+
+  it("returns false when heartbeat is fresh", () => {
+    const fresh = new Date(now - 30_000).toISOString(); // 30s ago
+    expect(isStuck("running", fresh, now)).toBe(false);
+  });
+
+  it("returns true when heartbeat is older than the stuck threshold", () => {
+    const stale = new Date(now - (STUCK_HEARTBEAT_MS + 5_000)).toISOString();
+    expect(isStuck("running", stale, now)).toBe(true);
+  });
+
+  it("returns false when heartbeat is null (job hasn't started writing yet)", () => {
+    expect(isStuck("running", null, now)).toBe(false);
   });
 });
