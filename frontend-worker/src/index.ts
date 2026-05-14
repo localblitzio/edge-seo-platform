@@ -212,6 +212,7 @@ import {
   loadVisibleTemplate,
   loadVisibleTemplates,
 } from "./site-templates.js";
+import { getTemplateStarter } from "./template-starters.js";
 
 interface Env {
   CONFIG_KV: KVNamespace;
@@ -3044,12 +3045,25 @@ export default {
     if (path === "/app/templates/new" && method === "GET") {
       if (!user) return redirectToLogin(url);
       const clients = await loadVisibleClients(env, user);
+      // ?starter=<id> pre-fills the form from a TEMPLATE_STARTERS entry.
+      // Unknown ids silently fall back to a blank form so a bad URL
+      // doesn't 404 — the operator still gets to write a template.
+      const starterId = url.searchParams.get("starter");
+      const starter = starterId ? getTemplateStarter(starterId) : null;
+      const prefill = starter
+        ? {
+            name: starter.name,
+            kind: starter.kind,
+            path_pattern: starter.path_pattern,
+            html_template: starter.html_template,
+          }
+        : {};
       return htmlResponse(
         htmlPage({
-          title: "New template — Edge SEO Platform",
+          title: starter ? `New template: ${starter.label}` : "New template — Edge SEO Platform",
           body: appLayout({
-            title: "New template",
-            content: renderTemplateForm({ prefill: {}, errors: [], mode: "new" }),
+            title: starter ? `New template: ${starter.label}` : "New template",
+            content: renderTemplateForm({ prefill, errors: [], mode: "new" }),
             activeNav: "templates",
             user,
             flash,

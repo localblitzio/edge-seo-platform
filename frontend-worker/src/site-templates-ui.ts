@@ -26,6 +26,7 @@ import {
   buildPlaceholderSchema,
   checkCsrf,
   executeGenerate,
+  extractPlaceholders,
   flashRedirect,
   loadVisibleDataSource,
   loadVisibleTemplate,
@@ -33,6 +34,7 @@ import {
   planRender,
   validateTemplateInput,
 } from "./site-templates.js";
+import { TEMPLATE_STARTERS } from "./template-starters.js";
 
 /* ─── Renderers ─── */
 
@@ -54,7 +56,27 @@ const TEMPLATES_CSS = `
 .tmpl-page .result-unchanged{background:var(--bg-sidebar);color:var(--fg-muted)}
 .tmpl-page .result-skipped{background:var(--amber-bg);color:var(--amber)}
 .tmpl-page .result-error{background:var(--red-bg);color:var(--red)}
+.tmpl-page .starter-row{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:.75rem;margin:.4rem 0 1.5rem}
+.tmpl-page .starter-card{background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius);padding:.95rem 1.05rem;text-decoration:none;color:var(--fg);transition:border-color .15s ease,transform .1s ease,box-shadow .15s ease;display:flex;flex-direction:column;gap:.35rem}
+.tmpl-page .starter-card:hover{border-color:var(--accent);box-shadow:var(--shadow-md);text-decoration:none;transform:translateY(-1px)}
+.tmpl-page .starter-card .title{font-weight:600;font-size:.95rem;color:var(--fg)}
+.tmpl-page .starter-card .desc{font-size:.82rem;color:var(--fg-muted);line-height:1.45}
+.tmpl-page .starter-card .best-with{font-size:.72rem;color:var(--accent);font-weight:600;margin-top:auto;padding-top:.25rem}
+.tmpl-page .starter-card .kind-chip{display:inline-block;font-family:var(--mono);font-size:.7rem;background:var(--accent-bg);color:var(--accent);padding:.05rem .4rem;border-radius:9999px;align-self:flex-start}
 `;
+
+function renderStarterCards(): string {
+  const cards = TEMPLATE_STARTERS.map(
+    (s) => `<a class="starter-card" href="/app/templates/new?starter=${esc(s.id)}">
+      <span class="kind-chip">${esc(s.kind)}</span>
+      <div class="title">${esc(s.label)}</div>
+      <div class="desc">${esc(s.description)}</div>
+      <div class="best-with">Best with: ${esc(s.bestWith)}</div>
+    </a>`,
+  ).join("");
+  return `<h3 style="margin:1.25rem 0 .5rem">Start from a template</h3>
+    <div class="starter-row">${cards}</div>`;
+}
 
 export function renderTemplatesList(rows: readonly SiteTemplateRow[], user: User): string {
   const ownership =
@@ -65,8 +87,9 @@ export function renderTemplatesList(rows: readonly SiteTemplateRow[], user: User
     return `<style>${TEMPLATES_CSS}</style><div class="tmpl-page">
       <h1>Templates</h1>
       <p class="subtitle">${ownership} Templates are reusable HTML with <code>{{placeholders}}</code> that get filled in from a data source to produce one page per row.</p>
-      <p style="margin-bottom:1rem"><a class="btn btn-primary" href="/app/templates/new">+ New template</a></p>
-      <div class="empty">No templates yet. Create one to start generating pages programmatically.</div>
+      ${renderStarterCards()}
+      <p style="margin-bottom:1rem"><a class="btn btn-primary" href="/app/templates/new">+ New blank template</a></p>
+      <div class="empty">No templates yet. Pick a starter above or create one from scratch.</div>
     </div>`;
   }
   const tbody = rows
@@ -83,7 +106,8 @@ export function renderTemplatesList(rows: readonly SiteTemplateRow[], user: User
   return `<style>${TEMPLATES_CSS}</style><div class="tmpl-page">
     <h1>Templates</h1>
     <p class="subtitle">${ownership}</p>
-    <p style="margin-bottom:1rem"><a class="btn btn-primary" href="/app/templates/new">+ New template</a></p>
+    ${renderStarterCards()}
+    <p style="margin:1.25rem 0 1rem"><a class="btn btn-primary" href="/app/templates/new">+ New blank template</a></p>
     <table class="data">
       <thead><tr><th>Name</th><th>Kind</th><th>Path pattern</th><th>Updated</th><th></th></tr></thead>
       <tbody>${tbody}</tbody>
@@ -294,15 +318,29 @@ export function renderGenerateForm(opts: {
 }): string {
   const errBox =
     opts.errors.length > 0 ? `<div class="error-box">${opts.errors.map(esc).join("\n")}</div>` : "";
+  // Find a data source whose columns cover every template placeholder.
+  // Most-recently-updated compatible source wins.
+  const placeholders = new Set(
+    extractPlaceholders(opts.template.html_template, "body")
+      .concat(extractPlaceholders(opts.template.path_pattern, "path"))
+      .map((p) => p.name),
+  );
+  const compatibleId = pickCompatibleDataSource(opts.dataSources, placeholders);
   const dataSourceOptions =
     opts.dataSources.length === 0
       ? `<option value="">— no data sources yet —</option>`
       : [
           `<option value="">— pick a data source —</option>`,
-          ...opts.dataSources.map(
-            (d) =>
-              `<option value="${d.id}">${esc(d.name)} (${safeParseArray<unknown>(d.rows).length} rows)</option>`,
-          ),
+          ...opts.dataSources.map((d) => {
+            const cols = new Set(safeParseArray<string>(d.columns));
+            const covers = Array.from(placeholders).every((p) => cols.has(p));
+            const rowCount = safeParseArray<unknown>(d.rows).length;
+            const label = covers
+              ? `${d.name} (${rowCount} rows) ✓ matches`
+              : `${d.name} (${rowCount} rows)`;
+            const sel = d.id === compatibleId ? " selected" : "";
+            return `<option value="${d.id}"${sel}>${esc(label)}</option>`;
+          }),
         ].join("");
   const clientOptions = [
     `<option value="">— pick a client —</option>`,
@@ -754,4 +792,27 @@ function safeParseArray<T>(s: string): T[] {
 function csvEscapeCell(s: string): string {
   if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
   return s;
+}
+
+/**
+ * Pick the most recently-updated data source whose columns cover every
+ * placeholder the template references. Returns null when nothing
+ * matches — operators still pick manually, just no preselect.
+ */
+function pickCompatibleDataSource(
+  dataSources: readonly SiteDataSourceRow[],
+  placeholders: Set<string>,
+): number | null {
+  if (placeholders.size === 0) return null;
+  const compatible = dataSources.filter((d) => {
+    const cols = new Set(safeParseArray<string>(d.columns));
+    for (const p of placeholders) {
+      if (!cols.has(p)) return false;
+    }
+    return true;
+  });
+  if (compatible.length === 0) return null;
+  // Sort by updated_at desc — freshest match wins.
+  compatible.sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1));
+  return compatible[0]?.id ?? null;
 }
