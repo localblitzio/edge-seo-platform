@@ -21,14 +21,22 @@ import type { AppEnv } from "./app.js";
 const ENDPOINT = "https://api.dataforseo.com/v3/serp/google/organic/live/advanced";
 const MAPS_ENDPOINT = "https://api.dataforseo.com/v3/serp/google/maps/live/advanced";
 // Google reviews is task-based (no synchronous "live" endpoint), so we
-// POST to task_post and then poll task_get/{id} until the task settles.
+// POST to task_post and then poll task_get/advanced/{id} until the
+// task settles. `advanced` variant returns the full review items
+// (text + author + rating + date + owner_answer); the `regular`
+// variant only returns a summary.
 const REVIEWS_TASK_POST_URL =
   "https://api.dataforseo.com/v3/business_data/google/reviews/task_post";
-const REVIEWS_TASK_GET_URL = "https://api.dataforseo.com/v3/business_data/google/reviews/task_get/";
+const REVIEWS_TASK_GET_URL =
+  "https://api.dataforseo.com/v3/business_data/google/reviews/task_get/advanced/";
 /** Max time we spend polling task_get before giving up. */
-const REVIEWS_POLL_MAX_MS = 60_000;
-/** Per-attempt waits in ms — gentle backoff. */
-const REVIEWS_POLL_WAITS = [3000, 4000, 5000, 6000, 8000, 10_000, 12_000];
+const REVIEWS_POLL_MAX_MS = 180_000;
+/** Per-attempt waits in ms — gentle backoff with a longer first wait
+ *  because DataForSEO often returns 40401 "Task Not Found" for ~30s
+ *  after task_post while their fleet propagates the new task. */
+const REVIEWS_POLL_WAITS = [15_000, 10_000, 10_000, 10_000, 12_000, 15_000, 20_000, 25_000, 30_000];
+/** Treat 40401 as "task not yet ingested" for this window after post. */
+const REVIEWS_TRANSIENT_404_WINDOW_MS = 60_000;
 
 /** Single organic result the caller can offer to the operator. */
 export interface SerpResult {
@@ -844,7 +852,15 @@ export async function fetchReviews(
     const taskState = inspectTaskState(getJson);
     if (taskState === "in_progress") continue;
     if (taskState === "error") {
+      // 40401 ("Task Not Found") right after task_post is a known
+      // DataForSEO propagation artifact — their backend takes up to
+      // ~60s to make the task visible to task_get. Keep polling
+      // during that window before treating it as terminal.
       const taskErr = firstTaskError(getJson);
+      const elapsed = Date.now() - startedAt;
+      if (taskErr && taskErr.code === 40401 && elapsed < REVIEWS_TRANSIENT_404_WINDOW_MS) {
+        continue;
+      }
       if (taskErr) throw new DataForSeoApiError(taskErr.message, taskErr.code);
       throw new DataForSeoApiError("DataForSEO task settled with an unknown error", 500);
     }
