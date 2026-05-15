@@ -197,6 +197,90 @@ export function renderTemplateForm(opts: {
   </div>`;
 }
 
+/**
+ * Live HTML preview panel shown on the template edit page. Operator
+ * picks a data source + a row index, hits "Render preview" → opens a
+ * new tab with the full rendered HTML. Same render path as the real
+ * Generate flow (cross_links included), so what they see here is
+ * faithful to what would land in R2.
+ *
+ * Renders nothing in `new` mode — the template has to be saved before
+ * we can preview against it. The form itself nudges operators toward
+ * "Create template" first.
+ */
+export function renderTemplatePreviewPanel(opts: {
+  templateId: number;
+  dataSources: readonly SiteDataSourceRow[];
+}): string {
+  if (opts.dataSources.length === 0) {
+    return `<style>${TEMPLATES_CSS}</style><div class="tmpl-page" style="margin-top:1.25rem">
+      <h3 style="margin:1.5rem 0 .35rem">Preview with sample data</h3>
+      <p class="subtitle" style="margin-bottom:.75rem">Create a data source first — then come back here to preview the rendered page before generating.</p>
+    </div>`;
+  }
+  // Build per-data-source row option arrays so the row dropdown can
+  // switch as the operator picks different sources. We embed them as
+  // a JSON blob and let inline JS rebuild the row <select>.
+  const titlesByDs: Record<string, string[]> = {};
+  for (const d of opts.dataSources) {
+    const rows = safeParseArray<Record<string, string>>(d.rows);
+    titlesByDs[String(d.id)] = rows.map(
+      (r, i) => r.title ?? r.name ?? r.city ?? r.business_name ?? `Row ${i + 1}`,
+    );
+  }
+  const dsOptions = opts.dataSources
+    .map(
+      (d) =>
+        `<option value="${d.id}">${esc(d.name)} (${safeParseArray<unknown>(d.rows).length} rows)</option>`,
+    )
+    .join("");
+  const firstDs = opts.dataSources[0];
+  const firstRows = firstDs ? safeParseArray<unknown>(firstDs.rows).length : 0;
+  const firstRowOptions = Array.from({ length: Math.min(firstRows, 100) }, (_, i) => {
+    const title = titlesByDs[String(firstDs?.id ?? "")]?.[i] ?? `Row ${i + 1}`;
+    return `<option value="${i}">${esc(`#${i + 1} — ${title}`)}</option>`;
+  }).join("");
+  return `<style>${TEMPLATES_CSS}</style><div class="tmpl-page" style="margin-top:1.25rem">
+    <h3 style="margin:1.5rem 0 .35rem">Preview with sample data</h3>
+    <p class="subtitle" style="margin-bottom:.75rem">Pick a data source + row → opens a new tab showing the exact HTML one generated page will produce.</p>
+    <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:.6rem;align-items:end;background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius);padding:.85rem 1rem">
+      <div>
+        <label for="prev_ds" style="font-weight:600;font-size:.78rem;display:block;margin-bottom:.2rem">Data source</label>
+        <select id="prev_ds" style="font:inherit;font-size:.88rem;padding:.4rem .55rem;border:1px solid var(--border-strong);border-radius:var(--radius);background:var(--bg);color:var(--fg);width:100%">${dsOptions}</select>
+      </div>
+      <div>
+        <label for="prev_row" style="font-weight:600;font-size:.78rem;display:block;margin-bottom:.2rem">Row</label>
+        <select id="prev_row" style="font:inherit;font-size:.88rem;padding:.4rem .55rem;border:1px solid var(--border-strong);border-radius:var(--radius);background:var(--bg);color:var(--fg);width:100%">${firstRowOptions}</select>
+      </div>
+      <a id="prev_btn" class="btn btn-primary" href="/app/templates/${opts.templateId}/preview?ds=${firstDs?.id ?? ""}&row=0" target="_blank" rel="noopener">Render preview →</a>
+    </div>
+    <script>
+      (function(){
+        var titles = ${JSON.stringify(titlesByDs)};
+        var dsEl = document.getElementById('prev_ds');
+        var rowEl = document.getElementById('prev_row');
+        var btn = document.getElementById('prev_btn');
+        function refreshRows(){
+          var arr = titles[dsEl.value] || [];
+          rowEl.innerHTML = '';
+          arr.slice(0, 100).forEach(function(t, i){
+            var opt = document.createElement('option');
+            opt.value = String(i);
+            opt.textContent = '#' + (i+1) + ' — ' + t;
+            rowEl.appendChild(opt);
+          });
+          refreshLink();
+        }
+        function refreshLink(){
+          btn.href = '/app/templates/${opts.templateId}/preview?ds=' + encodeURIComponent(dsEl.value) + '&row=' + encodeURIComponent(rowEl.value || '0');
+        }
+        dsEl.addEventListener('change', refreshRows);
+        rowEl.addEventListener('change', refreshLink);
+      })();
+    </script>
+  </div>`;
+}
+
 export function renderDataSourcesList(rows: readonly SiteDataSourceRow[], user: User): string {
   const ownership =
     user.role === "super_admin"
@@ -415,11 +499,23 @@ export function renderGeneratePreview(opts: {
     opts.target.mode === "pages_in_client"
       ? `<p class="subtitle">Will append <strong>${opts.plan.rows.length}</strong> <code>custom_page</code> route${opts.plan.rows.length === 1 ? "" : "s"} to client <code>${esc(opts.target.client_id ?? "")}</code>.</p>`
       : `<p class="subtitle">Will create / update <strong>${opts.plan.rows.length}</strong> single-page client${opts.plan.rows.length === 1 ? "" : "s"} under <code>${esc(opts.target.zone ?? "")}</code>.</p>`;
+  const previewBase = `/app/templates/${opts.template.id}/preview?ds=${opts.dataSource.id}`;
   const rowsHtml = opts.plan.rows
     .map(
       (r) => `<div class="preview-row">
-        <div class="path">${esc(r.generated_path)} <span style="color:var(--fg-muted);font-size:.75rem;font-weight:400">${r.html_full_length} bytes</span></div>
-        <details><summary style="font-size:.78rem;color:var(--fg-muted);cursor:pointer">Show first 1KB</summary><pre class="html-preview">${esc(r.html_preview)}</pre></details>
+        <div class="path">
+          ${esc(r.generated_path)}
+          <span style="color:var(--fg-muted);font-size:.75rem;font-weight:400">${r.html_full_length} bytes</span>
+          <a href="${previewBase}&row=${r.row_index}" target="_blank" rel="noopener" style="float:right;font-size:.78rem">Open in new tab ↗</a>
+        </div>
+        <details>
+          <summary style="font-size:.78rem;color:var(--fg-muted);cursor:pointer">▶ Full HTML preview (iframe)</summary>
+          <iframe loading="lazy" src="${previewBase}&row=${r.row_index}" style="width:100%;height:520px;border:1px solid var(--border);border-radius:var(--radius-sm);margin-top:.4rem;background:#fff"></iframe>
+        </details>
+        <details>
+          <summary style="font-size:.78rem;color:var(--fg-muted);cursor:pointer">Show first 1KB source</summary>
+          <pre class="html-preview">${esc(r.html_preview)}</pre>
+        </details>
       </div>`,
     )
     .join("");

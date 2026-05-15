@@ -396,6 +396,48 @@ export function renderPath(pattern: string, row: Record<string, string>): string
   return `/${segments.join("/")}`;
 }
 
+/**
+ * Render a single row's full HTML output as it would appear after a
+ * real Generate run — including cross_links and the has_* sentinels
+ * the templates depend on. Used by the operator preview routes so
+ * "what I see in the iframe" matches "what would land in R2" exactly
+ * (modulo R2 write side-effects).
+ *
+ * Pure — tested via integration; no DB / no network. Operators reach
+ * it via `/app/templates/:id/preview?ds=X&row=N`.
+ */
+export function renderRowPreview(
+  template: SiteTemplateRow,
+  dataSource: SiteDataSourceRow | null,
+  rowIndex: number,
+): string {
+  const rows = dataSource ? safeJsonParse<DataSourceRowsData>(dataSource.rows, []) : [];
+  const row = rows[rowIndex] ?? {};
+  // For preview we don't know the eventual subdomain — use a placeholder
+  // zone matching the staging convention so URLs in cross-links look
+  // plausible.
+  const previewZone = "preview.localsitestage.us";
+  const previewSlug = `preview-t${template.id}-r${rowIndex}`;
+  const crossLinks = buildCrossLinks(
+    rows,
+    row,
+    previewSlug,
+    template.cross_link_strategy,
+    template.cross_link_count,
+    template.path_pattern,
+    previewZone,
+    template.id,
+  );
+  const rowWithSentinels = {
+    ...row,
+    has_cross_links: crossLinks.length > 0 ? "1" : "",
+    has_reviews: typeof row.reviews_json === "string" && row.reviews_json.length > 2 ? "1" : "",
+  };
+  return renderTemplate(template.html_template, rowWithSentinels, {
+    cross_links: crossLinks,
+  });
+}
+
 /* ─── Cross-link generator (B.5) ─── */
 
 export interface CrossLink {

@@ -222,6 +222,7 @@ import {
   renderGeneratePreview,
   renderGenerateResult,
   renderTemplateForm,
+  renderTemplatePreviewPanel,
   renderTemplatesList,
 } from "./site-templates-ui.js";
 import {
@@ -229,6 +230,7 @@ import {
   loadVisibleDataSources,
   loadVisibleTemplate,
   loadVisibleTemplates,
+  renderRowPreview,
 } from "./site-templates.js";
 import { getTemplateStarter } from "./template-starters.js";
 
@@ -3204,12 +3206,16 @@ export default {
 
       // GET /app/templates/:id/edit
       if (sub === "edit" && method === "GET") {
+        // Preview panel needs the operator's visible data sources to
+        // populate its dropdowns. One small extra query per edit page
+        // — cheap.
+        const visibleDataSources = await loadVisibleDataSources(env, user);
         return htmlResponse(
           htmlPage({
             title: `Edit ${tmpl.name} — Edge SEO Platform`,
             body: appLayout({
               title: `Edit ${tmpl.name}`,
-              content: renderTemplateForm({
+              content: `${renderTemplateForm({
                 prefill: {
                   id: tmpl.id,
                   name: tmpl.name,
@@ -3221,7 +3227,10 @@ export default {
                 },
                 errors: [],
                 mode: "edit",
-              }),
+              })}${renderTemplatePreviewPanel({
+                templateId: tmpl.id,
+                dataSources: visibleDataSources,
+              })}`,
               activeNav: "templates",
               user,
               flash,
@@ -3256,6 +3265,40 @@ export default {
           }),
           { status: 400 },
         );
+      }
+
+      // GET /app/templates/:id/preview?ds=<id>&row=<n>
+      // Renders the full HTML for one row as it would appear after
+      // a real generate run. Used by the "Preview with sample data"
+      // panel on the template edit page and the iframe expand on
+      // the Generate preview page.
+      //
+      // Headers: text/html, no-store, X-Robots-Tag: noindex,nofollow.
+      // The route is auth-gated so the preview never leaks to crawlers
+      // even if someone bookmarks the URL.
+      if (sub === "preview" && method === "GET") {
+        const dsIdRaw = url.searchParams.get("ds");
+        const rowRaw = url.searchParams.get("row");
+        let dataSource: Awaited<ReturnType<typeof loadVisibleDataSource>> = null;
+        if (dsIdRaw) {
+          const dsId = Number.parseInt(dsIdRaw, 10);
+          if (Number.isFinite(dsId) && dsId > 0) {
+            dataSource = await loadVisibleDataSource(env, user, dsId);
+          }
+        }
+        const rowIndex = Number.parseInt(rowRaw ?? "0", 10);
+        const safeRow = Number.isFinite(rowIndex) && rowIndex >= 0 ? rowIndex : 0;
+        const html = renderRowPreview(tmpl, dataSource, safeRow);
+        return new Response(html, {
+          headers: {
+            "content-type": "text/html; charset=utf-8",
+            "cache-control": "no-store",
+            "x-robots-tag": "noindex, nofollow",
+            "referrer-policy": "strict-origin-when-cross-origin",
+            "content-security-policy":
+              "default-src 'self' 'unsafe-inline' data: blob: https:; frame-ancestors 'self'",
+          },
+        });
       }
 
       // GET /app/templates/:id/generate — pick data source + target
