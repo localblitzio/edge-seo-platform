@@ -13,6 +13,7 @@
 import type { AppEnv } from "./app.js";
 import { esc } from "./app.js";
 import type { User } from "./auth.js";
+import { loadDefaultTargetBusiness, targetScalars } from "./businesses.js";
 import {
   DATA_SOURCE_KINDS,
   type DataSourceKind,
@@ -125,6 +126,9 @@ export function renderTemplateForm(opts: {
     path_pattern: string;
     cross_link_strategy: string;
     cross_link_count: number | string;
+    group_by_column: string | null;
+    top_n: number | string;
+    sort_by_column: string | null;
   }>;
   errors: string[];
   mode: "new" | "edit";
@@ -137,7 +141,9 @@ export function renderTemplateForm(opts: {
     const label =
       k === "pages_in_client"
         ? "pages_in_client — append pages under an existing proxied site"
-        : "client_per_row — each row becomes its own single-page site";
+        : k === "client_per_row"
+          ? "client_per_row — each row becomes its own single-page site"
+          : "aggregate_per_group — one page per unique group value (e.g. one /pool-builders-in-<city>/ per city, listing top N businesses)";
     return `<option value="${esc(k)}"${opts.prefill.kind === k ? " selected" : ""}>${esc(label)}</option>`;
   }).join("");
   // Show live placeholder detection from the prefill (regenerated on save anyway).
@@ -175,6 +181,24 @@ export function renderTemplateForm(opts: {
         ${detected.length > 0 ? `<div class="placeholder-list">${placeholderChips}</div>` : '<div class="field-hint">No placeholders detected yet — paste HTML with <code>{{key}}</code> references.</div>'}
         <textarea id="tmpl_html" name="html_template" class="html-template" required placeholder="&lt;!doctype html&gt;\n&lt;html lang=&quot;en&quot;&gt;\n&lt;head&gt;\n  &lt;title&gt;{{service}} in {{city}} — Top Pool Builders&lt;/title&gt;\n  &lt;meta name=&quot;description&quot; content=&quot;Looking for {{service}} in {{city}}? ...&quot;&gt;\n&lt;/head&gt;\n&lt;body&gt;\n  &lt;h1&gt;Best {{service}} in {{city}}&lt;/h1&gt;\n  &lt;p&gt;{{intro}}&lt;/p&gt;\n  {{#if phone}}&lt;p&gt;Call: {{phone}}&lt;/p&gt;{{/if}}\n&lt;/body&gt;\n&lt;/html&gt;">${esc(opts.prefill.html_template ?? "")}</textarea>
         <div class="field-hint"><code>{{key}}</code> = escaped substitution. <code>{{{key}}}</code> = raw HTML (be careful). <code>{{slugify key}}</code> = slug helper. <code>{{#if key}}...{{/if}}</code> = conditional. <code>{{#each cross_links}}{{title}}{{/each}}</code> = array iteration.</div>
+      </div>
+      <div class="form-section" data-aggregate-fields style="border:1px dashed var(--border);padding:.85rem 1rem;border-radius:var(--radius);background:var(--bg-elevated)">
+        <strong style="font-size:.9rem">Aggregate mode</strong> <span style="color:var(--fg-muted);font-size:.78rem">— only used when kind = <code>aggregate_per_group</code></span>
+        <div style="display:grid;grid-template-columns:2fr 1fr 2fr;gap:.6rem;margin-top:.5rem">
+          <div>
+            <label for="tmpl_group_by" style="font-weight:600;font-size:.78rem">group_by_column</label>
+            <input id="tmpl_group_by" name="group_by_column" type="text" value="${esc(opts.prefill.group_by_column ?? "city")}" placeholder="city" style="width:100%">
+          </div>
+          <div>
+            <label for="tmpl_top_n" style="font-weight:600;font-size:.78rem">top_n</label>
+            <input id="tmpl_top_n" name="top_n" type="number" min="1" max="50" value="${esc(String(opts.prefill.top_n ?? 10))}" style="width:100%">
+          </div>
+          <div>
+            <label for="tmpl_sort_by" style="font-weight:600;font-size:.78rem">sort_by_column <span style="color:var(--fg-muted);font-weight:400">(optional)</span></label>
+            <input id="tmpl_sort_by" name="sort_by_column" type="text" value="${esc(opts.prefill.sort_by_column ?? "rating")}" placeholder="rating" style="width:100%">
+          </div>
+        </div>
+        <div class="field-hint" style="margin-top:.5rem">Generates one page per unique value of <code>group_by_column</code>. Inside the template, reference the group value as <code>{{group_value}}</code> and iterate the top-N businesses via <code>{{#each businesses}}{{title}}{{/each}}</code>. <code>sort_by_column</code> ranks numerically (or alphabetically if non-numeric) within each group.</div>
       </div>
       <div class="form-section">
         <label for="tmpl_cross_strategy">cross-link strategy</label>
@@ -447,9 +471,14 @@ export function renderGenerateForm(opts: {
   /** Available staging/prod zones for client_per_row mode. */
   zones: readonly string[];
   errors: string[];
+  /** Operator's default-target Business name, or null when unset. */
+  defaultTargetName?: string | null;
 }): string {
   const errBox =
     opts.errors.length > 0 ? `<div class="error-box">${opts.errors.map(esc).join("\n")}</div>` : "";
+  const targetBanner = opts.defaultTargetName
+    ? `<div style="background:var(--accent-soft);border:1px solid var(--accent-bg);color:var(--accent);border-radius:var(--radius);padding:.7rem 1rem;margin:0 0 1rem;font-size:.9rem"><strong>⭐ Target:</strong> <code>${esc(opts.defaultTargetName)}</code> — its fields will be injected as <code>{{target_title}}</code>, <code>{{target_phone}}</code>, etc. on every generated page. <a href="/app/businesses">Change</a></div>`
+    : `<div style="background:var(--bg-elevated);border:1px dashed var(--border);color:var(--fg-muted);border-radius:var(--radius);padding:.65rem 1rem;margin:0 0 1rem;font-size:.85rem">No default target Business set. Templates using <code>{{target_*}}</code> placeholders will render those as empty. <a href="/app/businesses">Set one</a></div>`;
   // Find a data source whose columns cover every template placeholder.
   // Most-recently-updated compatible source wins.
   const placeholders = new Set(
@@ -489,6 +518,7 @@ export function renderGenerateForm(opts: {
     <div class="crumbs"><a href="/app/templates/${opts.template.id}/edit">← ${esc(opts.template.name)}</a></div>
     <h1>Generate pages — ${esc(opts.template.name)}</h1>
     <p class="subtitle">Path pattern: <code>${esc(opts.template.path_pattern)}</code> · Mode: <code>${esc(opts.template.kind)}</code></p>
+    ${targetBanner}
     ${errBox}
     <form class="editor" method="POST" action="/app/templates/${opts.template.id}/generate/preview">
       <div class="form-section">
@@ -655,8 +685,9 @@ export async function handleTemplateNewPost(
     await env.CONFIG_DB.prepare(
       `INSERT INTO site_templates
          (owner_id, name, kind, html_template, path_pattern, placeholder_schema,
-          cross_link_strategy, cross_link_count)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          cross_link_strategy, cross_link_count,
+          group_by_column, top_n, sort_by_column)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         user.id,
@@ -667,6 +698,9 @@ export async function handleTemplateNewPost(
         JSON.stringify(placeholders),
         v.cross_link_strategy,
         v.cross_link_count,
+        v.group_by_column,
+        v.top_n,
+        v.sort_by_column,
       )
       .run();
   } catch (e) {
@@ -714,6 +748,7 @@ export async function handleTemplateEditPost(
     await env.CONFIG_DB.prepare(
       `UPDATE site_templates SET name=?, kind=?, html_template=?, path_pattern=?,
          placeholder_schema=?, cross_link_strategy=?, cross_link_count=?,
+         group_by_column=?, top_n=?, sort_by_column=?,
          updated_at=CURRENT_TIMESTAMP
        WHERE id=?`,
     )
@@ -725,6 +760,9 @@ export async function handleTemplateEditPost(
         JSON.stringify(placeholders),
         v.cross_link_strategy,
         v.cross_link_count,
+        v.group_by_column,
+        v.top_n,
+        v.sort_by_column,
         id,
       )
       .run();
@@ -913,7 +951,11 @@ export async function handleGeneratePreviewPost(
       }),
     };
   }
-  const plan = planRender(template, dataSource);
+  // Inject default-target Business scalars so the preview reflects
+  // what the real Generate will produce.
+  const targetBiz = await loadDefaultTargetBusiness(env, user);
+  const scalarValues = targetBiz ? targetScalars(targetBiz) : {};
+  const plan = planRender(template, dataSource, scalarValues);
   return { preview: { template, dataSource, target, plan } };
 }
 
@@ -949,7 +991,9 @@ export async function handleGenerateConfirmPost(
     template.kind === "pages_in_client"
       ? { mode: "pages_in_client", client_id: (raw.client_id ?? "").trim() }
       : { mode: "client_per_row", zone: (raw.zone ?? "").trim() };
-  const results = await executeGenerate(env, user, template, dataSource, target);
+  const targetBiz = await loadDefaultTargetBusiness(env, user);
+  const scalarValues = targetBiz ? targetScalars(targetBiz) : {};
+  const results = await executeGenerate(env, user, template, dataSource, target, scalarValues);
   return { result: { template, results } };
 }
 

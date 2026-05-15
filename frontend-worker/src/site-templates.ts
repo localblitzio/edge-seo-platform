@@ -31,8 +31,12 @@ import type { User } from "./auth.js";
 
 /* ─── Constants + types ─── */
 
-export type TemplateKind = "pages_in_client" | "client_per_row";
-export const TEMPLATE_KINDS: readonly TemplateKind[] = ["pages_in_client", "client_per_row"];
+export type TemplateKind = "pages_in_client" | "client_per_row" | "aggregate_per_group";
+export const TEMPLATE_KINDS: readonly TemplateKind[] = [
+  "pages_in_client",
+  "client_per_row",
+  "aggregate_per_group",
+];
 
 export type DataSourceKind = "csv" | "inline" | "dataforseo_business_listings" | "dataforseo_serp";
 export const DATA_SOURCE_KINDS: readonly DataSourceKind[] = [
@@ -81,6 +85,12 @@ export interface SiteTemplateRow {
   cross_link_strategy: CrossLinkStrategy;
   /** B.5 max cross-links per page. 0 disables even when strategy is set. */
   cross_link_count: number;
+  /** Aggregate mode (`aggregate_per_group` kind): column to group rows by. */
+  group_by_column: string | null;
+  /** Aggregate mode: max businesses listed per page. */
+  top_n: number;
+  /** Aggregate mode: column to rank by within each group (e.g. `rating`). */
+  sort_by_column: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -140,6 +150,9 @@ export interface TemplateInput {
   path_pattern: string;
   cross_link_strategy: CrossLinkStrategy;
   cross_link_count: number;
+  group_by_column: string | null;
+  top_n: number;
+  sort_by_column: string | null;
 }
 
 /**
@@ -195,6 +208,22 @@ export function validateTemplateInput(
   const countRaw = Number.parseInt((raw.cross_link_count ?? "0").trim(), 10);
   const cross_link_count = Number.isFinite(countRaw) ? Math.max(0, Math.min(50, countRaw)) : 0;
 
+  // Aggregate fields — only meaningful when kind = aggregate_per_group.
+  const groupByRaw = (raw.group_by_column ?? "").trim();
+  const sortByRaw = (raw.sort_by_column ?? "").trim();
+  const topNRaw = Number.parseInt((raw.top_n ?? "10").trim(), 10);
+  const top_n = Number.isFinite(topNRaw) && topNRaw >= 1 && topNRaw <= 50 ? topNRaw : 10;
+  let group_by_column: string | null = null;
+  let sort_by_column: string | null = null;
+  if (kind === "aggregate_per_group") {
+    if (!groupByRaw) errors.push("group_by_column is required for aggregate_per_group");
+    else group_by_column = groupByRaw;
+    sort_by_column = sortByRaw || null;
+  } else {
+    group_by_column = groupByRaw || null;
+    sort_by_column = sortByRaw || null;
+  }
+
   if (errors.length > 0) return { ok: false, errors };
   return {
     ok: true,
@@ -205,6 +234,9 @@ export function validateTemplateInput(
       path_pattern: pathPattern,
       cross_link_strategy,
       cross_link_count,
+      group_by_column,
+      top_n,
+      sort_by_column,
     },
   };
 }
@@ -449,6 +481,7 @@ export function renderRowPreview(
   template: SiteTemplateRow,
   dataSource: SiteDataSourceRow | null,
   rowIndex: number,
+  targetScalars: Record<string, string> = {},
 ): string {
   const rows = dataSource ? safeJsonParse<DataSourceRowsData>(dataSource.rows, []) : [];
   const row = rows[rowIndex] ?? {};
@@ -468,6 +501,7 @@ export function renderRowPreview(
     template.id,
   );
   const rowWithSentinels = {
+    ...targetScalars,
     ...row,
     has_cross_links: crossLinks.length > 0 ? "1" : "",
     has_reviews: typeof row.reviews_json === "string" && row.reviews_json.length > 2 ? "1" : "",
@@ -816,15 +850,20 @@ export interface RenderPlan {
   similarity_warn: boolean;
 }
 
-export function planRender(template: SiteTemplateRow, dataSource: SiteDataSourceRow): RenderPlan {
+export function planRender(
+  template: SiteTemplateRow,
+  dataSource: SiteDataSourceRow,
+  targetScalars: Record<string, string> = {},
+): RenderPlan {
   const rows = safeJsonParse<DataSourceRowsData>(dataSource.rows, []);
   const renderedHtml: string[] = [];
   const out: RenderPlan["rows"] = [];
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
     if (!row) continue;
-    const html = renderTemplate(template.html_template, row);
-    const path = renderPath(template.path_pattern, row);
+    const merged = { ...targetScalars, ...row };
+    const html = renderTemplate(template.html_template, merged);
+    const path = renderPath(template.path_pattern, merged);
     renderedHtml.push(html);
     out.push({
       row_index: i,
@@ -876,6 +915,7 @@ export async function executeGenerate(
   template: SiteTemplateRow,
   dataSource: SiteDataSourceRow,
   target: RenderTarget,
+  targetScalars: Record<string, string> = {},
 ): Promise<GenerateResult[]> {
   const rows = safeJsonParse<DataSourceRowsData>(dataSource.rows, []);
   if (rows.length === 0) return [];
@@ -901,6 +941,17 @@ export async function executeGenerate(
       },
     ];
   }
+  if (template.kind === "aggregate_per_group") {
+    return executeGenerateAggregate(
+      env as AppEnv & { CONTENT_R2: R2Bucket },
+      user,
+      template,
+      dataSource,
+      rows,
+      target,
+      targetScalars,
+    );
+  }
   if (target.mode === "pages_in_client") {
     return executeGeneratePagesInClient(
       env as AppEnv & { CONTENT_R2: R2Bucket },
@@ -909,6 +960,7 @@ export async function executeGenerate(
       dataSource,
       rows,
       target,
+      targetScalars,
     );
   }
   return executeGenerateClientPerRow(
@@ -918,7 +970,241 @@ export async function executeGenerate(
     dataSource,
     rows,
     target,
+    targetScalars,
   );
+}
+
+/**
+ * Aggregate render: one page per unique `group_by_column` value. Each
+ * page exposes `{{group_value}}` and `{{group_count}}` scalars + a
+ * `cross_links`-style `businesses` array iterable via
+ * `{{#each businesses}}...{{/each}}`. Top-N within each group ranked
+ * by `sort_by_column` (numeric if parseable, alphabetical otherwise).
+ *
+ * Target is `pages_in_client` — operator picks ONE host client and
+ * every group page lands as a custom_page under it. `client_per_row`
+ * for aggregate is conceptually odd (one site per city?) and excluded
+ * for now; we error if the target is set wrong.
+ */
+async function executeGenerateAggregate(
+  env: AppEnv & { CONTENT_R2: R2Bucket },
+  user: User,
+  template: SiteTemplateRow,
+  dataSource: SiteDataSourceRow,
+  rows: DataSourceRowsData,
+  target: RenderTarget,
+  targetScalars: Record<string, string> = {},
+): Promise<GenerateResult[]> {
+  if (target.mode !== "pages_in_client" || !target.client_id) {
+    return [
+      {
+        row_index: 0,
+        client_id: target.client_id ?? "",
+        generated_path: "",
+        status: "error",
+        message: "aggregate_per_group requires pages_in_client target with a client_id",
+      },
+    ];
+  }
+  const groupBy = template.group_by_column?.trim();
+  if (!groupBy) {
+    return [
+      {
+        row_index: 0,
+        client_id: target.client_id,
+        generated_path: "",
+        status: "error",
+        message: "Template has no group_by_column set",
+      },
+    ];
+  }
+  const topN = Math.max(1, Math.min(50, template.top_n || 10));
+  const sortBy = template.sort_by_column?.trim() ?? "";
+
+  // Group rows by the chosen column.
+  const groups = new Map<string, Array<Record<string, string>>>();
+  for (const row of rows) {
+    const key = (row[groupBy] ?? "").trim();
+    if (!key) continue;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key)?.push(row);
+  }
+
+  // Sort within each group + truncate to topN.
+  for (const [k, list] of groups.entries()) {
+    if (sortBy) {
+      list.sort((a, b) => {
+        const av = a[sortBy] ?? "";
+        const bv = b[sortBy] ?? "";
+        const an = Number.parseFloat(av);
+        const bn = Number.parseFloat(bv);
+        if (Number.isFinite(an) && Number.isFinite(bn)) return bn - an; // numeric DESC
+        return av.localeCompare(bv);
+      });
+    }
+    groups.set(k, list.slice(0, topN));
+  }
+
+  // Load target client config once.
+  const client = await env.CONFIG_DB.prepare("SELECT * FROM clients WHERE client_id = ?")
+    .bind(target.client_id)
+    .first<ClientRow>();
+  if (!client) {
+    return [
+      {
+        row_index: 0,
+        client_id: target.client_id,
+        generated_path: "",
+        status: "error",
+        message: `Target client ${target.client_id} not found`,
+      },
+    ];
+  }
+  let configObj: Record<string, unknown>;
+  try {
+    configObj = JSON.parse(client.config_json);
+  } catch (e) {
+    return [
+      {
+        row_index: 0,
+        client_id: target.client_id,
+        generated_path: "",
+        status: "error",
+        message: `Bad config_json: ${e instanceof Error ? e.message : String(e)}`,
+      },
+    ];
+  }
+  const routing = Array.isArray(configObj.routing)
+    ? (configObj.routing as Array<Record<string, unknown>>)
+    : [];
+
+  const results: GenerateResult[] = [];
+  let groupIndex = 0;
+  for (const [groupValue, listings] of groups.entries()) {
+    const exemplar = listings[0] ?? {};
+    // Synthetic "row" for the template: group scalars + an exemplar
+    // row's fields so {{city}}, {{state}} etc. still work as the
+    // group's representative values.
+    const groupRow: Record<string, string> = {
+      ...targetScalars,
+      ...exemplar,
+      group_value: groupValue,
+      group_count: listings.length.toString(),
+      has_cross_links: "", // cross-links don't apply in aggregate mode
+    };
+    const html = renderTemplate(template.html_template, groupRow, {
+      businesses: listings,
+    });
+    const path = renderPath(template.path_pattern, groupRow);
+    if (path === "/") {
+      results.push({
+        row_index: groupIndex,
+        client_id: target.client_id,
+        generated_path: path,
+        status: "skipped",
+        message: "Refusing to overwrite client root — pick a different path pattern",
+      });
+      groupIndex++;
+      continue;
+    }
+    const r2Key = customPageStorageKey(target.client_id, path);
+    const contentHash = fnvHash(html);
+    const prior = await env.CONFIG_DB.prepare(
+      `SELECT * FROM generated_pages
+       WHERE template_id = ? AND data_source_id = ? AND row_index = ? AND client_id = ?`,
+    )
+      .bind(template.id, dataSource.id, groupIndex, target.client_id)
+      .first<GeneratedPageRow>();
+
+    let status: GenerateResult["status"] = "created";
+    if (prior && prior.content_hash === contentHash) {
+      status = "unchanged";
+    } else {
+      try {
+        await env.CONTENT_R2.put(r2Key, html, {
+          httpMetadata: { contentType: "text/html; charset=utf-8" },
+          customMetadata: {
+            uploaded_by: user.email,
+            uploaded_at: new Date().toISOString(),
+            template_id: String(template.id),
+            data_source_id: String(dataSource.id),
+            group_value: groupValue,
+            group_count: listings.length.toString(),
+          },
+        });
+      } catch (e) {
+        results.push({
+          row_index: groupIndex,
+          client_id: target.client_id,
+          generated_path: path,
+          status: "error",
+          message: `R2 write failed: ${e instanceof Error ? e.message : String(e)}`,
+        });
+        groupIndex++;
+        continue;
+      }
+      status = prior ? "updated" : "created";
+
+      const matchRegex = customPageMatch(path);
+      const existingIdx = routing.findIndex(
+        (r) => typeof r.match === "string" && r.match === matchRegex,
+      );
+      const route = {
+        match: matchRegex,
+        type: "custom_page",
+        custom_page_key: target.client_id,
+        origin_auth: { type: "none" },
+      };
+      if (existingIdx >= 0) routing[existingIdx] = route;
+      else routing.unshift(route);
+
+      if (prior) {
+        await env.CONFIG_DB.prepare(
+          `UPDATE generated_pages
+             SET content_hash = ?, r2_key = ?, generated_path = ?
+           WHERE id = ?`,
+        )
+          .bind(contentHash, r2Key, path, prior.id)
+          .run();
+      } else {
+        await env.CONFIG_DB.prepare(
+          `INSERT INTO generated_pages
+             (template_id, data_source_id, client_id, row_index, generated_path, content_hash, r2_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+          .bind(template.id, dataSource.id, target.client_id, groupIndex, path, contentHash, r2Key)
+          .run();
+      }
+    }
+    results.push({
+      row_index: groupIndex,
+      client_id: target.client_id,
+      generated_path: path,
+      status,
+    });
+    groupIndex++;
+  }
+
+  // Save mutated config_json + prime KV once per client.
+  configObj.routing = routing;
+  const newJson = JSON.stringify(configObj);
+  try {
+    await env.CONFIG_DB.prepare(
+      "UPDATE clients SET config_json = ?, updated_at = CURRENT_TIMESTAMP WHERE client_id = ?",
+    )
+      .bind(newJson, target.client_id)
+      .run();
+    await env.CONFIG_KV.put(`config:${target.client_id}`, newJson);
+  } catch (e) {
+    results.push({
+      row_index: -1,
+      client_id: target.client_id,
+      generated_path: "",
+      status: "error",
+      message: `Config save failed: ${e instanceof Error ? e.message : String(e)}`,
+    });
+  }
+  return results;
 }
 
 async function executeGeneratePagesInClient(
@@ -928,6 +1214,7 @@ async function executeGeneratePagesInClient(
   dataSource: SiteDataSourceRow,
   rows: DataSourceRowsData,
   target: RenderTarget,
+  targetScalars: Record<string, string> = {},
 ): Promise<GenerateResult[]> {
   if (!target.client_id) {
     return [
@@ -978,8 +1265,12 @@ async function executeGeneratePagesInClient(
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
     if (!row) continue;
-    const html = renderTemplate(template.html_template, row);
-    const path = renderPath(template.path_pattern, row);
+    // Merge target scalars BEFORE the row so per-row data can override
+    // them (e.g. a target's `title` shouldn't shadow the row's title
+    // — operators reference target via `{{target_title}}` explicitly).
+    const merged = { ...targetScalars, ...row };
+    const html = renderTemplate(template.html_template, merged);
+    const path = renderPath(template.path_pattern, merged);
     if (path === "/") {
       results.push({
         row_index: i,
@@ -1105,6 +1396,7 @@ async function executeGenerateClientPerRow(
   dataSource: SiteDataSourceRow,
   rows: DataSourceRowsData,
   target: RenderTarget,
+  targetScalars: Record<string, string> = {},
 ): Promise<GenerateResult[]> {
   if (!target.zone) {
     return [
@@ -1138,14 +1430,16 @@ async function executeGenerateClientPerRow(
     );
     // `has_cross_links` sentinel lets templates conditionally render
     // the cross-link card with `{{#if has_cross_links}}...{{/if}}`.
+    // Target scalars merge in first so per-row fields override them.
     const rowWithSentinels = {
+      ...targetScalars,
       ...row,
       has_cross_links: crossLinks.length > 0 ? "1" : "",
     };
     const html = renderTemplate(template.html_template, rowWithSentinels, {
       cross_links: crossLinks,
     });
-    const path = renderPath(template.path_pattern, row);
+    const path = renderPath(template.path_pattern, rowWithSentinels);
     const r2Key = customPageStorageKey(slug, path);
     const contentHash = fnvHash(html);
 
@@ -1318,8 +1612,110 @@ async function executeGenerateClientPerRow(
       generated_path: path,
       status: existing ? "updated" : "created",
     });
+
+    // Auto /about/ route — drops in only for fresh `client_per_row`
+    // sites that have a target Business and the target's HTML
+    // fragments are available. The about page is a self-contained
+    // recap of the operator's brand (card + hours + map + reviews +
+    // CTA), giving every generated site a built-in "About us" without
+    // the operator writing template HTML for it. Idempotent: same
+    // path + R2 key on re-runs.
+    if (!existing && targetScalars.has_target === "1") {
+      const aboutHtml = renderAboutPage(targetScalars);
+      const aboutR2Key = customPageStorageKey(slug, "/about");
+      try {
+        await env.CONTENT_R2.put(aboutR2Key, aboutHtml, {
+          httpMetadata: { contentType: "text/html; charset=utf-8" },
+          customMetadata: {
+            uploaded_by: user.email,
+            uploaded_at: new Date().toISOString(),
+            kind: "auto_about_page",
+          },
+        });
+        // The new client we just created has routing[0] pointing at /
+        // — we add the about route to its config. Re-fetch the fresh
+        // config_json (KV was primed above) so the operator's later
+        // edits aren't clobbered.
+        const justCreated = await env.CONFIG_DB.prepare(
+          "SELECT config_json FROM clients WHERE client_id = ?",
+        )
+          .bind(slug)
+          .first<{ config_json: string }>();
+        if (justCreated) {
+          try {
+            const cfg = JSON.parse(justCreated.config_json) as Record<string, unknown>;
+            const routing = Array.isArray(cfg.routing)
+              ? (cfg.routing as Array<Record<string, unknown>>)
+              : [];
+            const aboutMatch = customPageMatch("/about");
+            const aboutIdx = routing.findIndex(
+              (r) => typeof r.match === "string" && r.match === aboutMatch,
+            );
+            const aboutRoute = {
+              match: aboutMatch,
+              type: "custom_page",
+              custom_page_key: slug,
+              origin_auth: { type: "none" },
+            };
+            if (aboutIdx >= 0) routing[aboutIdx] = aboutRoute;
+            else routing.unshift(aboutRoute);
+            cfg.routing = routing;
+            const newJson = JSON.stringify(cfg);
+            await env.CONFIG_DB.prepare(
+              "UPDATE clients SET config_json = ?, updated_at = CURRENT_TIMESTAMP WHERE client_id = ?",
+            )
+              .bind(newJson, slug)
+              .run();
+            await env.CONFIG_KV.put(`config:${slug}`, newJson);
+          } catch {
+            // best-effort — about route just won't be added
+          }
+        }
+      } catch {
+        // best-effort — main page already created, this is a bonus
+      }
+    }
   }
   return results;
+}
+
+/**
+ * Self-contained "About us" page rendered from a target Business's
+ * scalars. Combines all five pre-rendered fragments
+ * (target_card_html, target_cta_html, target_map_html,
+ * target_reviews_html, target_hours_html) into a clean layout. Used
+ * by the auto-about route in `client_per_row` mode.
+ */
+function renderAboutPage(targetScalars: Record<string, string>): string {
+  const title = targetScalars.target_title ?? "About us";
+  const city = targetScalars.target_city ?? "";
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>About ${htmlEscape(title)}${city ? ` — ${htmlEscape(city)}` : ""}</title>
+  <meta name="description" content="About ${htmlEscape(title)}${city ? ` in ${htmlEscape(city)}` : ""}.">
+  <style>
+    *{box-sizing:border-box}
+    body{margin:0;font:16px/1.6 -apple-system,BlinkMacSystemFont,"Inter","Segoe UI",Roboto,sans-serif;color:#111;background:#fafafb}
+    .container{max-width:800px;margin:0 auto;padding:2rem 1.25rem}
+    h1{font-size:clamp(1.8rem,3.5vw,2.5rem);margin:.2em 0 .8em}
+    h2{font-size:1.3rem;margin:2rem 0 .5rem}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>About ${htmlEscape(title)}</h1>
+    ${targetScalars.target_card_html ?? ""}
+    ${targetScalars.target_hours_html ?? ""}
+    ${targetScalars.target_map_html ?? ""}
+    <h2>What customers say</h2>
+    ${targetScalars.target_reviews_html ?? ""}
+    ${targetScalars.target_cta_html ?? ""}
+  </div>
+</body>
+</html>`;
 }
 
 /**

@@ -99,6 +99,12 @@ import {
   renderBulkResult,
 } from "./bulk-clients.js";
 import {
+  handleNewBusinessEmbedPost,
+  handleRefreshBusinessEmbedPost,
+  loadBusinessesForEmbedPicker,
+  renderNewBusinessEmbedForm,
+} from "./business-embeds.js";
+import {
   businessAutoRefreshHeader,
   handleArchiveBusinessPost,
   handleClearDefaultTargetPost,
@@ -106,12 +112,14 @@ import {
   handleNewBusinessPost,
   handleRestoreBusinessPost,
   handleSetDefaultTargetPost,
+  loadDefaultTargetBusiness,
   loadVisibleBusiness,
   loadVisibleBusinesses,
   renderBusinessDetail,
   renderBusinessesList,
   renderNewBusinessForm,
   runBusinessScrapeJob,
+  targetScalars,
 } from "./businesses.js";
 import { handleCityEnrichmentPost, runCityEnrichmentJob } from "./city-enrichment.js";
 import {
@@ -2142,6 +2150,65 @@ export default {
       );
     }
 
+    /* ─── Business-backed embeds (new) ─── */
+
+    if (path === "/app/embeds/new-business" && method === "GET") {
+      if (!user) return redirectToLogin(url);
+      const [clients, businesses] = await Promise.all([
+        loadVisibleClients(env, user),
+        loadBusinessesForEmbedPicker(env, user),
+      ]);
+      return htmlResponse(
+        htmlPage({
+          title: "New business embed — Edge SEO Platform",
+          body: appLayout({
+            title: "New business embed",
+            content: renderNewBusinessEmbedForm({
+              businesses,
+              prefill: { default_position: "bottom", business_kind: "business_card" },
+              errors: [],
+            }),
+            activeNav: "embeds",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+      );
+    }
+
+    if (path === "/app/embeds/new-business" && method === "POST") {
+      if (!user) return redirectToLogin(url);
+      const result = await handleNewBusinessEmbedPost(request, env, url, user);
+      if ("redirect" in result) return result.redirect;
+      const [clients, businesses] = await Promise.all([
+        loadVisibleClients(env, user),
+        loadBusinessesForEmbedPicker(env, user),
+      ]);
+      return htmlResponse(
+        htmlPage({
+          title: "New business embed — Edge SEO Platform",
+          body: appLayout({
+            title: "New business embed",
+            content: renderNewBusinessEmbedForm({
+              businesses,
+              prefill: result.prefill,
+              errors: result.errors,
+            }),
+            activeNav: "embeds",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+        { status: 400 },
+      );
+    }
+
     /* ─── Indexation overview (platform-wide) ─── */
 
     if (path === "/app/indexation" && method === "GET") {
@@ -2431,6 +2498,11 @@ export default {
         const clientId = decodeURIComponent(sub.slice("remove/".length));
         if (!clientId) return new Response("Missing client_id", { status: 400 });
         return handlePlacementRemovePost(request, env, url, user, embedId, clientId);
+      }
+
+      // Business-backed embeds — re-render the html from the Business.
+      if (sub === "refresh-business" && method === "POST") {
+        return handleRefreshBusinessEmbedPost(request, env, url, user, embedId);
       }
 
       if (sub === "reapply" && method === "POST") {
@@ -3239,6 +3311,9 @@ export default {
                   path_pattern: tmpl.path_pattern,
                   cross_link_strategy: tmpl.cross_link_strategy,
                   cross_link_count: tmpl.cross_link_count,
+                  group_by_column: tmpl.group_by_column,
+                  top_n: tmpl.top_n,
+                  sort_by_column: tmpl.sort_by_column,
                 },
                 errors: [],
                 mode: "edit",
@@ -3303,7 +3378,11 @@ export default {
         }
         const rowIndex = Number.parseInt(rowRaw ?? "0", 10);
         const safeRow = Number.isFinite(rowIndex) && rowIndex >= 0 ? rowIndex : 0;
-        const html = renderRowPreview(tmpl, dataSource, safeRow);
+        // Inject the operator's default-target Business scalars so the
+        // preview matches what a real Generate run would produce.
+        const targetBiz = await loadDefaultTargetBusiness(env, user);
+        const targetScalarsValue = targetBiz ? targetScalars(targetBiz) : {};
+        const html = renderRowPreview(tmpl, dataSource, safeRow, targetScalarsValue);
         return new Response(html, {
           headers: {
             "content-type": "text/html; charset=utf-8",
@@ -3318,7 +3397,10 @@ export default {
 
       // GET /app/templates/:id/generate — pick data source + target
       if (sub === "generate" && method === "GET") {
-        const dataSources = await loadVisibleDataSources(env, user);
+        const [dataSources, defaultTargetBiz] = await Promise.all([
+          loadVisibleDataSources(env, user),
+          loadDefaultTargetBusiness(env, user),
+        ]);
         const zones =
           (env as { ENV?: string }).ENV === "staging"
             ? Array.from(STAGING_PROXY_ZONES)
@@ -3337,6 +3419,7 @@ export default {
                 })),
                 zones,
                 errors: [],
+                defaultTargetName: defaultTargetBiz?.name ?? null,
               }),
               activeNav: "templates",
               user,

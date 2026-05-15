@@ -22,6 +22,13 @@ import type { AppEnv, FlashMessage } from "./app.js";
 import { canSeeAllClients, checkCsrf, esc, flashRedirect } from "./app.js";
 import type { User } from "./auth.js";
 import {
+  renderBusinessCard,
+  renderBusinessCta,
+  renderBusinessHours,
+  renderBusinessMap,
+  renderBusinessReviews,
+} from "./business-embeds.js";
+import {
   type BusinessListingRow,
   DataForSeoApiError,
   DataForSeoConfigError,
@@ -346,6 +353,14 @@ export function targetScalars(b: BusinessRow): Record<string, string> {
     target_description: b.description ?? "",
     target_main_image_url: b.main_image_url ?? "",
     has_target: "1",
+    // Pre-rendered embed HTML for templates to drop in via the raw
+    // `{{{...}}}` syntax. Operators write:
+    //   {{#if has_target}}{{{target_card_html}}}{{/if}}
+    target_card_html: renderBusinessCard(b),
+    target_cta_html: renderBusinessCta(b),
+    target_map_html: renderBusinessMap(b),
+    target_reviews_html: renderBusinessReviews(b),
+    target_hours_html: renderBusinessHours(b),
   };
 }
 
