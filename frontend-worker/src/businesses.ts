@@ -135,11 +135,15 @@ export interface BusinessFormInput {
   name: string;
   keyword: string;
   location: string;
+  /** Optional address-contains filter — applied after fetch to narrow candidates. */
+  address_filter: string;
   notes: string;
 }
 
 const MAX_NAME = 200;
 const MAX_NOTES = 2000;
+/** Top-N candidates we show on the picker step. */
+const PICKER_DEPTH = 5;
 
 export function validateBusinessForm(
   raw: Record<string, string>,
@@ -150,6 +154,7 @@ export function validateBusinessForm(
     name: (raw.name ?? "").trim(),
     keyword: (raw.keyword ?? "").trim(),
     location: (raw.location ?? "").trim(),
+    address_filter: (raw.address_filter ?? "").trim(),
     notes: (raw.notes ?? "").trim(),
   };
   const errors: string[] = [];
@@ -160,6 +165,175 @@ export function validateBusinessForm(
   if (value.notes.length > MAX_NOTES) errors.push(`notes must be ≤ ${MAX_NOTES} chars`);
   if (errors.length > 0) return { ok: false, errors, prefill: value };
   return { ok: true, value };
+}
+
+/**
+ * Fetch the top-N Maps candidates for a (keyword, location). Applied
+ * filter: when `address_filter` is non-empty, drop candidates whose
+ * address doesn't contain it (case-insensitive substring match) —
+ * helps narrow when the operator already knows the street address.
+ *
+ * Returns a friendly error message via the `error` field instead of
+ * throwing so the caller can render the picker page with an error
+ * banner without an exception path.
+ */
+export async function fetchBusinessCandidates(
+  env: AppEnv,
+  input: BusinessFormInput,
+): Promise<{ candidates: BusinessListingRow[] } | { error: string }> {
+  try {
+    const rows = await fetchBusinessListings(env, {
+      keyword: input.keyword,
+      location_name: input.location,
+      language_code: "en",
+      depth: PICKER_DEPTH,
+    });
+    if (rows.length === 0) {
+      return {
+        error: `No Google Maps results for "${input.keyword}" in "${input.location}". Try a more specific keyword or check the location format (City,Region,Country).`,
+      };
+    }
+    const filter = input.address_filter.toLowerCase();
+    const filtered = filter
+      ? rows.filter((r) => (r.address ?? "").toLowerCase().includes(filter))
+      : rows;
+    if (filtered.length === 0) {
+      return {
+        error: `${rows.length} candidate${rows.length === 1 ? "" : "s"} returned but none match address filter "${input.address_filter}". Refine or clear the filter.`,
+      };
+    }
+    return { candidates: filtered };
+  } catch (e) {
+    if (e instanceof DataForSeoConfigError || e instanceof DataForSeoApiError) {
+      return { error: e.message };
+    }
+    return { error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/**
+ * Persist a fresh Business from a candidate row. Used by the picker
+ * confirm step. Synchronous + atomic — no async job.
+ */
+export async function createBusinessFromCandidate(
+  env: AppEnv,
+  user: User,
+  name: string,
+  notes: string,
+  candidate: BusinessListingRow,
+): Promise<number> {
+  const r = await env.CONFIG_DB.prepare(
+    `INSERT INTO businesses (
+       owner_id, name, notes, place_id,
+       title, address, city, state, country, zip,
+       phone, website, rating, rating_count, categories,
+       latitude, longitude, hours_json, price_level,
+       description, main_image_url, photos_json, attributes_json,
+       scrape_status, scrape_progress_updated_at
+     )
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'done', strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+     RETURNING id`,
+  )
+    .bind(
+      user.id,
+      name,
+      notes || null,
+      candidate.place_id,
+      candidate.title,
+      candidate.address,
+      candidate.city,
+      candidate.state,
+      candidate.country,
+      candidate.zip,
+      candidate.phone,
+      candidate.website,
+      candidate.rating,
+      candidate.rating_count,
+      candidate.categories,
+      candidate.latitude,
+      candidate.longitude,
+      candidate.hours_json,
+      candidate.price_level,
+      candidate.description,
+      candidate.main_image_url,
+      candidate.photos_json,
+      candidate.attributes_json,
+    )
+    .first<{ id: number }>();
+  if (!r) throw new Error("Insert returned no row");
+  return r.id;
+}
+
+/**
+ * Overwrite an existing Business's scraped fields from a freshly-picked
+ * candidate. Keeps owner_id + workflow flags (is_default_target,
+ * archived_at) + notes preserved; the operator can edit the `name`
+ * separately. Used by the Edit & re-scrape flow.
+ */
+export async function updateBusinessFromCandidate(
+  env: AppEnv,
+  user: User,
+  id: number,
+  name: string,
+  notes: string,
+  candidate: BusinessListingRow,
+): Promise<void> {
+  await env.CONFIG_DB.prepare(
+    `UPDATE businesses SET
+       name = ?, notes = ?, place_id = ?,
+       title = ?, address = ?, city = ?, state = ?, country = ?, zip = ?,
+       phone = ?, website = ?, rating = ?, rating_count = ?, categories = ?,
+       latitude = ?, longitude = ?, hours_json = ?, price_level = ?,
+       description = ?, main_image_url = ?, photos_json = ?, attributes_json = ?,
+       scrape_status = 'done', scrape_progress_updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+       scrape_error = NULL, updated_at = CURRENT_TIMESTAMP
+     WHERE id = ? AND owner_id = ?`,
+  )
+    .bind(
+      name,
+      notes || null,
+      candidate.place_id,
+      candidate.title,
+      candidate.address,
+      candidate.city,
+      candidate.state,
+      candidate.country,
+      candidate.zip,
+      candidate.phone,
+      candidate.website,
+      candidate.rating,
+      candidate.rating_count,
+      candidate.categories,
+      candidate.latitude,
+      candidate.longitude,
+      candidate.hours_json,
+      candidate.price_level,
+      candidate.description,
+      candidate.main_image_url,
+      candidate.photos_json,
+      candidate.attributes_json,
+      id,
+      user.id,
+    )
+    .run();
+}
+
+/** How many embeds currently reference this Business — surfaced on the delete confirm page. */
+export async function countEmbedsReferencingBusiness(
+  env: AppEnv,
+  businessId: number,
+): Promise<number> {
+  const r = await env.CONFIG_DB.prepare("SELECT COUNT(*) AS n FROM embeds WHERE business_id = ?")
+    .bind(businessId)
+    .first<{ n: number }>();
+  return r?.n ?? 0;
+}
+
+/** Hard-delete a Business. CASCADE in 0020 sets embeds.business_id to NULL. */
+export async function hardDeleteBusiness(env: AppEnv, user: User, id: number): Promise<void> {
+  await env.CONFIG_DB.prepare("DELETE FROM businesses WHERE id = ? AND owner_id = ?")
+    .bind(id, user.id)
+    .run();
 }
 
 /* ─── Scrape ─── */
@@ -563,15 +737,20 @@ export function renderBusinessesList(opts: {
 export function renderNewBusinessForm(opts: {
   prefill: Partial<BusinessFormInput>;
   errors: string[];
+  /** Edit-flow target id — form posts to /:id/edit instead of /new. */
+  editId?: number;
 }): string {
   const errBox =
     opts.errors.length > 0 ? `<div class="error-box">${opts.errors.map(esc).join("\n")}</div>` : "";
+  const isEdit = typeof opts.editId === "number";
+  const action = isEdit ? `/app/businesses/${opts.editId}/edit` : "/app/businesses/new";
+  const backHref = isEdit ? `/app/businesses/${opts.editId}` : "/app/businesses";
   return `<style>${BUSINESSES_CSS}</style><div class="biz-page" style="max-width:680px">
-    <div class="crumbs"><a href="/app/businesses">← Businesses</a></div>
-    <h1>Add business</h1>
-    <p class="subtitle">One DataForSEO Maps task (~\$0.003) fetches the full profile. You can refresh + add reviews afterwards.</p>
+    <div class="crumbs"><a href="${esc(backHref)}">← ${isEdit ? "Back to business" : "Businesses"}</a></div>
+    <h1>${isEdit ? "Edit & re-scrape business" : "Add business"}</h1>
+    <p class="subtitle">${isEdit ? "Re-fetch top 5 Maps results — pick the right one to overwrite the current fields." : "Fetches top 5 Google Maps results — pick the correct business on the next step."} One DataForSEO Maps task (~\$0.003).</p>
     ${errBox}
-    <form class="editor" method="POST" action="/app/businesses/new">
+    <form class="editor" method="POST" action="${esc(action)}">
       <div class="form-section">
         <label for="biz_name">name <span style="color:var(--fg-muted);font-weight:400">(your label — how you refer to this business)</span></label>
         <input id="biz_name" name="name" type="text" required value="${esc(opts.prefill.name ?? "")}" placeholder="Acme Pool Builders" maxlength="200">
@@ -585,12 +764,103 @@ export function renderNewBusinessForm(opts: {
         <input id="biz_location" name="location" type="text" required value="${esc(opts.prefill.location ?? "")}" placeholder="San Diego,California,United States">
       </div>
       <div class="form-section">
+        <label for="biz_addr">address contains <span style="color:var(--fg-muted);font-weight:400">(optional — narrows candidates by substring match)</span></label>
+        <input id="biz_addr" name="address_filter" type="text" value="${esc(opts.prefill.address_filter ?? "")}" placeholder="123 Main St">
+      </div>
+      <div class="form-section">
         <label for="biz_notes">notes <span style="color:var(--fg-muted);font-weight:400">(optional — contract details, contact email, etc.)</span></label>
         <textarea id="biz_notes" name="notes" rows="3" maxlength="2000" style="width:100%">${esc(opts.prefill.notes ?? "")}</textarea>
       </div>
       <div class="form-actions">
-        <button class="btn btn-primary" type="submit">Scrape & save →</button>
-        <a class="btn" href="/app/businesses">Cancel</a>
+        <button class="btn btn-primary" type="submit">Fetch candidates →</button>
+        <a class="btn" href="${esc(backHref)}">Cancel</a>
+      </div>
+    </form>
+  </div>`;
+}
+
+/**
+ * Picker step — operator sees the top-N Maps results as cards and
+ * picks the right one. State is encoded in hidden form fields so the
+ * picker is fully stateless (no draft rows in DB until pick).
+ */
+export function renderBusinessPicker(opts: {
+  input: BusinessFormInput;
+  candidates: readonly BusinessListingRow[];
+  /** Edit-flow target id — confirm posts to /:id/edit/confirm. */
+  editId?: number;
+}): string {
+  const isEdit = typeof opts.editId === "number";
+  const confirmAction = isEdit
+    ? `/app/businesses/${opts.editId}/edit/confirm`
+    : "/app/businesses/new/confirm";
+  const refineUrl = isEdit ? `/app/businesses/${opts.editId}/edit` : "/app/businesses/new";
+  const cards = opts.candidates
+    .map((c, i) => {
+      const photo = c.main_image_url
+        ? `<div style="aspect-ratio:16/9;background:#e5e7eb;background-image:url('${esc(c.main_image_url)}');background-size:cover;background-position:center;border-radius:var(--radius);margin-bottom:.5rem"></div>`
+        : "";
+      const rating = c.rating
+        ? `<div style="color:#d97706;font-weight:600;font-size:.92rem">★ ${esc(c.rating)} <span style="color:var(--fg-muted);font-size:.82rem">(${esc(c.rating_count ?? "0")} reviews)</span></div>`
+        : "";
+      return `<form method="POST" action="${esc(confirmAction)}" style="margin:0">
+        <input type="hidden" name="name" value="${esc(opts.input.name)}">
+        <input type="hidden" name="notes" value="${esc(opts.input.notes)}">
+        <input type="hidden" name="candidate" value="${esc(JSON.stringify(c))}">
+        <button type="submit" class="biz-pick-card" style="all:unset;cursor:pointer;display:block;background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius);padding:1rem 1.15rem;width:100%;text-align:left;transition:border-color .15s ease,box-shadow .15s ease" onmouseover="this.style.borderColor='var(--accent)';this.style.boxShadow='var(--shadow-md)'" onmouseout="this.style.borderColor='var(--border)';this.style.boxShadow='none'">
+          ${photo}
+          <div style="font-size:.78rem;color:var(--fg-muted);margin-bottom:.25rem">Result #${i + 1}</div>
+          <div style="font-weight:600;font-size:1.05rem;margin-bottom:.25rem">${esc(c.title)}</div>
+          <div style="font-size:.85rem;color:var(--fg-muted);margin-bottom:.35rem">${esc(c.address ?? "")}</div>
+          ${c.categories ? `<div style="font-size:.78rem;color:var(--fg-muted);margin-bottom:.35rem">${esc(c.categories)}</div>` : ""}
+          ${c.phone ? `<div style="font-size:.85rem;margin-bottom:.25rem">📞 ${esc(c.phone)}</div>` : ""}
+          ${rating}
+          <div style="margin-top:.6rem;color:var(--accent);font-weight:600;font-size:.85rem">Pick this one →</div>
+        </button>
+      </form>`;
+    })
+    .join("");
+  return `<style>${BUSINESSES_CSS}</style><div class="biz-page" style="max-width:780px">
+    <div class="crumbs"><a href="${esc(refineUrl)}">← Refine search</a></div>
+    <h1>Pick the right business</h1>
+    <p class="subtitle">Top ${opts.candidates.length} Maps result${opts.candidates.length === 1 ? "" : "s"} for <code>${esc(opts.input.keyword)}</code> in <code>${esc(opts.input.location)}</code>${opts.input.address_filter ? ` filtered by <code>${esc(opts.input.address_filter)}</code>` : ""}. Click the card that matches the business.</p>
+    <div style="display:grid;gap:.75rem">${cards}</div>
+    <p style="margin-top:1.25rem;color:var(--fg-muted);font-size:.85rem">None of these? <a href="${esc(refineUrl)}">← Refine the keyword/location/address filter</a> and try again.</p>
+  </div>`;
+}
+
+/* ─── Delete confirm ─── */
+
+export function renderBusinessDeleteConfirm(opts: {
+  business: BusinessRow;
+  embedRefCount: number;
+  errors: string[];
+}): string {
+  const { business: b, embedRefCount, errors } = opts;
+  const errBox =
+    errors.length > 0 ? `<div class="error-box">${errors.map(esc).join("\n")}</div>` : "";
+  const isDefault = b.is_default_target === 1;
+  return `<style>${BUSINESSES_CSS}</style><div class="biz-page" style="max-width:680px">
+    <div class="crumbs"><a href="/app/businesses/${b.id}">← ${esc(b.name)}</a></div>
+    <h1 style="color:var(--red)">Permanently delete business</h1>
+    ${errBox}
+    <div style="background:var(--red-bg);border:1px solid color-mix(in srgb,var(--red) 30%,transparent);border-radius:var(--radius);padding:1rem 1.25rem;margin-bottom:1.25rem">
+      <strong>This deletes <code>${esc(b.name)}</code> for good.</strong>
+      <ul style="margin:.5rem 0 0;padding-left:1.2rem;line-height:1.7">
+        ${isDefault ? `<li><strong style="color:var(--red)">This is your default-target business</strong> — generated pages relying on <code>{{target_*}}</code> will render empty after deletion.</li>` : ""}
+        ${embedRefCount > 0 ? `<li><strong style="color:var(--red)">${embedRefCount} embed${embedRefCount === 1 ? "" : "s"}</strong> reference this business. They keep their static HTML but the "Refresh from Business" button will error.</li>` : "<li>No embeds reference this business — clean delete.</li>"}
+        <li>If you want a reversible option, use <strong>Archive</strong> on the business page instead.</li>
+        <li>This action <strong>cannot be undone</strong>.</li>
+      </ul>
+    </div>
+    <form method="POST" action="/app/businesses/${b.id}/delete">
+      <div class="form-section">
+        <label for="confirm_word">Type <code style="font-family:var(--mono);font-weight:700">DELETE</code> to confirm:</label>
+        <input id="confirm_word" name="confirm_word" type="text" required autocomplete="off" autofocus placeholder="DELETE" style="font-family:var(--mono);font-size:1rem;text-transform:uppercase">
+      </div>
+      <div class="form-actions">
+        <button class="btn" type="submit" style="background:var(--red);border-color:var(--red);color:#fff">Permanently delete</button>
+        <a class="btn" href="/app/businesses/${b.id}">Cancel</a>
       </div>
     </form>
   </div>`;
@@ -627,9 +897,11 @@ export function renderBusinessDetail(b: BusinessRow): string {
     ? `<form method="POST" action="/app/businesses/default-target/clear" style="margin:0"><button class="btn" type="submit">Unset default</button></form>`
     : `<form method="POST" action="/app/businesses/${b.id}/set-default-target" style="margin:0"><button class="btn btn-primary" type="submit">⭐ Set as default target</button></form>`;
 
+  const editAction = `<a class="btn" href="/app/businesses/${b.id}/edit">Edit & re-scrape</a>`;
   const archiveAction = isArchived
     ? ""
-    : `<form method="POST" action="/app/businesses/${b.id}/archive" style="margin:0" onsubmit="return confirm('Archive this business? It can be restored later.')"><button class="btn" type="submit" style="color:var(--red);border-color:color-mix(in srgb,var(--red) 40%,transparent)">Archive</button></form>`;
+    : `<form method="POST" action="/app/businesses/${b.id}/archive" style="margin:0" onsubmit="return confirm('Archive this business? It can be restored later.')"><button class="btn" type="submit" style="color:var(--amber);border-color:color-mix(in srgb,var(--amber) 40%,transparent)">Archive</button></form>`;
+  const deleteAction = `<a class="btn" href="/app/businesses/${b.id}/delete" style="color:var(--red);border-color:color-mix(in srgb,var(--red) 40%,transparent)">Permanently delete…</a>`;
 
   const refreshAuto =
     b.scrape_status === "running" ? `<meta http-equiv="refresh" content="2">` : "";
@@ -644,9 +916,11 @@ export function renderBusinessDetail(b: BusinessRow): string {
     ${heroBlock}
     <div class="biz-card biz-detail">
       ${dl}
-      <div class="form-actions" style="margin-top:.6rem">
+      <div class="form-actions" style="margin-top:.6rem;flex-wrap:wrap">
         ${targetActions}
+        ${editAction}
         ${archiveAction}
+        ${deleteAction}
       </div>
     </div>
     <div class="biz-card">

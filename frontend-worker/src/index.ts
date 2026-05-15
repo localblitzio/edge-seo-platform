@@ -106,20 +106,26 @@ import {
 } from "./business-embeds.js";
 import {
   businessAutoRefreshHeader,
+  countEmbedsReferencingBusiness,
+  createBusinessFromCandidate,
+  fetchBusinessCandidates,
   handleArchiveBusinessPost,
   handleClearDefaultTargetPost,
   handleEditNotesPost,
-  handleNewBusinessPost,
   handleRestoreBusinessPost,
   handleSetDefaultTargetPost,
+  hardDeleteBusiness,
   loadDefaultTargetBusiness,
   loadVisibleBusiness,
   loadVisibleBusinesses,
+  renderBusinessDeleteConfirm,
   renderBusinessDetail,
+  renderBusinessPicker,
   renderBusinessesList,
   renderNewBusinessForm,
-  runBusinessScrapeJob,
   targetScalars,
+  updateBusinessFromCandidate,
+  validateBusinessForm,
 } from "./businesses.js";
 import { handleCityEnrichmentPost, runCityEnrichmentJob } from "./city-enrichment.js";
 import {
@@ -3594,23 +3600,71 @@ export default {
       );
     }
 
+    // POST /new — validates form + fetches top-N candidates, renders picker.
+    // No DB write yet — the row is created only after the operator picks
+    // a candidate at /new/confirm.
     if (path === "/app/businesses/new" && method === "POST") {
       if (!user) return redirectToLogin(url);
-      const outcome = await handleNewBusinessPost(request, env, url, user);
-      if (outcome.redirect && outcome.job) {
-        ctx.waitUntil(runBusinessScrapeJob(env, outcome.job.businessId, outcome.job.input));
-        return outcome.redirect;
+      const csrf = checkCsrf(request, url);
+      if (csrf) return csrf;
+      const form = await request.formData();
+      const raw: Record<string, string> = {};
+      for (const [k, v] of form.entries()) {
+        if (typeof v === "string") raw[k] = v;
       }
-      if (outcome.redirect) return outcome.redirect;
+      const validation = validateBusinessForm(raw);
       const clients = await loadVisibleClients(env, user);
+      if (!validation.ok) {
+        return htmlResponse(
+          htmlPage({
+            title: "Add business — Edge SEO Platform",
+            body: appLayout({
+              title: "Add business",
+              content: renderNewBusinessForm({
+                prefill: validation.prefill,
+                errors: validation.errors,
+              }),
+              activeNav: "businesses",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+          { status: 400 },
+        );
+      }
+      const fetchResult = await fetchBusinessCandidates(env, validation.value);
+      if ("error" in fetchResult) {
+        return htmlResponse(
+          htmlPage({
+            title: "Add business — Edge SEO Platform",
+            body: appLayout({
+              title: "Add business",
+              content: renderNewBusinessForm({
+                prefill: validation.value,
+                errors: [fetchResult.error],
+              }),
+              activeNav: "businesses",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+          { status: 400 },
+        );
+      }
       return htmlResponse(
         htmlPage({
-          title: "Add business — Edge SEO Platform",
+          title: "Pick the right business — Edge SEO Platform",
           body: appLayout({
-            title: "Add business",
-            content: renderNewBusinessForm({
-              prefill: outcome.prefill ?? {},
-              errors: outcome.errors ?? ["Unknown error"],
+            title: "Pick the right business",
+            content: renderBusinessPicker({
+              input: validation.value,
+              candidates: fetchResult.candidates,
             }),
             activeNav: "businesses",
             user,
@@ -3620,8 +3674,61 @@ export default {
           user,
           flash: null,
         }),
-        { status: 400 },
       );
+    }
+
+    // POST /new/confirm — commits the picked candidate to a fresh row.
+    if (path === "/app/businesses/new/confirm" && method === "POST") {
+      if (!user) return redirectToLogin(url);
+      const csrf = checkCsrf(request, url);
+      if (csrf) return csrf;
+      const form = await request.formData();
+      const name = String(form.get("name") ?? "").trim();
+      const notes = String(form.get("notes") ?? "").trim();
+      const candidateRaw = String(form.get("candidate") ?? "");
+      if (!name || !candidateRaw) {
+        return flashRedirect("/app/businesses/new", {
+          text: "Missing form data — start over.",
+          kind: "err",
+        });
+      }
+      let candidate: Awaited<ReturnType<typeof fetchBusinessCandidates>>;
+      try {
+        const parsed = JSON.parse(candidateRaw);
+        candidate = { candidates: [parsed] };
+      } catch {
+        return flashRedirect("/app/businesses/new", {
+          text: "Could not parse picked candidate. Try again.",
+          kind: "err",
+        });
+      }
+      if (!("candidates" in candidate) || candidate.candidates.length === 0) {
+        return flashRedirect("/app/businesses/new", {
+          text: "No candidate to confirm.",
+          kind: "err",
+        });
+      }
+      try {
+        const picked = candidate.candidates[0];
+        if (!picked) {
+          return flashRedirect("/app/businesses/new", {
+            text: "Could not read candidate after parse.",
+            kind: "err",
+          });
+        }
+        const id = await createBusinessFromCandidate(env, user, name, notes, picked);
+        return flashRedirect(`/app/businesses/${id}`, {
+          text: `Saved "${name}".`,
+          kind: "ok",
+        });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        const friendly =
+          msg.includes("UNIQUE") && msg.includes("name")
+            ? `A business named "${name}" already exists.`
+            : `DB error: ${msg}`;
+        return flashRedirect("/app/businesses/new", { text: friendly, kind: "err" });
+      }
     }
 
     // POST /app/businesses/default-target/clear — flat path before catch-all.
@@ -3677,6 +3784,221 @@ export default {
 
       if (sub === "notes" && method === "POST") {
         return handleEditNotesPost(request, env, url, user, id);
+      }
+
+      // GET /:id/edit — prefilled form for re-scrape.
+      if (sub === "edit" && method === "GET") {
+        return htmlResponse(
+          htmlPage({
+            title: `Edit ${biz.name} — Edge SEO Platform`,
+            body: appLayout({
+              title: `Edit ${biz.name}`,
+              content: renderNewBusinessForm({
+                prefill: {
+                  name: biz.name,
+                  keyword: biz.title ?? biz.name,
+                  location:
+                    [biz.city, biz.state, biz.country].filter((v) => v && v.length > 0).join(",") ||
+                    "",
+                  address_filter: "",
+                  notes: biz.notes ?? "",
+                },
+                errors: [],
+                editId: id,
+              }),
+              activeNav: "businesses",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+
+      // POST /:id/edit — validate + fetch + render picker prefixed with the edit id.
+      if (sub === "edit" && method === "POST") {
+        const csrf = checkCsrf(request, url);
+        if (csrf) return csrf;
+        const form = await request.formData();
+        const raw: Record<string, string> = {};
+        for (const [k, v] of form.entries()) {
+          if (typeof v === "string") raw[k] = v;
+        }
+        const validation = validateBusinessForm(raw);
+        if (!validation.ok) {
+          return htmlResponse(
+            htmlPage({
+              title: `Edit ${biz.name} — Edge SEO Platform`,
+              body: appLayout({
+                title: `Edit ${biz.name}`,
+                content: renderNewBusinessForm({
+                  prefill: validation.prefill,
+                  errors: validation.errors,
+                  editId: id,
+                }),
+                activeNav: "businesses",
+                user,
+                flash,
+                clients,
+              }),
+              user,
+              flash: null,
+            }),
+            { status: 400 },
+          );
+        }
+        const fetchResult = await fetchBusinessCandidates(env, validation.value);
+        if ("error" in fetchResult) {
+          return htmlResponse(
+            htmlPage({
+              title: `Edit ${biz.name} — Edge SEO Platform`,
+              body: appLayout({
+                title: `Edit ${biz.name}`,
+                content: renderNewBusinessForm({
+                  prefill: validation.value,
+                  errors: [fetchResult.error],
+                  editId: id,
+                }),
+                activeNav: "businesses",
+                user,
+                flash,
+                clients,
+              }),
+              user,
+              flash: null,
+            }),
+            { status: 400 },
+          );
+        }
+        return htmlResponse(
+          htmlPage({
+            title: `Pick the right business — ${biz.name}`,
+            body: appLayout({
+              title: "Pick the right business",
+              content: renderBusinessPicker({
+                input: validation.value,
+                candidates: fetchResult.candidates,
+                editId: id,
+              }),
+              activeNav: "businesses",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+
+      // POST /:id/edit/confirm — overwrites the existing row with the picked candidate.
+      if (sub === "edit/confirm" && method === "POST") {
+        const csrf = checkCsrf(request, url);
+        if (csrf) return csrf;
+        const form = await request.formData();
+        const name = String(form.get("name") ?? "").trim();
+        const notes = String(form.get("notes") ?? "").trim();
+        const candidateRaw = String(form.get("candidate") ?? "");
+        if (!name || !candidateRaw) {
+          return flashRedirect(`/app/businesses/${id}/edit`, {
+            text: "Missing form data — start over.",
+            kind: "err",
+          });
+        }
+        let parsed: Awaited<ReturnType<typeof fetchBusinessCandidates>>;
+        try {
+          const p = JSON.parse(candidateRaw);
+          parsed = { candidates: [p] };
+        } catch {
+          return flashRedirect(`/app/businesses/${id}/edit`, {
+            text: "Could not parse picked candidate.",
+            kind: "err",
+          });
+        }
+        if (!("candidates" in parsed) || parsed.candidates.length === 0) {
+          return flashRedirect(`/app/businesses/${id}/edit`, {
+            text: "No candidate to confirm.",
+            kind: "err",
+          });
+        }
+        const picked = parsed.candidates[0];
+        if (!picked) {
+          return flashRedirect(`/app/businesses/${id}/edit`, {
+            text: "Could not read candidate after parse.",
+            kind: "err",
+          });
+        }
+        await updateBusinessFromCandidate(env, user, id, name, notes, picked);
+        return flashRedirect(`/app/businesses/${id}`, {
+          text: `Updated "${name}" from new Maps result.`,
+          kind: "ok",
+        });
+      }
+
+      // GET /:id/delete — confirmation page.
+      if (sub === "delete" && method === "GET") {
+        const embedRefCount = await countEmbedsReferencingBusiness(env, id);
+        return htmlResponse(
+          htmlPage({
+            title: `Delete ${biz.name}? — Edge SEO Platform`,
+            body: appLayout({
+              title: "Delete business",
+              content: renderBusinessDeleteConfirm({
+                business: biz,
+                embedRefCount,
+                errors: [],
+              }),
+              activeNav: "businesses",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+
+      // POST /:id/delete — execute the hard delete after type-DELETE.
+      if (sub === "delete" && method === "POST") {
+        const csrf = checkCsrf(request, url);
+        if (csrf) return csrf;
+        const form = await request.formData();
+        const confirm = String(form.get("confirm_word") ?? "")
+          .trim()
+          .toUpperCase();
+        if (confirm !== "DELETE") {
+          const embedRefCount = await countEmbedsReferencingBusiness(env, id);
+          return htmlResponse(
+            htmlPage({
+              title: `Delete ${biz.name}? — Edge SEO Platform`,
+              body: appLayout({
+                title: "Delete business",
+                content: renderBusinessDeleteConfirm({
+                  business: biz,
+                  embedRefCount,
+                  errors: [
+                    `Confirmation didn't match: expected "DELETE", got "${confirm || "(empty)"}".`,
+                  ],
+                }),
+                activeNav: "businesses",
+                user,
+                flash,
+                clients,
+              }),
+              user,
+              flash: null,
+            }),
+            { status: 400 },
+          );
+        }
+        await hardDeleteBusiness(env, user, id);
+        return flashRedirect("/app/businesses", {
+          text: `Deleted business "${biz.name}".`,
+          kind: "ok",
+        });
       }
     }
 
