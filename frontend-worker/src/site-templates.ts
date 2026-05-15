@@ -278,6 +278,45 @@ export function buildPlaceholderSchema(
   return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
 }
 
+/**
+ * Compute the set of template placeholders that aren't present in a
+ * data source's columns. Used by the preview surfaces to warn operators
+ * when the template/data-source pairing will produce identical-looking
+ * pages because critical fields render empty.
+ *
+ * Excludes the synthetic sentinels we inject at render time
+ * (`has_cross_links`, `has_reviews`) and the `cross_links` array name
+ * — those don't need to exist in the data source.
+ *
+ * Pure — exercised by unit tests.
+ */
+export function findMissingPlaceholders(
+  template: SiteTemplateRow,
+  dataSource: SiteDataSourceRow,
+): string[] {
+  const placeholderNames = new Set(
+    extractPlaceholders(template.html_template, "body")
+      .concat(extractPlaceholders(template.path_pattern, "path"))
+      .map((p) => p.name),
+  );
+  const synthetic = new Set(["has_cross_links", "has_reviews", "cross_links"]);
+  for (const s of synthetic) placeholderNames.delete(s);
+
+  const dsCols = new Set<string>();
+  try {
+    const cols = JSON.parse(dataSource.columns) as string[];
+    for (const c of cols) dsCols.add(c);
+  } catch {
+    // fall through with empty set; everything reads as missing
+  }
+
+  const missing: string[] = [];
+  for (const name of placeholderNames) {
+    if (!dsCols.has(name)) missing.push(name);
+  }
+  return missing.sort();
+}
+
 /* ─── Render engine ─── */
 
 /** HTML-escape (entity-encode) text. */

@@ -3228,7 +3228,7 @@ export default {
                 errors: [],
                 mode: "edit",
               })}${renderTemplatePreviewPanel({
-                templateId: tmpl.id,
+                template: tmpl,
                 dataSources: visibleDataSources,
               })}`,
               activeNav: "templates",

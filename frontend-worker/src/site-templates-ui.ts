@@ -27,6 +27,7 @@ import {
   checkCsrf,
   executeGenerate,
   extractPlaceholders,
+  findMissingPlaceholders,
   flashRedirect,
   loadVisibleDataSource,
   loadVisibleTemplate,
@@ -209,9 +210,10 @@ export function renderTemplateForm(opts: {
  * "Create template" first.
  */
 export function renderTemplatePreviewPanel(opts: {
-  templateId: number;
+  template: SiteTemplateRow;
   dataSources: readonly SiteDataSourceRow[];
 }): string {
+  const templateId = opts.template.id;
   if (opts.dataSources.length === 0) {
     return `<style>${TEMPLATES_CSS}</style><div class="tmpl-page" style="margin-top:1.25rem">
       <h3 style="margin:1.5rem 0 .35rem">Preview with sample data</h3>
@@ -222,11 +224,15 @@ export function renderTemplatePreviewPanel(opts: {
   // switch as the operator picks different sources. We embed them as
   // a JSON blob and let inline JS rebuild the row <select>.
   const titlesByDs: Record<string, string[]> = {};
+  // Pre-compute missing-placeholder list per data source so the JS
+  // can show a red warning when an incompatible source is picked.
+  const missingByDs: Record<string, string[]> = {};
   for (const d of opts.dataSources) {
     const rows = safeParseArray<Record<string, string>>(d.rows);
     titlesByDs[String(d.id)] = rows.map(
       (r, i) => r.title ?? r.name ?? r.city ?? r.business_name ?? `Row ${i + 1}`,
     );
+    missingByDs[String(d.id)] = findMissingPlaceholders(opts.template, d);
   }
   const dsOptions = opts.dataSources
     .map(
@@ -240,6 +246,11 @@ export function renderTemplatePreviewPanel(opts: {
     const title = titlesByDs[String(firstDs?.id ?? "")]?.[i] ?? `Row ${i + 1}`;
     return `<option value="${i}">${esc(`#${i + 1} — ${title}`)}</option>`;
   }).join("");
+  const firstMissing = firstDs ? (missingByDs[String(firstDs.id)] ?? []) : [];
+  const initialWarning =
+    firstMissing.length > 0
+      ? `<div class="similarity-warn" id="prev_warning" style="margin-top:.6rem">⚠ Template needs <code>${firstMissing.map(esc).join("</code>, <code>")}</code> but this data source has no matching column${firstMissing.length === 1 ? "" : "s"} — those fields will render empty and all pages will look identical.</div>`
+      : `<div id="prev_warning" style="display:none"></div>`;
   return `<style>${TEMPLATES_CSS}</style><div class="tmpl-page" style="margin-top:1.25rem">
     <h3 style="margin:1.5rem 0 .35rem">Preview with sample data</h3>
     <p class="subtitle" style="margin-bottom:.75rem">Pick a data source + row → opens a new tab showing the exact HTML one generated page will produce.</p>
@@ -252,14 +263,30 @@ export function renderTemplatePreviewPanel(opts: {
         <label for="prev_row" style="font-weight:600;font-size:.78rem;display:block;margin-bottom:.2rem">Row</label>
         <select id="prev_row" style="font:inherit;font-size:.88rem;padding:.4rem .55rem;border:1px solid var(--border-strong);border-radius:var(--radius);background:var(--bg);color:var(--fg);width:100%">${firstRowOptions}</select>
       </div>
-      <a id="prev_btn" class="btn btn-primary" href="/app/templates/${opts.templateId}/preview?ds=${firstDs?.id ?? ""}&row=0" target="_blank" rel="noopener">Render preview →</a>
+      <a id="prev_btn" class="btn btn-primary" href="/app/templates/${templateId}/preview?ds=${firstDs?.id ?? ""}&row=0" target="_blank" rel="noopener">Render preview →</a>
     </div>
+    ${initialWarning}
     <script>
       (function(){
         var titles = ${JSON.stringify(titlesByDs)};
+        var missing = ${JSON.stringify(missingByDs)};
         var dsEl = document.getElementById('prev_ds');
         var rowEl = document.getElementById('prev_row');
         var btn = document.getElementById('prev_btn');
+        var warnEl = document.getElementById('prev_warning');
+        function refreshWarning(){
+          var arr = missing[dsEl.value] || [];
+          if (arr.length === 0) {
+            warnEl.style.display = 'none';
+            warnEl.innerHTML = '';
+            return;
+          }
+          warnEl.style.display = '';
+          warnEl.className = 'similarity-warn';
+          warnEl.style.marginTop = '.6rem';
+          var codeList = arr.map(function(n){ return '<code>' + n + '</code>'; }).join(', ');
+          warnEl.innerHTML = '⚠ Template needs ' + codeList + ' but this data source has no matching column' + (arr.length === 1 ? '' : 's') + ' — those fields will render empty and all pages will look identical.';
+        }
         function refreshRows(){
           var arr = titles[dsEl.value] || [];
           rowEl.innerHTML = '';
@@ -270,6 +297,7 @@ export function renderTemplatePreviewPanel(opts: {
             rowEl.appendChild(opt);
           });
           refreshLink();
+          refreshWarning();
         }
         function refreshLink(){
           btn.href = '/app/templates/${opts.templateId}/preview?ds=' + encodeURIComponent(dsEl.value) + '&row=' + encodeURIComponent(rowEl.value || '0');
@@ -495,6 +523,14 @@ export function renderGeneratePreview(opts: {
   const warn = opts.plan.similarity_warn
     ? `<div class="similarity-warn">⚠ Generated pages are <strong>${(opts.plan.max_similarity * 100).toFixed(0)}%</strong> similar to each other (worst-case pair). Google may flag this as thin/duplicate content. Recommend more variation per row before deploying.</div>`
     : "";
+  // Placeholder-mismatch warning — surfaces the exact reason the
+  // operator's pages might look identical (template references a
+  // column the data source doesn't have).
+  const missing = findMissingPlaceholders(opts.template, opts.dataSource);
+  const missingWarn =
+    missing.length > 0
+      ? `<div class="similarity-warn">⚠ Template needs <code>${missing.map(esc).join("</code>, <code>")}</code> but the data source <strong>"${esc(opts.dataSource.name)}"</strong> has no matching column${missing.length === 1 ? "" : "s"} — those fields will render empty and pages may look identical. Pick a different template/data-source pair or add the missing column${missing.length === 1 ? "" : "s"} to your data.</div>`
+      : "";
   const summary =
     opts.target.mode === "pages_in_client"
       ? `<p class="subtitle">Will append <strong>${opts.plan.rows.length}</strong> <code>custom_page</code> route${opts.plan.rows.length === 1 ? "" : "s"} to client <code>${esc(opts.target.client_id ?? "")}</code>.</p>`
@@ -531,6 +567,7 @@ export function renderGeneratePreview(opts: {
     <div class="crumbs"><a href="/app/templates/${opts.template.id}/generate">← Pick data source</a></div>
     <h1>Preview — ${esc(opts.template.name)}</h1>
     ${summary}
+    ${missingWarn}
     ${warn}
     <div style="margin-bottom:1rem">${rowsHtml}</div>
     <form method="POST" action="/app/templates/${opts.template.id}/generate/confirm">
