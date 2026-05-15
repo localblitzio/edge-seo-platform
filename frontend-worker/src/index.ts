@@ -98,6 +98,21 @@ import {
   renderBulkPreview,
   renderBulkResult,
 } from "./bulk-clients.js";
+import {
+  businessAutoRefreshHeader,
+  handleArchiveBusinessPost,
+  handleClearDefaultTargetPost,
+  handleEditNotesPost,
+  handleNewBusinessPost,
+  handleRestoreBusinessPost,
+  handleSetDefaultTargetPost,
+  loadVisibleBusiness,
+  loadVisibleBusinesses,
+  renderBusinessDetail,
+  renderBusinessesList,
+  renderNewBusinessForm,
+  runBusinessScrapeJob,
+} from "./businesses.js";
 import { handleCityEnrichmentPost, runCityEnrichmentJob } from "./city-enrichment.js";
 import {
   handleClusterStatusPost,
@@ -3447,6 +3462,139 @@ export default {
         }),
         { status: 400 },
       );
+    }
+
+    /* ─── Businesses (client / target registry) ─── */
+    // Static paths come before the numeric :id catch-all.
+
+    if (path === "/app/businesses" && method === "GET") {
+      if (!user) return redirectToLogin(url);
+      const includeArchived = url.searchParams.get("show_archived") === "1";
+      const [bizRows, clients] = await Promise.all([
+        loadVisibleBusinesses(env, user, { includeArchived }),
+        loadVisibleClients(env, user),
+      ]);
+      return htmlResponse(
+        htmlPage({
+          title: "Businesses — Edge SEO Platform",
+          body: appLayout({
+            title: "Businesses",
+            content: renderBusinessesList({ rows: bizRows, user, includeArchived }),
+            activeNav: "businesses",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+      );
+    }
+
+    if (path === "/app/businesses/new" && method === "GET") {
+      if (!user) return redirectToLogin(url);
+      const clients = await loadVisibleClients(env, user);
+      return htmlResponse(
+        htmlPage({
+          title: "Add business — Edge SEO Platform",
+          body: appLayout({
+            title: "Add business",
+            content: renderNewBusinessForm({ prefill: {}, errors: [] }),
+            activeNav: "businesses",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+      );
+    }
+
+    if (path === "/app/businesses/new" && method === "POST") {
+      if (!user) return redirectToLogin(url);
+      const outcome = await handleNewBusinessPost(request, env, url, user);
+      if (outcome.redirect && outcome.job) {
+        ctx.waitUntil(runBusinessScrapeJob(env, outcome.job.businessId, outcome.job.input));
+        return outcome.redirect;
+      }
+      if (outcome.redirect) return outcome.redirect;
+      const clients = await loadVisibleClients(env, user);
+      return htmlResponse(
+        htmlPage({
+          title: "Add business — Edge SEO Platform",
+          body: appLayout({
+            title: "Add business",
+            content: renderNewBusinessForm({
+              prefill: outcome.prefill ?? {},
+              errors: outcome.errors ?? ["Unknown error"],
+            }),
+            activeNav: "businesses",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+        { status: 400 },
+      );
+    }
+
+    // POST /app/businesses/default-target/clear — flat path before catch-all.
+    if (path === "/app/businesses/default-target/clear" && method === "POST") {
+      if (!user) return redirectToLogin(url);
+      return handleClearDefaultTargetPost(request, env, url, user);
+    }
+
+    if (path.startsWith("/app/businesses/")) {
+      if (!user) return redirectToLogin(url);
+      const rest = path.slice("/app/businesses/".length);
+      const slash = rest.indexOf("/");
+      const idStr = slash === -1 ? rest : rest.slice(0, slash);
+      const sub = slash === -1 ? "" : rest.slice(slash + 1);
+      const id = Number.parseInt(idStr, 10);
+      if (!Number.isFinite(id) || id <= 0) {
+        return new Response(null, { status: 303, headers: { location: "/app/businesses" } });
+      }
+      const biz = await loadVisibleBusiness(env, user, id);
+      if (!biz) return new Response("Business not found", { status: 404 });
+      const clients = await loadVisibleClients(env, user);
+
+      if (sub === "" && method === "GET") {
+        return htmlResponse(
+          htmlPage({
+            title: `${biz.name} — Edge SEO Platform`,
+            body: appLayout({
+              title: biz.name,
+              content: renderBusinessDetail(biz),
+              activeNav: "businesses",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+            headExtra: businessAutoRefreshHeader(biz),
+          }),
+        );
+      }
+
+      if (sub === "set-default-target" && method === "POST") {
+        return handleSetDefaultTargetPost(request, env, url, user, id);
+      }
+
+      if (sub === "archive" && method === "POST") {
+        return handleArchiveBusinessPost(request, env, url, user, id);
+      }
+
+      if (sub === "restore" && method === "POST") {
+        return handleRestoreBusinessPost(request, env, url, user, id);
+      }
+
+      if (sub === "notes" && method === "POST") {
+        return handleEditNotesPost(request, env, url, user, id);
+      }
     }
 
     /* ─── Generated sites (programmatic SEO) ─── */

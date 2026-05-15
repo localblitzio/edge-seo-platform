@@ -385,6 +385,8 @@ const NAV_ICONS: Record<string, string> = {
   embeds: `<svg ${NAV_SVG_ATTRS}><path d="M16.5 9.4L7.5 4.21"/><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>`,
   // bar-chart (Indexation — overview / stats)
   indexation: `<svg ${NAV_SVG_ATTRS}><line x1="12" y1="20" x2="12" y2="10"/><line x1="18" y1="20" x2="18" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>`,
+  // briefcase (Businesses — agency client registry)
+  businesses: `<svg ${NAV_SVG_ATTRS}><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>`,
   // copy (Generated sites — duplicated/auto-generated)
   "generated-sites": `<svg ${NAV_SVG_ATTRS}><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`,
   // layers (Templates — stacked content)
@@ -465,6 +467,12 @@ export function appSidebar(opts: { activeNav: string; clients: ClientRow[]; user
       id: "data-sources",
       label: "Data sources",
       icon: NAV_ICONS["data-sources"] ?? "",
+    },
+    {
+      href: "/app/businesses",
+      id: "businesses",
+      label: "Businesses",
+      icon: NAV_ICONS.businesses ?? "",
     },
     { href: "/app/audit", id: "audit", label: "Audit log", icon: NAV_ICONS.audit ?? "" },
   ];
