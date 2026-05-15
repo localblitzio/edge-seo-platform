@@ -35,6 +35,12 @@ export interface TemplateStarter {
   name: string;
   path_pattern: string;
   html_template: string;
+  /** Aggregate-only: column to group rows by. */
+  group_by_column?: string;
+  /** Aggregate-only: max businesses per page. */
+  top_n?: number;
+  /** Aggregate-only: column to rank by within each group. */
+  sort_by_column?: string;
 }
 
 const CITY_SERVICE_LANDING_HTML = `<!doctype html>
@@ -301,6 +307,75 @@ const CITY_DIRECTORY_PAGE_HTML = `<!doctype html>
 </body>
 </html>`;
 
+const TOP_N_LISTICLE_HTML = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Top {{group_count}} Businesses in {{group_value}} | Best Local Picks</title>
+  <meta name="description" content="Our top {{group_count}} highest-rated businesses in {{group_value}}. Compare ratings, reviews, hours, and contact info — all in one place.">
+  <style>
+    *{box-sizing:border-box}
+    body{margin:0;font:16px/1.6 -apple-system,BlinkMacSystemFont,"Inter","Segoe UI",Roboto,sans-serif;color:#111;background:#fafafb}
+    .container{max-width:820px;margin:0 auto;padding:2rem 1.25rem}
+    h1{font-size:clamp(1.8rem,3.5vw,2.6rem);line-height:1.15;margin:.1em 0 .25em}
+    .lede{font-size:1.1rem;color:#444;margin:0 0 1.5rem}
+    .city-blurb{background:#f7faf9;border-left:4px solid #10b981;padding:.8rem 1.1rem;border-radius:.4rem;color:#374151;margin:1rem 0 1.75rem}
+    .listicle{counter-reset:rank;list-style:none;padding:0;margin:0}
+    .listicle .item{counter-increment:rank;position:relative;background:#fff;border:1px solid #e5e7eb;border-radius:.7rem;padding:1.2rem 1.4rem 1.2rem 4.2rem;margin:.75rem 0;box-shadow:0 1px 3px rgba(15,23,42,.05);transition:transform .15s ease,box-shadow .15s ease}
+    .listicle .item:hover{transform:translateY(-1px);box-shadow:0 4px 12px rgba(15,23,42,.08)}
+    .listicle .item::before{content:counter(rank);position:absolute;top:1.1rem;left:1.1rem;width:2.4rem;height:2.4rem;background:linear-gradient(135deg,#10b981,#059669);color:#fff;border-radius:9999px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:1.1rem;box-shadow:0 2px 6px rgba(16,185,129,.3)}
+    .listicle h2{margin:0 0 .35em;font-size:1.2rem;line-height:1.3}
+    .listicle .meta{color:#6b7280;font-size:.88rem;margin-bottom:.5rem}
+    .listicle .rating{color:#d97706;font-weight:600;font-size:.92rem}
+    .listicle .address{font-size:.9rem;color:#374151;margin:.35rem 0}
+    .listicle .row-cta{margin-top:.65rem;display:flex;gap:.5rem;flex-wrap:wrap}
+    .listicle .row-cta a{display:inline-block;padding:.4rem .85rem;border-radius:.4rem;text-decoration:none;font-size:.85rem;font-weight:600}
+    .listicle .row-cta .call{background:#10b981;color:#fff}
+    .listicle .row-cta .web{background:#f3f4f6;color:#111;border:1px solid #e5e7eb}
+    .target-card{margin:1.5rem 0}
+    footer{margin-top:3rem;padding-top:1.25rem;border-top:1px solid #e5e7eb;color:#6b7280;font-size:.88rem}
+  </style>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "ItemList",
+    "name": "Top businesses in {{group_value}}",
+    "numberOfItems": "{{group_count}}",
+    "itemListOrder": "https://schema.org/ItemListOrderDescending"
+  }
+  </script>
+</head>
+<body>
+  <div class="container">
+    <h1>Top {{group_count}} businesses in {{group_value}}</h1>
+    <p class="lede">Our highest-rated picks for {{group_value}} — ranked by customer rating, with contact info and reviews so you can choose with confidence.</p>
+
+    {{#if target_city_description}}<div class="city-blurb">{{target_city_description}}</div>{{/if}}
+
+    {{#if has_target}}<div class="target-card">{{{target_cta_html}}}</div>{{/if}}
+
+    <ol class="listicle">
+      {{#each businesses}}<li class="item">
+        <h2>{{title}}</h2>
+        <div class="meta">{{categories}}</div>
+        {{#if rating}}<div class="rating">★ {{rating}} <span style="color:#6b7280;font-size:.82rem">({{rating_count}} reviews)</span></div>{{/if}}
+        {{#if address}}<div class="address">{{address}}</div>{{/if}}
+        <div class="row-cta">
+          {{#if phone}}<a class="call" href="tel:{{phone}}">📞 {{phone}}</a>{{/if}}
+          {{#if website}}<a class="web" href="{{website}}" rel="nofollow noopener" target="_blank">Visit website →</a>{{/if}}
+        </div>
+      </li>{{/each}}
+    </ol>
+
+    {{#if has_target_city_facts}}<h2 style="margin-top:2rem">About {{group_value}}</h2>
+    <p>{{target_city_description}}{{#if target_city_population}} Population: {{target_city_population}}.{{/if}}{{#if target_city_founded_year}} Founded {{target_city_founded_year}}.{{/if}}</p>{{/if}}
+
+    <footer>Listings sourced from public Google Maps data. Rankings reflect customer ratings at the time of generation; visit each business's profile for the latest reviews and hours.</footer>
+  </div>
+</body>
+</html>`;
+
 export const TEMPLATE_STARTERS: readonly TemplateStarter[] = [
   {
     id: "city-service-landing",
@@ -334,6 +409,20 @@ export const TEMPLATE_STARTERS: readonly TemplateStarter[] = [
     name: "City directory page",
     path_pattern: "/{{slugify service}}-in-{{slugify city}}",
     html_template: CITY_DIRECTORY_PAGE_HTML,
+  },
+  {
+    id: "top-n-listicle",
+    label: "Top 5 / 10 businesses (listicle)",
+    description:
+      "One ranked listicle page per city — top businesses sorted by rating with click-to-call + website links. Auto-injects your target's CTA + city facts when set.",
+    bestWith: "Maps scrape (groups by city; sorts by rating)",
+    kind: "aggregate_per_group",
+    name: "Top businesses by city",
+    path_pattern: "/top-businesses-in-{{slugify group_value}}",
+    html_template: TOP_N_LISTICLE_HTML,
+    group_by_column: "city",
+    top_n: 10,
+    sort_by_column: "rating",
   },
 ];
 

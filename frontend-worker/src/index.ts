@@ -3241,6 +3241,9 @@ export default {
             kind: starter.kind,
             path_pattern: starter.path_pattern,
             html_template: starter.html_template,
+            group_by_column: starter.group_by_column ?? null,
+            top_n: starter.top_n ?? 10,
+            sort_by_column: starter.sort_by_column ?? null,
           }
         : {};
       return htmlResponse(
