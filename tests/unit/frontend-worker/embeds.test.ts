@@ -16,6 +16,8 @@ function fakeEmbed(overrides: Partial<EmbedRow> = {}): EmbedRow {
     kind: "google_maps_embed",
     html: '<iframe src="https://www.google.com/maps/embed?pb=abc"></iframe>',
     default_position: "bottom",
+    business_id: null,
+    business_kind: null,
     created_at: "2026-05-13",
     updated_at: "2026-05-13",
     ...overrides,

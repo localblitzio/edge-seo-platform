@@ -83,6 +83,8 @@ export interface ClientRow {
   created_at: string;
   updated_at: string;
   owner_id: number | null;
+  /** ISO timestamp when soft-deleted; NULL means the client is live. */
+  deleted_at: string | null;
 }
 
 export interface AttestationRow {
@@ -121,15 +123,23 @@ export function canSeeAllClients(user: User): boolean {
   return user.role === "super_admin";
 }
 
-export async function loadVisibleClients(env: AppEnv, user: User): Promise<ClientRow[]> {
+export async function loadVisibleClients(
+  env: AppEnv,
+  user: User,
+  opts: { includeDeleted?: boolean } = {},
+): Promise<ClientRow[]> {
+  // Soft-deleted clients (`deleted_at IS NOT NULL`) are hidden by
+  // default — they keep returning 410 Gone but stop cluttering the
+  // working list. Opt in via `?show_deleted=1` on the index page.
+  const deletedFilter = opts.includeDeleted ? "" : " AND deleted_at IS NULL";
   if (canSeeAllClients(user)) {
     const r = await env.CONFIG_DB.prepare(
-      "SELECT * FROM clients ORDER BY client_id",
+      `SELECT * FROM clients WHERE 1=1${deletedFilter} ORDER BY client_id`,
     ).all<ClientRow>();
     return r.results ?? [];
   }
   const r = await env.CONFIG_DB.prepare(
-    "SELECT * FROM clients WHERE owner_id = ? ORDER BY client_id",
+    `SELECT * FROM clients WHERE owner_id = ?${deletedFilter} ORDER BY client_id`,
   )
     .bind(user.id)
     .all<ClientRow>();
@@ -375,6 +385,14 @@ const NAV_ICONS: Record<string, string> = {
   embeds: `<svg ${NAV_SVG_ATTRS}><path d="M16.5 9.4L7.5 4.21"/><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>`,
   // bar-chart (Indexation — overview / stats)
   indexation: `<svg ${NAV_SVG_ATTRS}><line x1="12" y1="20" x2="12" y2="10"/><line x1="18" y1="20" x2="18" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>`,
+  // briefcase (Businesses — agency client registry)
+  businesses: `<svg ${NAV_SVG_ATTRS}><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>`,
+  // copy (Generated sites — duplicated/auto-generated)
+  "generated-sites": `<svg ${NAV_SVG_ATTRS}><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`,
+  // layers (Templates — stacked content)
+  templates: `<svg ${NAV_SVG_ATTRS}><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>`,
+  // database (Data sources — tabular data)
+  "data-sources": `<svg ${NAV_SVG_ATTRS}><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v6c0 1.66 4 3 9 3s9-1.34 9-3V5"/><path d="M3 11v6c0 1.66 4 3 9 3s9-1.34 9-3v-6"/></svg>`,
   // key (Settings → API keys)
   "settings:api-keys": `<svg ${NAV_SVG_ATTRS}><circle cx="7.5" cy="15.5" r="3.5"/><line x1="10" y1="13" x2="20" y2="3"/><line x1="16" y1="7" x2="19" y2="4"/><line x1="14" y1="9" x2="17" y2="6"/></svg>`,
   // shield-user (Super-admin Users)
@@ -431,6 +449,30 @@ export function appSidebar(opts: { activeNav: string; clients: ClientRow[]; user
       id: "indexation",
       label: "Indexation",
       icon: NAV_ICONS.indexation ?? "",
+    },
+    {
+      href: "/app/templates",
+      id: "templates",
+      label: "Templates",
+      icon: NAV_ICONS.templates ?? "",
+    },
+    {
+      href: "/app/generated-sites",
+      id: "generated-sites",
+      label: "Generated sites",
+      icon: NAV_ICONS["generated-sites"] ?? "",
+    },
+    {
+      href: "/app/data-sources",
+      id: "data-sources",
+      label: "Data sources",
+      icon: NAV_ICONS["data-sources"] ?? "",
+    },
+    {
+      href: "/app/businesses",
+      id: "businesses",
+      label: "Businesses",
+      icon: NAV_ICONS.businesses ?? "",
     },
     { href: "/app/audit", id: "audit", label: "Audit log", icon: NAV_ICONS.audit ?? "" },
   ];
@@ -526,8 +568,20 @@ export function renderClientsList(
   clusters: readonly ClusterFilterOption[],
   clusterMembers: ReadonlyMap<number, readonly string[]>,
   user: User,
+  opts: { showDeleted?: boolean; showGenerated?: boolean; hiddenGeneratedCount?: number } = {},
 ): string {
   const headerActions = `<span style="float:right;display:inline-flex;gap:.4rem"><a href="/app/clients/serp-new" class="btn">From SERP</a> <a href="/app/clients/bulk-new" class="btn">Bulk-create</a> <a href="/app/clients/new" class="btn btn-primary">+ New proxied site</a></span>`;
+  const deletedToggle = opts.showDeleted
+    ? `<a href="/app/clients${opts.showGenerated ? "?show_generated=1" : ""}" class="btn" style="font-size:.82rem;padding:.3rem .65rem">Hide deleted</a>`
+    : `<a href="/app/clients?show_deleted=1${opts.showGenerated ? "&show_generated=1" : ""}" class="btn" style="font-size:.82rem;padding:.3rem .65rem;color:var(--fg-muted)">Show deleted</a>`;
+  // "Generated" toggle — only show when there are programmatic-SEO
+  // clients to merge in, otherwise it's noise.
+  const hiddenGenerated = opts.hiddenGeneratedCount ?? 0;
+  const generatedToggle = opts.showGenerated
+    ? `<a href="/app/clients${opts.showDeleted ? "?show_deleted=1" : ""}" class="btn" style="font-size:.82rem;padding:.3rem .65rem">Hide ${hiddenGenerated} generated</a>`
+    : hiddenGenerated > 0
+      ? `<a href="/app/clients?show_generated=1${opts.showDeleted ? "&show_deleted=1" : ""}" class="btn" style="font-size:.82rem;padding:.3rem .65rem;color:var(--fg-muted)">Show ${hiddenGenerated} generated</a> <a href="/app/generated-sites" style="font-size:.82rem;color:var(--accent)">→ go to Generated sites</a>`
+      : "";
   if (clients.length === 0) {
     return `<h1>Proxied sites ${headerActions}</h1>
       <p class="subtitle">${user.role === "super_admin" ? "No proxied sites in the platform yet." : "You don't have any proxied sites yet."}</p>
@@ -554,12 +608,15 @@ export function renderClientsList(
       // Lowercased substring soup for the search filter — JS just
       // .includes() against the input value to decide visibility.
       const searchHaystack = `${c.client_id} ${c.proxy_domain} ${c.source_domain}`.toLowerCase();
+      const deletedBadge = c.deleted_at
+        ? ` <span class="pill" style="background:var(--amber-bg);color:var(--amber);font-size:.7rem;padding:.05rem .4rem">deleted</span>`
+        : "";
       return `<tr
           data-search="${esc(searchHaystack)}"
           data-status="${esc(c.status)}"
           data-zone="${esc(zone)}"
-          data-clusters="${memberOf.join(",")}">
-        <td><a href="/app/clients/${esc(c.client_id)}" class="mono">${esc(c.client_id)}</a></td>
+          data-clusters="${memberOf.join(",")}"${c.deleted_at ? ' style="opacity:.65"' : ""}>
+        <td><a href="/app/clients/${esc(c.client_id)}" class="mono">${esc(c.client_id)}</a>${deletedBadge}</td>
         <td class="mono">${esc(c.proxy_domain)}</td>
         <td class="mono">${esc(c.source_domain)}</td>
         <td>${statusPill(c.status)}</td>
@@ -591,7 +648,7 @@ export function renderClientsList(
       ),
   ].join("");
   return `<h1>Proxied sites ${headerActions}</h1>
-    <p class="subtitle">${ownership}</p>
+    <p class="subtitle">${ownership} ${deletedToggle} ${generatedToggle}</p>
     <div class="card" style="padding:.75rem 1rem;margin-bottom:.75rem">
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:.6rem;align-items:end">
         <div>
@@ -1063,6 +1120,7 @@ export async function renderClientDetail(env: AppEnv, user: User, id: string): P
   return `<div class="crumbs"><a href="/app/clients">← Proxied sites</a></div>
     <h1>${esc(client.client_id)} ${statusPill(client.status)} ${modePill}</h1>
     <p class="subtitle">${subtitle}</p>
+    ${renderDeletedBanner(client)}
     ${renderActionsRow(client)}
     ${parseError ? `<div class="empty">⚠ Config JSON parse error: ${esc(parseError)}</div>` : ""}
     ${mode === "in_place" ? renderInPlaceSetupCard(client) : ""}
@@ -1125,7 +1183,9 @@ type AuditEventType =
   | "revocation"
   | "authorization_update"
   | "embed_apply"
-  | "embed_remove";
+  | "embed_remove"
+  | "soft_delete"
+  | "restore";
 
 export interface AuditEntry {
   client_id: string;
@@ -1329,6 +1389,12 @@ function renderActionsRow(client: ClientRow): string {
       <button class="btn ${cls}" type="submit"${onclick}>${esc(label)}</button>
     </form>`;
   };
+  // Delete button is separated visually from the status flips because
+  // it's the most destructive non-terminal action and we want it
+  // harder to hit accidentally.
+  const deleteBtn = client.deleted_at
+    ? `<form method="POST" action="/app/clients/${esc(client.client_id)}/restore" style="margin-left:auto"><button class="btn btn-primary" type="submit">Restore site</button></form>`
+    : `<a class="btn" style="margin-left:auto;color:var(--red);border-color:color-mix(in srgb,var(--red) 40%,transparent)" href="/app/clients/${esc(client.client_id)}/delete">Delete site…</a>`;
   return `<div class="actions-row">
     <a class="btn btn-primary" href="/app/clients/${esc(client.client_id)}/edit">Edit config</a>
     <a class="btn" href="/app/clients/${esc(client.client_id)}/indexing">Indexing</a>
@@ -1338,6 +1404,7 @@ function renderActionsRow(client: ClientRow): string {
     ${statusBtn("active", "Activate", "btn-success", null)}
     ${statusBtn("paused", "Pause", "btn-warn", "Pause this client? The Worker will return 410 for all requests.")}
     ${statusBtn("terminated", "Terminate", "btn-danger", "Terminate is a one-way door per PRD §6.3. Requests will return 410 permanently. Are you sure?")}
+    ${deleteBtn}
   </div>`;
 }
 
@@ -1449,7 +1516,14 @@ function renderStructuredFormBody(opts: {
     // already edited it. If custom is selected, do nothing.
     "var cidEl=document.getElementById('f_client_id');if(cidEl&&!cidEl.readOnly){cidEl.addEventListener('input',function(){var idx=checkedZoneIndex();if(idx<0)return;var sE=document.getElementById('f_proxy_subdomain_'+idx);if(!sE)return;if(sE.dataset.userEdited!=='1'){sE.value=cidEl.value;syncToJson();}});}",
     "for(var zi=0;zi<ZONES.length;zi++){(function(i){var ee=document.getElementById('f_proxy_subdomain_'+i);if(ee)ee.addEventListener('input',function(){ee.dataset.userEdited='1';});})(zi);}",
-    "var srcEl=document.getElementById('f_source_domain'),orgEl=document.getElementById('f_origin');function shouldFillOrigin(){if(!orgEl)return false;if(orgEl.dataset.userEdited==='1')return false;var v=orgEl.value||'';return v===''||v.indexOf('REPLACE_')!==-1;}if(srcEl&&orgEl){srcEl.addEventListener('input',function(){if(!shouldFillOrigin())return;var s=srcEl.value.trim();orgEl.value=s===''?'':'https://'+s.replace(/^https?:\\/\\//i,'');syncToJson();});orgEl.addEventListener('input',function(){orgEl.dataset.userEdited='1';});if(shouldFillOrigin()&&srcEl.value&&srcEl.value.indexOf('REPLACE_')===-1){orgEl.value='https://'+srcEl.value.replace(/^https?:\\/\\//i,'');syncToJson();}}",
+    // Auto-mirror source_domain → routing[0].origin as the operator
+    // types. The earlier version of shouldFillOrigin stopped after
+    // the first keystroke (because the field was then non-empty), so
+    // typing "localblitz.ai" produced origin "https://l" frozen at
+    // keystroke #1. Now we keep mirroring as long as the operator has
+    // NOT explicitly edited the origin field — that's the only signal
+    // to stop. The initial "REPLACE_" sentinel is still overwritten.
+    "var srcEl=document.getElementById('f_source_domain'),orgEl=document.getElementById('f_origin');function shouldFillOrigin(){if(!orgEl)return false;return orgEl.dataset.userEdited!=='1';}if(srcEl&&orgEl){srcEl.addEventListener('input',function(){if(!shouldFillOrigin())return;var s=srcEl.value.trim();orgEl.value=s===''?'':'https://'+s.replace(/^https?:\\/\\//i,'');syncToJson();});orgEl.addEventListener('input',function(){orgEl.dataset.userEdited='1';});if(shouldFillOrigin()&&srcEl.value&&srcEl.value.indexOf('REPLACE_')===-1){orgEl.value='https://'+srcEl.value.replace(/^https?:\\/\\//i,'');syncToJson();}}",
     "function onMode(){var idx=checkedZoneIndex();for(var i=0;i<ZONES.length;i++){var ee=document.getElementById('f_proxy_subdomain_'+i);if(ee)ee.disabled=(i!==idx);}var cE=document.getElementById('f_proxy_custom');if(cE)cE.disabled=(idx>=0);syncToJson();}",
     "for(var zj=0;zj<ZONES.length;zj++){var zr=document.getElementById('f_proxy_mode_zone_'+zj);if(zr)zr.addEventListener('change',onMode);}",
     "var cRel=document.getElementById('f_proxy_mode_custom');if(cRel)cRel.addEventListener('change',onMode);",
@@ -1875,14 +1949,14 @@ interface ActorContext {
   ip: string;
 }
 
-function actorOf(user: User, request: Request): ActorContext {
+export function actorOf(user: User, request: Request): ActorContext {
   return {
     user,
     ip: request.headers.get("cf-connecting-ip") ?? "0.0.0.0",
   };
 }
 
-function checkCsrf(request: Request, url: URL): Response | null {
+export function checkCsrf(request: Request, url: URL): Response | null {
   const expected = `${url.protocol}//${url.host}`;
   const origin = request.headers.get("origin");
   if (origin) {
@@ -1902,7 +1976,7 @@ function checkCsrf(request: Request, url: URL): Response | null {
   return new Response("CSRF: missing Origin and Referer", { status: 403 });
 }
 
-function flashRedirect(
+export function flashRedirect(
   location: string,
   flash: { text: string; kind: "ok" | "warn" | "err" },
 ): Response {
@@ -2341,6 +2415,199 @@ export async function handleStatusPost(
   });
 }
 
+/**
+ * Confirmation page for soft-deleting a client. Renders a type-to-
+ * confirm form — the operator must type the exact client_id before
+ * the submit button POSTs the actual delete. This is the same
+ * pattern GitHub/AWS/Vercel use for destructive ops.
+ */
+export function renderSoftDeleteConfirm(opts: {
+  client: ClientRow;
+  errors: string[];
+}): string {
+  const { client } = opts;
+  const errBox =
+    opts.errors.length > 0 ? `<div class="error-box">${opts.errors.map(esc).join("\n")}</div>` : "";
+  return `<div class="client-detail" style="max-width:680px">
+    <div class="crumbs"><a href="/app/clients/${esc(client.client_id)}">← ${esc(client.client_id)}</a></div>
+    <h1 style="color:var(--red)">Delete site</h1>
+    ${errBox}
+    <div style="background:var(--red-bg);border:1px solid color-mix(in srgb,var(--red) 30%,transparent);border-radius:var(--radius);padding:1rem 1.25rem;margin-bottom:1.25rem">
+      <strong>This will soft-delete the site.</strong>
+      <ul style="margin:.5rem 0 0;padding-left:1.2rem;line-height:1.7">
+        <li>Status flips to <code>paused</code>; worker returns <code>410 Gone</code> immediately.</li>
+        <li>Hidden from the proxied sites list (toggle "Show deleted" to see it again).</li>
+        <li>Cluster memberships and embed placements: kept for now.</li>
+        <li>R2 content and the client row are preserved for <strong>30 days</strong>, then a future cron sweep will hard-delete.</li>
+        <li><strong>Reversible</strong> via the "Restore" button until the 30-day cron sweep runs.</li>
+      </ul>
+    </div>
+    <form method="POST" action="/app/clients/${esc(client.client_id)}/delete">
+      <div class="form-section">
+        <label for="confirm_id">Type the client_id to confirm: <code style="font-family:var(--mono)">${esc(client.client_id)}</code></label>
+        <input id="confirm_id" name="confirm_id" type="text" required autocomplete="off" autofocus placeholder="${esc(client.client_id)}" style="font-family:var(--mono);font-size:1rem">
+      </div>
+      <div class="form-actions">
+        <button class="btn" type="submit" style="background:var(--red);border-color:var(--red);color:#fff">Soft-delete this site</button>
+        <a class="btn" href="/app/clients/${esc(client.client_id)}">Cancel</a>
+      </div>
+    </form>
+  </div>`;
+}
+
+/**
+ * Banner shown at the top of a soft-deleted client's detail page,
+ * with the restore action.
+ */
+export function renderDeletedBanner(client: ClientRow): string {
+  if (!client.deleted_at) return "";
+  return `<div style="background:var(--amber-bg);color:var(--amber);border:1px solid color-mix(in srgb,var(--amber) 30%,transparent);border-radius:var(--radius);padding:.85rem 1rem;margin-bottom:1rem;display:flex;align-items:center;justify-content:space-between;gap:1rem">
+    <div>
+      <strong>This site is soft-deleted</strong> (returns 410 Gone).
+      <span style="color:var(--fg-muted);font-size:.85rem">Deleted at ${esc(client.deleted_at)} · will be hard-deleted after 30 days.</span>
+    </div>
+    <form method="POST" action="/app/clients/${esc(client.client_id)}/restore" style="margin:0">
+      <button class="btn btn-primary" type="submit">Restore site</button>
+    </form>
+  </div>`;
+}
+
+export async function handleSoftDeletePost(
+  request: Request,
+  env: AppEnv,
+  url: URL,
+  user: User,
+  clientId: string,
+): Promise<{ redirect: Response } | { errors: string[] }> {
+  const csrf = checkCsrf(request, url);
+  if (csrf) return { redirect: csrf };
+  const client = await loadVisibleClient(env, user, clientId);
+  if (!client) return { redirect: new Response("Not found", { status: 404 }) };
+  if (client.deleted_at) {
+    return {
+      redirect: flashRedirect(`/app/clients/${clientId}`, {
+        text: "Already soft-deleted.",
+        kind: "warn",
+      }),
+    };
+  }
+
+  const form = await request.formData();
+  const confirm = String(form.get("confirm_id") ?? "").trim();
+  if (confirm !== clientId) {
+    return {
+      errors: [`Confirmation didn't match: expected "${clientId}", got "${confirm || "(empty)"}".`],
+    };
+  }
+
+  let parsedCfg: Record<string, unknown>;
+  try {
+    parsedCfg = JSON.parse(client.config_json);
+  } catch (e) {
+    return {
+      redirect: flashRedirect(`/app/clients/${clientId}`, {
+        text: `Cannot soft-delete: config_json is invalid: ${(e as Error).message}`,
+        kind: "err",
+      }),
+    };
+  }
+  parsedCfg.status = "paused";
+  const newJson = JSON.stringify(parsedCfg);
+
+  await env.CONFIG_DB.prepare(
+    `UPDATE clients
+       SET status = 'paused',
+           deleted_at = CURRENT_TIMESTAMP,
+           config_json = ?,
+           updated_at = CURRENT_TIMESTAMP
+     WHERE client_id = ?`,
+  )
+    .bind(newJson, clientId)
+    .run();
+  await invalidateKv(env, clientId, client.proxy_domain);
+
+  const actor = actorOf(user, request);
+  await writeAudit(env, {
+    client_id: clientId,
+    actor_email: actor.user.email,
+    actor_ip: actor.ip,
+    event_type: "soft_delete",
+    before_hash: fnvHash(client.config_json),
+    after_hash: fnvHash(newJson),
+    previous_status: client.status,
+    new_status: "paused",
+    notes: "Soft-deleted — recoverable for 30 days.",
+  });
+
+  return {
+    redirect: flashRedirect("/app/clients", {
+      text: `Soft-deleted "${clientId}" — restore from the list view if needed.`,
+      kind: "ok",
+    }),
+  };
+}
+
+export async function handleRestorePost(
+  request: Request,
+  env: AppEnv,
+  url: URL,
+  user: User,
+  clientId: string,
+): Promise<Response> {
+  const csrf = checkCsrf(request, url);
+  if (csrf) return csrf;
+  const client = await loadVisibleClient(env, user, clientId);
+  if (!client) return new Response("Not found", { status: 404 });
+  if (!client.deleted_at) {
+    return flashRedirect(`/app/clients/${clientId}`, {
+      text: "Not soft-deleted — nothing to restore.",
+      kind: "warn",
+    });
+  }
+
+  let parsedCfg: Record<string, unknown>;
+  try {
+    parsedCfg = JSON.parse(client.config_json);
+  } catch (e) {
+    return flashRedirect(`/app/clients/${clientId}`, {
+      text: `Cannot restore: config_json is invalid: ${(e as Error).message}`,
+      kind: "err",
+    });
+  }
+  parsedCfg.status = "active";
+  const newJson = JSON.stringify(parsedCfg);
+
+  await env.CONFIG_DB.prepare(
+    `UPDATE clients
+       SET status = 'active',
+           deleted_at = NULL,
+           config_json = ?,
+           updated_at = CURRENT_TIMESTAMP
+     WHERE client_id = ?`,
+  )
+    .bind(newJson, clientId)
+    .run();
+  await invalidateKv(env, clientId, client.proxy_domain);
+
+  const actor = actorOf(user, request);
+  await writeAudit(env, {
+    client_id: clientId,
+    actor_email: actor.user.email,
+    actor_ip: actor.ip,
+    event_type: "restore",
+    before_hash: fnvHash(client.config_json),
+    after_hash: fnvHash(newJson),
+    previous_status: client.status,
+    new_status: "active",
+    notes: null,
+  });
+
+  return flashRedirect(`/app/clients/${clientId}`, {
+    text: `Restored "${clientId}".`,
+    kind: "ok",
+  });
+}
+
 export async function handleCachePurgePost(
   request: Request,
   env: AppEnv,
@@ -2424,7 +2691,7 @@ const CUSTOM_PAGE_MAX_HTML_BYTES = 1_000_000; // 1 MB
  * can't collide on the same path. The trailing path always starts with
  * `/`, giving keys like `lantern-crest/lp/austin`.
  */
-function customPageStorageKey(clientId: string, path: string): string {
+export function customPageStorageKey(clientId: string, path: string): string {
   return `${clientId}${path}`;
 }
 
@@ -2432,7 +2699,7 @@ function customPageStorageKey(clientId: string, path: string): string {
  * The match regex emitted for a custom_page route. Mirrors the per-page
  * editor convention: `/?$` so both `/lp/austin` and `/lp/austin/` match.
  */
-function customPageMatch(path: string): string {
+export function customPageMatch(path: string): string {
   const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return `^${escaped}/?$`;
 }

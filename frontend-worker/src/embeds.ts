@@ -59,6 +59,12 @@ export interface EmbedRow {
   kind: EmbedKind;
   html: string;
   default_position: EmbedPosition;
+  /** When non-null, this is a Business-backed embed and `html`
+   *  was rendered from the Business at create / refresh time. */
+  business_id: number | null;
+  /** Non-null when business_id is set. Discriminates which Business
+   *  embed renderer was used (business_card, business_cta, etc.). */
+  business_kind: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -719,7 +725,7 @@ export function renderEmbedsList(rows: EmbedRow[], user: User): string {
   if (rows.length === 0) {
     return `<h1>Embeds</h1>
       <p class="subtitle">${ownership} Embeds are reusable HTML blocks (iframes, Google Maps) you can bulk-apply across a cluster. Applying also forces canonical=self + index,follow for SEO competitiveness.</p>
-      <p style="margin-bottom:1rem"><a class="btn btn-primary" href="/app/embeds/new">+ New embed</a> <a class="btn" href="/app/embeds/placements">View placements →</a></p>
+      <p style="margin-bottom:1rem"><a class="btn btn-primary" href="/app/embeds/new">+ New embed</a> <a class="btn" href="/app/embeds/new-business">+ Business embed</a> <a class="btn" href="/app/embeds/placements">View placements →</a></p>
       <div class="empty">No embeds yet. Create one to start bulk-applying.</div>`;
   }
   const tbody = rows
@@ -734,7 +740,7 @@ export function renderEmbedsList(rows: EmbedRow[], user: User): string {
     .join("");
   return `<h1>Embeds</h1>
     <p class="subtitle">${ownership}</p>
-    <p style="margin-bottom:1rem"><a class="btn btn-primary" href="/app/embeds/new">+ New embed</a> <a class="btn" href="/app/embeds/placements">View placements →</a></p>
+    <p style="margin-bottom:1rem"><a class="btn btn-primary" href="/app/embeds/new">+ New embed</a> <a class="btn" href="/app/embeds/new-business">+ Business embed</a> <a class="btn" href="/app/embeds/placements">View placements →</a></p>
     <table class="data">
       <thead><tr><th>Name</th><th>Kind</th><th>Default position</th><th>Updated</th></tr></thead>
       <tbody>${tbody}</tbody>
@@ -1093,14 +1099,22 @@ export function renderEmbedDetail(opts: {
       </label>`,
     )
     .join("");
+  const isBusinessBacked = opts.embed.business_id !== null && opts.embed.business_kind !== null;
+  const businessBadge = isBusinessBacked
+    ? ` · <span style="background:var(--accent-bg);color:var(--accent);padding:.05rem .4rem;border-radius:9999px;font-size:.72rem;font-weight:600">⭐ business: ${esc(opts.embed.business_kind ?? "")}</span> <a href="/app/businesses/${opts.embed.business_id}" style="font-size:.85rem">view business →</a>`
+    : "";
+  const refreshButton = isBusinessBacked
+    ? `<form method="POST" action="/app/embeds/${opts.embed.id}/refresh-business" style="margin:0"><button class="btn" type="submit">↻ Refresh from Business</button></form>`
+    : "";
   return `<div class="crumbs"><a href="/app/embeds">← Embeds</a></div>
     <h1>${esc(opts.embed.name)}</h1>
     <p class="subtitle">
-      Kind: <code>${esc(opts.embed.kind)}</code> · Default position: <code>${esc(opts.embed.default_position)}</code> · Created: ${esc(opts.embed.created_at)}
+      Kind: <code>${esc(opts.embed.kind)}</code> · Default position: <code>${esc(opts.embed.default_position)}</code> · Created: ${esc(opts.embed.created_at)}${businessBadge}
     </p>
     <div class="actions-row" style="display:flex;gap:.5rem;margin-bottom:1rem">
       <a class="btn btn-primary" href="/app/embeds/${opts.embed.id}/apply">Apply to cluster</a>
       <a class="btn" href="/app/embeds/${opts.embed.id}/edit">Edit</a>
+      ${refreshButton}
     </div>
     <details style="margin-bottom:1.5rem">
       <summary>Show HTML</summary>

@@ -27,6 +27,7 @@
  */
 
 import { defaultZoneForEnv } from "../../src/config/proxy-zone.js";
+import { PRODUCTION_PROXY_ZONES, STAGING_PROXY_ZONES } from "../../src/config/proxy-zone.js";
 import { ACTIVE_INDEXERS } from "../../src/secrets/indexer-registry.js";
 import { getSecret } from "../../src/secrets/store.js";
 import {
@@ -45,10 +46,12 @@ import {
   handleNewCustomPagePost,
   handleNewStaticSiteGet,
   handleNewStaticSitePost,
+  handleRestorePost,
   handleSiteFileDeletePost,
   handleSiteFileEditGet,
   handleSiteFileEditPost,
   handleSiteFilesGet,
+  handleSoftDeletePost,
   handleStatusPost,
   literalPathFromMatch,
   loadVisibleClient,
@@ -66,6 +69,7 @@ import {
   renderPerPageEditor,
   renderSiteFileEditForm,
   renderSiteFilesPage,
+  renderSoftDeleteConfirm,
   summarizeEditedPages,
 } from "./app.js";
 import {
@@ -95,6 +99,40 @@ import {
   renderBulkResult,
 } from "./bulk-clients.js";
 import {
+  handleNewBusinessEmbedPost,
+  handleRefreshBusinessEmbedPost,
+  loadBusinessesForEmbedPicker,
+  renderNewBusinessEmbedForm,
+} from "./business-embeds.js";
+import {
+  businessAutoRefreshHeader,
+  countEmbedsReferencingBusiness,
+  createBusinessFromCandidate,
+  fetchBusinessCandidates,
+  handleArchiveBusinessPost,
+  handleBusinessCityEnrichmentPost,
+  handleBusinessReviewsPost,
+  handleClearDefaultTargetPost,
+  handleEditNotesPost,
+  handleRestoreBusinessPost,
+  handleSetDefaultTargetPost,
+  hardDeleteBusiness,
+  loadDefaultTargetBusiness,
+  loadVisibleBusiness,
+  loadVisibleBusinesses,
+  renderBusinessDeleteConfirm,
+  renderBusinessDetail,
+  renderBusinessPicker,
+  renderBusinessesList,
+  renderNewBusinessForm,
+  runBusinessCityEnrichmentJob,
+  runBusinessReviewsJob,
+  targetScalars,
+  updateBusinessFromCandidate,
+  validateBusinessForm,
+} from "./businesses.js";
+import { handleCityEnrichmentPost, runCityEnrichmentJob } from "./city-enrichment.js";
+import {
   handleClusterStatusPost,
   handleEditClusterPost,
   handleNewClusterPost,
@@ -107,6 +145,19 @@ import {
   renderEditClusterForm,
   renderNewClusterForm,
 } from "./clusters.js";
+import {
+  defaultScrapeFormPrefill,
+  handleRescrapePost,
+  handleReviewsStartPost,
+  handleScrapeStartPost,
+  isStuck,
+  renderEnrichmentPanels,
+  renderScrapeForm,
+  renderScrapeProgress,
+  runReviewsJob,
+  runScrapeJob,
+  scrapeAutoRefreshHeader,
+} from "./data-source-scrape.js";
 import { type EmailBinding, resetPasswordMessage, sendEmail } from "./email.js";
 import {
   type PlacementFilters,
@@ -133,6 +184,14 @@ import {
   renderPlacementsList,
 } from "./embeds.js";
 import { FAVICON_DATA_URL } from "./favicon-data-url.js";
+import {
+  handleBulkDeletePost,
+  loadClientsByIds,
+  loadGeneratedClientIds,
+  loadGeneratedSites,
+  renderBulkDeleteConfirm,
+  renderGeneratedSitesList,
+} from "./generated-sites.js";
 import {
   type IndexationFilters,
   LAST_CHECK_AGE_FILTERS,
@@ -180,6 +239,33 @@ import {
   renderSerpPicker,
 } from "./serp-new.js";
 import { handleSettingsApiKeysPost, renderSettingsApiKeysPage } from "./settings.js";
+import {
+  countGeneratedPagesForDataSource,
+  handleDataSourceDeletePost,
+  handleDataSourceEditPost,
+  handleDataSourceNewPost,
+  handleGenerateConfirmPost,
+  handleGeneratePreviewPost,
+  handleTemplateEditPost,
+  handleTemplateNewPost,
+  renderDataSourceDeleteConfirm,
+  renderDataSourceForm,
+  renderDataSourcesList,
+  renderGenerateForm,
+  renderGeneratePreview,
+  renderGenerateResult,
+  renderTemplateForm,
+  renderTemplatePreviewPanel,
+  renderTemplatesList,
+} from "./site-templates-ui.js";
+import {
+  loadVisibleDataSource,
+  loadVisibleDataSources,
+  loadVisibleTemplate,
+  loadVisibleTemplates,
+  renderRowPreview,
+} from "./site-templates.js";
+import { getTemplateStarter } from "./template-starters.js";
 
 interface Env {
   CONFIG_KV: KVNamespace;
@@ -371,8 +457,10 @@ function htmlPage(opts: {
   body: string;
   user: User | null;
   flash?: FlashMessage | null;
+  /** Extra raw HTML to inject into <head> — e.g. an auto-refresh meta tag. */
+  headExtra?: string;
 }): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(opts.title)}</title><link rel="icon" type="image/png" href="${FAVICON_DATA_URL}">${THEME_INLINE_SCRIPT}<style>${STYLE}</style></head><body>${topbar(opts.user)}<main>${flashBanner(opts.flash ?? null)}${opts.body}</main><footer class="footer">© ${new Date().getFullYear()} Edge SEO Platform</footer></body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(opts.title)}</title><link rel="icon" type="image/png" href="${FAVICON_DATA_URL}">${opts.headExtra ?? ""}${THEME_INLINE_SCRIPT}<style>${STYLE}</style></head><body>${topbar(opts.user)}<main>${flashBanner(opts.flash ?? null)}${opts.body}</main><footer class="footer">© ${new Date().getFullYear()} Edge SEO Platform</footer></body></html>`;
 }
 
 const htmlHeadersBase: Record<string, string> = {
@@ -879,7 +967,7 @@ function redirectToLogin(url: URL): Response {
 /* ─── Router ─── */
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
     const method = request.method.toUpperCase();
@@ -1012,8 +1100,20 @@ export default {
       // page filter dropdowns need both, so we orchestrate here
       // rather than have renderClientsList call into clusters.ts
       // (which would be a circular import).
-      const clients = await loadVisibleClients(env, user);
-      const visibleClusters = await loadVisibleClusters(env, user);
+      const showDeleted = url.searchParams.get("show_deleted") === "1";
+      const showGenerated = url.searchParams.get("show_generated") === "1";
+      const [allClients, visibleClusters, generatedIds] = await Promise.all([
+        loadVisibleClients(env, user, { includeDeleted: showDeleted }),
+        loadVisibleClusters(env, user),
+        loadGeneratedClientIds(env),
+      ]);
+      // Hide programmatic-SEO clients by default — they live on their
+      // own page at /app/generated-sites. Toggle ?show_generated=1 to
+      // merge them back into this list.
+      const clients = showGenerated
+        ? allClients
+        : allClients.filter((c) => !generatedIds.has(c.client_id));
+      const hiddenGeneratedCount = allClients.length - clients.length;
       const clusterMembers = await loadAllClusterMembersByCluster(
         env,
         visibleClusters.map((c) => c.id),
@@ -1023,7 +1123,11 @@ export default {
           title: "Proxied sites — Edge SEO Platform",
           body: appLayout({
             title: "Proxied sites",
-            content: renderClientsList(clients, visibleClusters, clusterMembers, user),
+            content: renderClientsList(clients, visibleClusters, clusterMembers, user, {
+              showDeleted,
+              showGenerated,
+              hiddenGeneratedCount,
+            }),
             activeNav: "clients",
             user,
             flash,
@@ -1397,6 +1501,58 @@ export default {
       // Cache purge (POST only)
       if (sub === "cache-purge" && method === "POST") {
         return handleCachePurgePost(request, env, url, user, id);
+      }
+
+      // Soft-delete: GET shows the type-to-confirm page; POST executes.
+      if (sub === "delete" && method === "GET") {
+        const client = await loadVisibleClient(env, user, id);
+        if (!client) {
+          return new Response(null, { status: 303, headers: { location: "/app/clients" } });
+        }
+        return htmlResponse(
+          htmlPage({
+            title: `Delete ${client.client_id}? — Edge SEO Platform`,
+            body: appLayout({
+              title: "Delete site",
+              content: renderSoftDeleteConfirm({ client, errors: [] }),
+              activeNav: "clients",
+              user,
+              flash,
+              clients: await loadVisibleClients(env, user),
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+
+      if (sub === "delete" && method === "POST") {
+        const result = await handleSoftDeletePost(request, env, url, user, id);
+        if ("redirect" in result) return result.redirect;
+        const client = await loadVisibleClient(env, user, id);
+        if (!client) {
+          return new Response(null, { status: 303, headers: { location: "/app/clients" } });
+        }
+        return htmlResponse(
+          htmlPage({
+            title: `Delete ${client.client_id}? — Edge SEO Platform`,
+            body: appLayout({
+              title: "Delete site",
+              content: renderSoftDeleteConfirm({ client, errors: result.errors }),
+              activeNav: "clients",
+              user,
+              flash,
+              clients: await loadVisibleClients(env, user),
+            }),
+            user,
+            flash: null,
+          }),
+          { status: 400 },
+        );
+      }
+
+      if (sub === "restore" && method === "POST") {
+        return handleRestorePost(request, env, url, user, id);
       }
 
       // Per-site "Reindex now" — fan-out to every configured indexer
@@ -2004,6 +2160,65 @@ export default {
       );
     }
 
+    /* ─── Business-backed embeds (new) ─── */
+
+    if (path === "/app/embeds/new-business" && method === "GET") {
+      if (!user) return redirectToLogin(url);
+      const [clients, businesses] = await Promise.all([
+        loadVisibleClients(env, user),
+        loadBusinessesForEmbedPicker(env, user),
+      ]);
+      return htmlResponse(
+        htmlPage({
+          title: "New business embed — Edge SEO Platform",
+          body: appLayout({
+            title: "New business embed",
+            content: renderNewBusinessEmbedForm({
+              businesses,
+              prefill: { default_position: "bottom", business_kind: "business_card" },
+              errors: [],
+            }),
+            activeNav: "embeds",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+      );
+    }
+
+    if (path === "/app/embeds/new-business" && method === "POST") {
+      if (!user) return redirectToLogin(url);
+      const result = await handleNewBusinessEmbedPost(request, env, url, user);
+      if ("redirect" in result) return result.redirect;
+      const [clients, businesses] = await Promise.all([
+        loadVisibleClients(env, user),
+        loadBusinessesForEmbedPicker(env, user),
+      ]);
+      return htmlResponse(
+        htmlPage({
+          title: "New business embed — Edge SEO Platform",
+          body: appLayout({
+            title: "New business embed",
+            content: renderNewBusinessEmbedForm({
+              businesses,
+              prefill: result.prefill,
+              errors: result.errors,
+            }),
+            activeNav: "embeds",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+        { status: 400 },
+      );
+    }
+
     /* ─── Indexation overview (platform-wide) ─── */
 
     if (path === "/app/indexation" && method === "GET") {
@@ -2293,6 +2508,11 @@ export default {
         const clientId = decodeURIComponent(sub.slice("remove/".length));
         if (!clientId) return new Response("Missing client_id", { status: 400 });
         return handlePlacementRemovePost(request, env, url, user, embedId, clientId);
+      }
+
+      // Business-backed embeds — re-render the html from the Business.
+      if (sub === "refresh-business" && method === "POST") {
+        return handleRefreshBusinessEmbedPost(request, env, url, user, embedId);
       }
 
       if (sub === "reapply" && method === "POST") {
@@ -2979,6 +3199,1108 @@ export default {
       return new Response(JSON.stringify(out, null, 2), {
         headers: { "content-type": "application/json; charset=utf-8" },
       });
+    }
+
+    /* ─── Programmatic SEO: site templates + data sources ─── */
+    // Templates list / new / edit live under /app/templates. The fixed
+    // `/new` route MUST come before the catch-all `/:id` so it isn't
+    // shadowed.
+
+    if (path === "/app/templates" && method === "GET") {
+      if (!user) return redirectToLogin(url);
+      const clients = await loadVisibleClients(env, user);
+      const rows = await loadVisibleTemplates(env, user);
+      return htmlResponse(
+        htmlPage({
+          title: "Templates — Edge SEO Platform",
+          body: appLayout({
+            title: "Templates",
+            content: renderTemplatesList(rows, user),
+            activeNav: "templates",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+      );
+    }
+
+    if (path === "/app/templates/new" && method === "GET") {
+      if (!user) return redirectToLogin(url);
+      const clients = await loadVisibleClients(env, user);
+      // ?starter=<id> pre-fills the form from a TEMPLATE_STARTERS entry.
+      // Unknown ids silently fall back to a blank form so a bad URL
+      // doesn't 404 — the operator still gets to write a template.
+      const starterId = url.searchParams.get("starter");
+      const starter = starterId ? getTemplateStarter(starterId) : null;
+      const prefill = starter
+        ? {
+            name: starter.name,
+            kind: starter.kind,
+            path_pattern: starter.path_pattern,
+            html_template: starter.html_template,
+            group_by_column: starter.group_by_column ?? null,
+            top_n: starter.top_n ?? 10,
+            sort_by_column: starter.sort_by_column ?? null,
+          }
+        : {};
+      return htmlResponse(
+        htmlPage({
+          title: starter ? `New template: ${starter.label}` : "New template — Edge SEO Platform",
+          body: appLayout({
+            title: starter ? `New template: ${starter.label}` : "New template",
+            content: renderTemplateForm({ prefill, errors: [], mode: "new" }),
+            activeNav: "templates",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+      );
+    }
+
+    if (path === "/app/templates/new" && method === "POST") {
+      if (!user) return redirectToLogin(url);
+      const result = await handleTemplateNewPost(request, env, url, user);
+      if ("redirect" in result) return result.redirect;
+      const clients = await loadVisibleClients(env, user);
+      return htmlResponse(
+        htmlPage({
+          title: "New template — Edge SEO Platform",
+          body: appLayout({
+            title: "New template",
+            content: renderTemplateForm({
+              prefill: result.prefill,
+              errors: result.errors,
+              mode: "new",
+            }),
+            activeNav: "templates",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+        { status: 400 },
+      );
+    }
+
+    if (path.startsWith("/app/templates/")) {
+      if (!user) return redirectToLogin(url);
+      const rest = path.slice("/app/templates/".length);
+      const slash = rest.indexOf("/");
+      const idStr = slash === -1 ? rest : rest.slice(0, slash);
+      const sub = slash === -1 ? "" : rest.slice(slash + 1);
+      const id = Number.parseInt(idStr, 10);
+      if (!Number.isFinite(id) || id <= 0) {
+        return new Response(null, { status: 303, headers: { location: "/app/templates" } });
+      }
+      const tmpl = await loadVisibleTemplate(env, user, id);
+      if (!tmpl) return new Response("Template not found", { status: 404 });
+      const clients = await loadVisibleClients(env, user);
+
+      // GET /app/templates/:id/edit
+      if (sub === "edit" && method === "GET") {
+        // Preview panel needs the operator's visible data sources to
+        // populate its dropdowns. One small extra query per edit page
+        // — cheap.
+        const visibleDataSources = await loadVisibleDataSources(env, user);
+        return htmlResponse(
+          htmlPage({
+            title: `Edit ${tmpl.name} — Edge SEO Platform`,
+            body: appLayout({
+              title: `Edit ${tmpl.name}`,
+              content: `${renderTemplateForm({
+                prefill: {
+                  id: tmpl.id,
+                  name: tmpl.name,
+                  kind: tmpl.kind,
+                  html_template: tmpl.html_template,
+                  path_pattern: tmpl.path_pattern,
+                  cross_link_strategy: tmpl.cross_link_strategy,
+                  cross_link_count: tmpl.cross_link_count,
+                  group_by_column: tmpl.group_by_column,
+                  top_n: tmpl.top_n,
+                  sort_by_column: tmpl.sort_by_column,
+                },
+                errors: [],
+                mode: "edit",
+              })}${renderTemplatePreviewPanel({
+                template: tmpl,
+                dataSources: visibleDataSources,
+              })}`,
+              activeNav: "templates",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+
+      if (sub === "edit" && method === "POST") {
+        const result = await handleTemplateEditPost(request, env, url, user, id);
+        if ("redirect" in result) return result.redirect;
+        return htmlResponse(
+          htmlPage({
+            title: `Edit ${tmpl.name} — Edge SEO Platform`,
+            body: appLayout({
+              title: `Edit ${tmpl.name}`,
+              content: renderTemplateForm({
+                prefill: { ...result.prefill, id },
+                errors: result.errors,
+                mode: "edit",
+              }),
+              activeNav: "templates",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+          { status: 400 },
+        );
+      }
+
+      // GET /app/templates/:id/preview?ds=<id>&row=<n>
+      // Renders the full HTML for one row as it would appear after
+      // a real generate run. Used by the "Preview with sample data"
+      // panel on the template edit page and the iframe expand on
+      // the Generate preview page.
+      //
+      // Headers: text/html, no-store, X-Robots-Tag: noindex,nofollow.
+      // The route is auth-gated so the preview never leaks to crawlers
+      // even if someone bookmarks the URL.
+      if (sub === "preview" && method === "GET") {
+        const dsIdRaw = url.searchParams.get("ds");
+        const rowRaw = url.searchParams.get("row");
+        let dataSource: Awaited<ReturnType<typeof loadVisibleDataSource>> = null;
+        if (dsIdRaw) {
+          const dsId = Number.parseInt(dsIdRaw, 10);
+          if (Number.isFinite(dsId) && dsId > 0) {
+            dataSource = await loadVisibleDataSource(env, user, dsId);
+          }
+        }
+        const rowIndex = Number.parseInt(rowRaw ?? "0", 10);
+        const safeRow = Number.isFinite(rowIndex) && rowIndex >= 0 ? rowIndex : 0;
+        // Inject the operator's default-target Business scalars so the
+        // preview matches what a real Generate run would produce.
+        const targetBiz = await loadDefaultTargetBusiness(env, user);
+        const targetScalarsValue = targetBiz ? targetScalars(targetBiz) : {};
+        const html = renderRowPreview(tmpl, dataSource, safeRow, targetScalarsValue);
+        return new Response(html, {
+          headers: {
+            "content-type": "text/html; charset=utf-8",
+            "cache-control": "no-store",
+            "x-robots-tag": "noindex, nofollow",
+            "referrer-policy": "strict-origin-when-cross-origin",
+            "content-security-policy":
+              "default-src 'self' 'unsafe-inline' data: blob: https:; frame-ancestors 'self'",
+          },
+        });
+      }
+
+      // GET /app/templates/:id/generate — pick data source + target
+      if (sub === "generate" && method === "GET") {
+        const [dataSources, defaultTargetBiz] = await Promise.all([
+          loadVisibleDataSources(env, user),
+          loadDefaultTargetBusiness(env, user),
+        ]);
+        const zones =
+          (env as { ENV?: string }).ENV === "staging"
+            ? Array.from(STAGING_PROXY_ZONES)
+            : Array.from(PRODUCTION_PROXY_ZONES);
+        return htmlResponse(
+          htmlPage({
+            title: `Generate — ${tmpl.name}`,
+            body: appLayout({
+              title: `Generate — ${tmpl.name}`,
+              content: renderGenerateForm({
+                template: tmpl,
+                dataSources,
+                visibleClients: clients.map((c) => ({
+                  client_id: c.client_id,
+                  proxy_domain: c.proxy_domain,
+                })),
+                zones,
+                errors: [],
+                defaultTargetName: defaultTargetBiz?.name ?? null,
+              }),
+              activeNav: "templates",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+
+      // POST /app/templates/:id/generate/preview
+      if (sub === "generate/preview" && method === "POST") {
+        const result = await handleGeneratePreviewPost(request, env, url, user, id);
+        if ("response" in result) return result.response;
+        return htmlResponse(
+          htmlPage({
+            title: `Preview — ${tmpl.name}`,
+            body: appLayout({
+              title: `Preview — ${tmpl.name}`,
+              content: renderGeneratePreview(result.preview),
+              activeNav: "templates",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+
+      // POST /app/templates/:id/generate/confirm — execute the render
+      if (sub === "generate/confirm" && method === "POST") {
+        const result = await handleGenerateConfirmPost(request, env, url, user, id);
+        if ("response" in result) return result.response;
+        return htmlResponse(
+          htmlPage({
+            title: `Result — ${tmpl.name}`,
+            body: appLayout({
+              title: `Result — ${tmpl.name}`,
+              content: renderGenerateResult(result.result),
+              activeNav: "templates",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+
+      // Unknown sub-route → 404 below.
+    }
+
+    // Data sources
+
+    if (path === "/app/data-sources" && method === "GET") {
+      if (!user) return redirectToLogin(url);
+      const clients = await loadVisibleClients(env, user);
+      const rows = await loadVisibleDataSources(env, user);
+      return htmlResponse(
+        htmlPage({
+          title: "Data sources — Edge SEO Platform",
+          body: appLayout({
+            title: "Data sources",
+            content: renderDataSourcesList(rows, user),
+            activeNav: "data-sources",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+      );
+    }
+
+    if (path === "/app/data-sources/new" && method === "GET") {
+      if (!user) return redirectToLogin(url);
+      const clients = await loadVisibleClients(env, user);
+      return htmlResponse(
+        htmlPage({
+          title: "New data source — Edge SEO Platform",
+          body: appLayout({
+            title: "New data source",
+            content: renderDataSourceForm({ prefill: {}, errors: [], mode: "new" }),
+            activeNav: "data-sources",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+      );
+    }
+
+    if (path === "/app/data-sources/new" && method === "POST") {
+      if (!user) return redirectToLogin(url);
+      const result = await handleDataSourceNewPost(request, env, url, user);
+      if ("redirect" in result) return result.redirect;
+      const clients = await loadVisibleClients(env, user);
+      return htmlResponse(
+        htmlPage({
+          title: "New data source — Edge SEO Platform",
+          body: appLayout({
+            title: "New data source",
+            content: renderDataSourceForm({
+              prefill: result.prefill,
+              errors: result.errors,
+              mode: "new",
+            }),
+            activeNav: "data-sources",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+        { status: 400 },
+      );
+    }
+
+    /* ─── Businesses (client / target registry) ─── */
+    // Static paths come before the numeric :id catch-all.
+
+    if (path === "/app/businesses" && method === "GET") {
+      if (!user) return redirectToLogin(url);
+      const includeArchived = url.searchParams.get("show_archived") === "1";
+      const [bizRows, clients] = await Promise.all([
+        loadVisibleBusinesses(env, user, { includeArchived }),
+        loadVisibleClients(env, user),
+      ]);
+      return htmlResponse(
+        htmlPage({
+          title: "Businesses — Edge SEO Platform",
+          body: appLayout({
+            title: "Businesses",
+            content: renderBusinessesList({ rows: bizRows, user, includeArchived }),
+            activeNav: "businesses",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+      );
+    }
+
+    if (path === "/app/businesses/new" && method === "GET") {
+      if (!user) return redirectToLogin(url);
+      const clients = await loadVisibleClients(env, user);
+      return htmlResponse(
+        htmlPage({
+          title: "Add business — Edge SEO Platform",
+          body: appLayout({
+            title: "Add business",
+            content: renderNewBusinessForm({ prefill: {}, errors: [] }),
+            activeNav: "businesses",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+      );
+    }
+
+    // POST /new — validates form + fetches top-N candidates, renders picker.
+    // No DB write yet — the row is created only after the operator picks
+    // a candidate at /new/confirm.
+    if (path === "/app/businesses/new" && method === "POST") {
+      if (!user) return redirectToLogin(url);
+      const csrf = checkCsrf(request, url);
+      if (csrf) return csrf;
+      const form = await request.formData();
+      const raw: Record<string, string> = {};
+      for (const [k, v] of form.entries()) {
+        if (typeof v === "string") raw[k] = v;
+      }
+      const validation = validateBusinessForm(raw);
+      const clients = await loadVisibleClients(env, user);
+      if (!validation.ok) {
+        return htmlResponse(
+          htmlPage({
+            title: "Add business — Edge SEO Platform",
+            body: appLayout({
+              title: "Add business",
+              content: renderNewBusinessForm({
+                prefill: validation.prefill,
+                errors: validation.errors,
+              }),
+              activeNav: "businesses",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+          { status: 400 },
+        );
+      }
+      const fetchResult = await fetchBusinessCandidates(env, validation.value);
+      if ("error" in fetchResult) {
+        return htmlResponse(
+          htmlPage({
+            title: "Add business — Edge SEO Platform",
+            body: appLayout({
+              title: "Add business",
+              content: renderNewBusinessForm({
+                prefill: validation.value,
+                errors: [fetchResult.error],
+              }),
+              activeNav: "businesses",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+          { status: 400 },
+        );
+      }
+      return htmlResponse(
+        htmlPage({
+          title: "Pick the right business — Edge SEO Platform",
+          body: appLayout({
+            title: "Pick the right business",
+            content: renderBusinessPicker({
+              input: validation.value,
+              candidates: fetchResult.candidates,
+            }),
+            activeNav: "businesses",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+      );
+    }
+
+    // POST /new/confirm — commits the picked candidate to a fresh row.
+    if (path === "/app/businesses/new/confirm" && method === "POST") {
+      if (!user) return redirectToLogin(url);
+      const csrf = checkCsrf(request, url);
+      if (csrf) return csrf;
+      const form = await request.formData();
+      const name = String(form.get("name") ?? "").trim();
+      const notes = String(form.get("notes") ?? "").trim();
+      const candidateRaw = String(form.get("candidate") ?? "");
+      if (!name || !candidateRaw) {
+        return flashRedirect("/app/businesses/new", {
+          text: "Missing form data — start over.",
+          kind: "err",
+        });
+      }
+      let candidate: Awaited<ReturnType<typeof fetchBusinessCandidates>>;
+      try {
+        const parsed = JSON.parse(candidateRaw);
+        candidate = { candidates: [parsed] };
+      } catch {
+        return flashRedirect("/app/businesses/new", {
+          text: "Could not parse picked candidate. Try again.",
+          kind: "err",
+        });
+      }
+      if (!("candidates" in candidate) || candidate.candidates.length === 0) {
+        return flashRedirect("/app/businesses/new", {
+          text: "No candidate to confirm.",
+          kind: "err",
+        });
+      }
+      try {
+        const picked = candidate.candidates[0];
+        if (!picked) {
+          return flashRedirect("/app/businesses/new", {
+            text: "Could not read candidate after parse.",
+            kind: "err",
+          });
+        }
+        const id = await createBusinessFromCandidate(env, user, name, notes, picked);
+        return flashRedirect(`/app/businesses/${id}`, {
+          text: `Saved "${name}".`,
+          kind: "ok",
+        });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        const friendly =
+          msg.includes("UNIQUE") && msg.includes("name")
+            ? `A business named "${name}" already exists.`
+            : `DB error: ${msg}`;
+        return flashRedirect("/app/businesses/new", { text: friendly, kind: "err" });
+      }
+    }
+
+    // POST /app/businesses/default-target/clear — flat path before catch-all.
+    if (path === "/app/businesses/default-target/clear" && method === "POST") {
+      if (!user) return redirectToLogin(url);
+      return handleClearDefaultTargetPost(request, env, url, user);
+    }
+
+    if (path.startsWith("/app/businesses/")) {
+      if (!user) return redirectToLogin(url);
+      const rest = path.slice("/app/businesses/".length);
+      const slash = rest.indexOf("/");
+      const idStr = slash === -1 ? rest : rest.slice(0, slash);
+      const sub = slash === -1 ? "" : rest.slice(slash + 1);
+      const id = Number.parseInt(idStr, 10);
+      if (!Number.isFinite(id) || id <= 0) {
+        return new Response(null, { status: 303, headers: { location: "/app/businesses" } });
+      }
+      const biz = await loadVisibleBusiness(env, user, id);
+      if (!biz) return new Response("Business not found", { status: 404 });
+      const clients = await loadVisibleClients(env, user);
+
+      if (sub === "" && method === "GET") {
+        return htmlResponse(
+          htmlPage({
+            title: `${biz.name} — Edge SEO Platform`,
+            body: appLayout({
+              title: biz.name,
+              content: renderBusinessDetail(biz),
+              activeNav: "businesses",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+            headExtra: businessAutoRefreshHeader(biz),
+          }),
+        );
+      }
+
+      if (sub === "set-default-target" && method === "POST") {
+        return handleSetDefaultTargetPost(request, env, url, user, id);
+      }
+
+      if (sub === "archive" && method === "POST") {
+        return handleArchiveBusinessPost(request, env, url, user, id);
+      }
+
+      if (sub === "restore" && method === "POST") {
+        return handleRestoreBusinessPost(request, env, url, user, id);
+      }
+
+      if (sub === "notes" && method === "POST") {
+        return handleEditNotesPost(request, env, url, user, id);
+      }
+
+      // POST /:id/reviews/fetch — DataForSEO reviews scrape for this Business.
+      if (sub === "reviews/fetch" && method === "POST") {
+        const outcome = await handleBusinessReviewsPost(request, env, url, user, id);
+        if (outcome.job) {
+          ctx.waitUntil(runBusinessReviewsJob(env, user, outcome.job.businessId));
+        }
+        return outcome.redirect;
+      }
+
+      // POST /:id/enrich-city — free Wikipedia city facts.
+      if (sub === "enrich-city" && method === "POST") {
+        const outcome = await handleBusinessCityEnrichmentPost(request, env, url, user, id);
+        if (outcome.job) {
+          ctx.waitUntil(runBusinessCityEnrichmentJob(env, user, outcome.job.businessId));
+        }
+        return outcome.redirect;
+      }
+
+      // GET /:id/edit — prefilled form for re-scrape.
+      if (sub === "edit" && method === "GET") {
+        return htmlResponse(
+          htmlPage({
+            title: `Edit ${biz.name} — Edge SEO Platform`,
+            body: appLayout({
+              title: `Edit ${biz.name}`,
+              content: renderNewBusinessForm({
+                prefill: {
+                  name: biz.name,
+                  keyword: biz.title ?? biz.name,
+                  location:
+                    [biz.city, biz.state, biz.country].filter((v) => v && v.length > 0).join(",") ||
+                    "",
+                  address_filter: "",
+                  notes: biz.notes ?? "",
+                },
+                errors: [],
+                editId: id,
+              }),
+              activeNav: "businesses",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+
+      // POST /:id/edit — validate + fetch + render picker prefixed with the edit id.
+      if (sub === "edit" && method === "POST") {
+        const csrf = checkCsrf(request, url);
+        if (csrf) return csrf;
+        const form = await request.formData();
+        const raw: Record<string, string> = {};
+        for (const [k, v] of form.entries()) {
+          if (typeof v === "string") raw[k] = v;
+        }
+        const validation = validateBusinessForm(raw);
+        if (!validation.ok) {
+          return htmlResponse(
+            htmlPage({
+              title: `Edit ${biz.name} — Edge SEO Platform`,
+              body: appLayout({
+                title: `Edit ${biz.name}`,
+                content: renderNewBusinessForm({
+                  prefill: validation.prefill,
+                  errors: validation.errors,
+                  editId: id,
+                }),
+                activeNav: "businesses",
+                user,
+                flash,
+                clients,
+              }),
+              user,
+              flash: null,
+            }),
+            { status: 400 },
+          );
+        }
+        const fetchResult = await fetchBusinessCandidates(env, validation.value);
+        if ("error" in fetchResult) {
+          return htmlResponse(
+            htmlPage({
+              title: `Edit ${biz.name} — Edge SEO Platform`,
+              body: appLayout({
+                title: `Edit ${biz.name}`,
+                content: renderNewBusinessForm({
+                  prefill: validation.value,
+                  errors: [fetchResult.error],
+                  editId: id,
+                }),
+                activeNav: "businesses",
+                user,
+                flash,
+                clients,
+              }),
+              user,
+              flash: null,
+            }),
+            { status: 400 },
+          );
+        }
+        return htmlResponse(
+          htmlPage({
+            title: `Pick the right business — ${biz.name}`,
+            body: appLayout({
+              title: "Pick the right business",
+              content: renderBusinessPicker({
+                input: validation.value,
+                candidates: fetchResult.candidates,
+                editId: id,
+              }),
+              activeNav: "businesses",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+
+      // POST /:id/edit/confirm — overwrites the existing row with the picked candidate.
+      if (sub === "edit/confirm" && method === "POST") {
+        const csrf = checkCsrf(request, url);
+        if (csrf) return csrf;
+        const form = await request.formData();
+        const name = String(form.get("name") ?? "").trim();
+        const notes = String(form.get("notes") ?? "").trim();
+        const candidateRaw = String(form.get("candidate") ?? "");
+        if (!name || !candidateRaw) {
+          return flashRedirect(`/app/businesses/${id}/edit`, {
+            text: "Missing form data — start over.",
+            kind: "err",
+          });
+        }
+        let parsed: Awaited<ReturnType<typeof fetchBusinessCandidates>>;
+        try {
+          const p = JSON.parse(candidateRaw);
+          parsed = { candidates: [p] };
+        } catch {
+          return flashRedirect(`/app/businesses/${id}/edit`, {
+            text: "Could not parse picked candidate.",
+            kind: "err",
+          });
+        }
+        if (!("candidates" in parsed) || parsed.candidates.length === 0) {
+          return flashRedirect(`/app/businesses/${id}/edit`, {
+            text: "No candidate to confirm.",
+            kind: "err",
+          });
+        }
+        const picked = parsed.candidates[0];
+        if (!picked) {
+          return flashRedirect(`/app/businesses/${id}/edit`, {
+            text: "Could not read candidate after parse.",
+            kind: "err",
+          });
+        }
+        await updateBusinessFromCandidate(env, user, id, name, notes, picked);
+        return flashRedirect(`/app/businesses/${id}`, {
+          text: `Updated "${name}" from new Maps result.`,
+          kind: "ok",
+        });
+      }
+
+      // GET /:id/delete — confirmation page.
+      if (sub === "delete" && method === "GET") {
+        const embedRefCount = await countEmbedsReferencingBusiness(env, id);
+        return htmlResponse(
+          htmlPage({
+            title: `Delete ${biz.name}? — Edge SEO Platform`,
+            body: appLayout({
+              title: "Delete business",
+              content: renderBusinessDeleteConfirm({
+                business: biz,
+                embedRefCount,
+                errors: [],
+              }),
+              activeNav: "businesses",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+
+      // POST /:id/delete — execute the hard delete after type-DELETE.
+      if (sub === "delete" && method === "POST") {
+        const csrf = checkCsrf(request, url);
+        if (csrf) return csrf;
+        const form = await request.formData();
+        const confirm = String(form.get("confirm_word") ?? "")
+          .trim()
+          .toUpperCase();
+        if (confirm !== "DELETE") {
+          const embedRefCount = await countEmbedsReferencingBusiness(env, id);
+          return htmlResponse(
+            htmlPage({
+              title: `Delete ${biz.name}? — Edge SEO Platform`,
+              body: appLayout({
+                title: "Delete business",
+                content: renderBusinessDeleteConfirm({
+                  business: biz,
+                  embedRefCount,
+                  errors: [
+                    `Confirmation didn't match: expected "DELETE", got "${confirm || "(empty)"}".`,
+                  ],
+                }),
+                activeNav: "businesses",
+                user,
+                flash,
+                clients,
+              }),
+              user,
+              flash: null,
+            }),
+            { status: 400 },
+          );
+        }
+        await hardDeleteBusiness(env, user, id);
+        return flashRedirect("/app/businesses", {
+          text: `Deleted business "${biz.name}".`,
+          kind: "ok",
+        });
+      }
+    }
+
+    /* ─── Generated sites (programmatic SEO) ─── */
+
+    if (path === "/app/generated-sites" && method === "GET") {
+      if (!user) return redirectToLogin(url);
+      const showDeleted = url.searchParams.get("show_deleted") === "1";
+      const [allRows, clients] = await Promise.all([
+        loadGeneratedSites(env, user),
+        loadVisibleClients(env, user, { includeDeleted: true }),
+      ]);
+      const rows = showDeleted ? allRows : allRows.filter((r) => !r.deleted_at);
+      return htmlResponse(
+        htmlPage({
+          title: "Generated sites — Edge SEO Platform",
+          body: appLayout({
+            title: "Generated sites",
+            content: renderGeneratedSitesList({ rows, user, showDeleted }),
+            activeNav: "generated-sites",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+      );
+    }
+
+    if (path === "/app/generated-sites/bulk-delete" && method === "GET") {
+      if (!user) return redirectToLogin(url);
+      const ids = url.searchParams.getAll("client_id");
+      if (ids.length === 0) {
+        return new Response(null, {
+          status: 303,
+          headers: { location: "/app/generated-sites" },
+        });
+      }
+      const [clients, allClients] = await Promise.all([
+        loadClientsByIds(env, user, ids),
+        loadVisibleClients(env, user, { includeDeleted: true }),
+      ]);
+      return htmlResponse(
+        htmlPage({
+          title: `Bulk delete ${clients.length} site${clients.length === 1 ? "" : "s"}`,
+          body: appLayout({
+            title: "Bulk delete",
+            content: renderBulkDeleteConfirm({
+              clients,
+              errors: [],
+              returnTo: "/app/generated-sites",
+            }),
+            activeNav: "generated-sites",
+            user,
+            flash,
+            clients: allClients,
+          }),
+          user,
+          flash: null,
+        }),
+      );
+    }
+
+    if (path === "/app/generated-sites/bulk-delete" && method === "POST") {
+      if (!user) return redirectToLogin(url);
+      return handleBulkDeletePost(request, env, url, user);
+    }
+
+    /* ─── Phase B: DataForSEO Maps scrape → data source ─── */
+    // These string paths MUST come before the numeric-id catch-all
+    // below, otherwise `new-scrape` gets parsed as id=NaN.
+
+    if (path === "/app/data-sources/new-scrape" && method === "GET") {
+      if (!user) return redirectToLogin(url);
+      const clients = await loadVisibleClients(env, user);
+      return htmlResponse(
+        htmlPage({
+          title: "Scrape Google Maps — Edge SEO Platform",
+          body: appLayout({
+            title: "Scrape Google Maps",
+            content: renderScrapeForm({ prefill: defaultScrapeFormPrefill(), errors: [] }),
+            activeNav: "data-sources",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+      );
+    }
+
+    if (path === "/app/data-sources/new-scrape/start" && method === "POST") {
+      if (!user) return redirectToLogin(url);
+      const outcome = await handleScrapeStartPost(request, env, url, user);
+      if (outcome.redirect && outcome.job) {
+        // Kick off the background scrape — we redirect immediately
+        // and the job continues for the worker invocation lifetime.
+        ctx.waitUntil(runScrapeJob(env, outcome.job.dataSourceId, outcome.job.config));
+        return outcome.redirect;
+      }
+      if (outcome.redirect) return outcome.redirect;
+      const clients = await loadVisibleClients(env, user);
+      return htmlResponse(
+        htmlPage({
+          title: "Scrape Google Maps — Edge SEO Platform",
+          body: appLayout({
+            title: "Scrape Google Maps",
+            content: renderScrapeForm({
+              prefill: outcome.prefill ?? defaultScrapeFormPrefill(),
+              errors: outcome.errors ?? ["Unknown error"],
+            }),
+            activeNav: "data-sources",
+            user,
+            flash,
+            clients,
+          }),
+          user,
+          flash: null,
+        }),
+        { status: 400 },
+      );
+    }
+
+    if (path.startsWith("/app/data-sources/")) {
+      if (!user) return redirectToLogin(url);
+      const rest = path.slice("/app/data-sources/".length);
+      const slash = rest.indexOf("/");
+      const idStr = slash === -1 ? rest : rest.slice(0, slash);
+      const sub = slash === -1 ? "" : rest.slice(slash + 1);
+      const id = Number.parseInt(idStr, 10);
+      if (!Number.isFinite(id) || id <= 0) {
+        return new Response(null, { status: 303, headers: { location: "/app/data-sources" } });
+      }
+      const ds = await loadVisibleDataSource(env, user, id);
+      if (!ds) return new Response("Data source not found", { status: 404 });
+      const clients = await loadVisibleClients(env, user);
+
+      if (sub === "rescrape" && method === "POST") {
+        const outcome = await handleRescrapePost(request, env, url, user, ds);
+        if (outcome.job) {
+          ctx.waitUntil(runScrapeJob(env, outcome.job.dataSourceId, outcome.job.config));
+        }
+        if (outcome.redirect) return outcome.redirect;
+        return new Response("Internal error", { status: 500 });
+      }
+
+      // B.6 — start (or re-fetch) the reviews scrape for a Maps-scraped data source.
+      if (sub === "reviews/start" && method === "POST") {
+        const outcome = await handleReviewsStartPost(request, env, url, user, ds);
+        if (outcome.job) {
+          ctx.waitUntil(runReviewsJob(env, outcome.job.dataSourceId));
+        }
+        return outcome.redirect;
+      }
+
+      // B.7 — Wikipedia city enrichment for all unique cities in this data source.
+      if (sub === "enrich-cities" && method === "POST") {
+        const outcome = await handleCityEnrichmentPost(request, env, url, user, ds);
+        if (outcome.job) {
+          ctx.waitUntil(runCityEnrichmentJob(env, outcome.job.dataSourceId));
+        }
+        return outcome.redirect;
+      }
+
+      // Hard-delete a data source (type-DELETE confirmation page).
+      if (sub === "delete" && method === "GET") {
+        const generatedPageCount = await countGeneratedPagesForDataSource(env, ds.id);
+        return htmlResponse(
+          htmlPage({
+            title: `Delete ${ds.name}? — Edge SEO Platform`,
+            body: appLayout({
+              title: "Delete data source",
+              content: renderDataSourceDeleteConfirm({
+                dataSource: ds,
+                generatedPageCount,
+                errors: [],
+              }),
+              activeNav: "data-sources",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+
+      if (sub === "delete" && method === "POST") {
+        const result = await handleDataSourceDeletePost(request, env, url, user, ds.id);
+        if ("redirect" in result) return result.redirect;
+        const generatedPageCount = await countGeneratedPagesForDataSource(env, ds.id);
+        return htmlResponse(
+          htmlPage({
+            title: `Delete ${ds.name}? — Edge SEO Platform`,
+            body: appLayout({
+              title: "Delete data source",
+              content: renderDataSourceDeleteConfirm({
+                dataSource: ds,
+                generatedPageCount,
+                errors: result.errors,
+              }),
+              activeNav: "data-sources",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+          { status: 400 },
+        );
+      }
+
+      if (sub === "edit" && method === "GET") {
+        const stuck = isStuck(ds.scrape_status, ds.scrape_progress_updated_at);
+        const isScraped = ds.source_kind === "dataforseo_business_listings";
+        const progressBlock = isScraped ? renderScrapeProgress({ ds, stuck }) : "";
+        // Enrichment panels work on ANY data source whose rows have
+        // the right columns — not just Maps-scraped ones. CSVs with a
+        // `city` column can use Wikipedia enrichment, etc.
+        const enrichmentBlock = renderEnrichmentPanels(ds);
+        const headExtra = isScraped ? scrapeAutoRefreshHeader(ds, stuck) : "";
+        return htmlResponse(
+          htmlPage({
+            title: `Edit ${ds.name} — Edge SEO Platform`,
+            body: appLayout({
+              title: `Edit ${ds.name}`,
+              content: `${progressBlock}${enrichmentBlock}${renderDataSourceForm({
+                prefill: {
+                  id: ds.id,
+                  name: ds.name,
+                  source_kind: ds.source_kind,
+                  columns: ds.columns,
+                  rows: ds.rows,
+                },
+                errors: [],
+                mode: "edit",
+              })}`,
+              activeNav: "data-sources",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+            headExtra,
+          }),
+        );
+      }
+
+      if (sub === "edit" && method === "POST") {
+        const result = await handleDataSourceEditPost(request, env, url, user, id);
+        if ("redirect" in result) return result.redirect;
+        return htmlResponse(
+          htmlPage({
+            title: `Edit ${ds.name} — Edge SEO Platform`,
+            body: appLayout({
+              title: `Edit ${ds.name}`,
+              content: renderDataSourceForm({
+                prefill: { ...result.prefill, id },
+                errors: result.errors,
+                mode: "edit",
+              }),
+              activeNav: "data-sources",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+          { status: 400 },
+        );
+      }
     }
 
     /* ─── Super-admin (Phase F fills these in) ─── */
