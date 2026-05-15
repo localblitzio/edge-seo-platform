@@ -110,6 +110,8 @@ import {
   createBusinessFromCandidate,
   fetchBusinessCandidates,
   handleArchiveBusinessPost,
+  handleBusinessCityEnrichmentPost,
+  handleBusinessReviewsPost,
   handleClearDefaultTargetPost,
   handleEditNotesPost,
   handleRestoreBusinessPost,
@@ -123,6 +125,8 @@ import {
   renderBusinessPicker,
   renderBusinessesList,
   renderNewBusinessForm,
+  runBusinessCityEnrichmentJob,
+  runBusinessReviewsJob,
   targetScalars,
   updateBusinessFromCandidate,
   validateBusinessForm,
@@ -3784,6 +3788,24 @@ export default {
 
       if (sub === "notes" && method === "POST") {
         return handleEditNotesPost(request, env, url, user, id);
+      }
+
+      // POST /:id/reviews/fetch — DataForSEO reviews scrape for this Business.
+      if (sub === "reviews/fetch" && method === "POST") {
+        const outcome = await handleBusinessReviewsPost(request, env, url, user, id);
+        if (outcome.job) {
+          ctx.waitUntil(runBusinessReviewsJob(env, user, outcome.job.businessId));
+        }
+        return outcome.redirect;
+      }
+
+      // POST /:id/enrich-city — free Wikipedia city facts.
+      if (sub === "enrich-city" && method === "POST") {
+        const outcome = await handleBusinessCityEnrichmentPost(request, env, url, user, id);
+        if (outcome.job) {
+          ctx.waitUntil(runBusinessCityEnrichmentJob(env, user, outcome.job.businessId));
+        }
+        return outcome.redirect;
       }
 
       // GET /:id/edit — prefilled form for re-scrape.

@@ -28,11 +28,13 @@ import {
   renderBusinessMap,
   renderBusinessReviews,
 } from "./business-embeds.js";
+import { fetchAndCacheCityFacts } from "./city-enrichment.js";
 import {
   type BusinessListingRow,
   DataForSeoApiError,
   DataForSeoConfigError,
   fetchBusinessListings,
+  fetchReviews,
 } from "./dataforseo.js";
 
 /* ─── Types ─── */
@@ -336,123 +338,6 @@ export async function hardDeleteBusiness(env: AppEnv, user: User, id: number): P
     .run();
 }
 
-/* ─── Scrape ─── */
-
-/**
- * Create a new Business row in `running` state. The actual scrape
- * runs via `ctx.waitUntil(runBusinessScrapeJob(...))` in the route
- * handler.
- */
-export async function startBusinessScrape(
-  env: AppEnv,
-  user: User,
-  input: BusinessFormInput,
-): Promise<number> {
-  const r = await env.CONFIG_DB.prepare(
-    `INSERT INTO businesses (owner_id, name, notes, place_id, scrape_status, scrape_progress_updated_at)
-     VALUES (?, ?, ?, '', 'running', strftime('%Y-%m-%dT%H:%M:%SZ','now'))
-     RETURNING id`,
-  )
-    .bind(user.id, input.name, input.notes || null)
-    .first<{ id: number }>();
-  if (!r) throw new Error("Insert returned no row");
-  return r.id;
-}
-
-/**
- * Run the actual DataForSEO Maps fetch for one Business. Looks up the
- * first organic result for (keyword, location) and copies its fields
- * onto the Business row. MUST NOT throw — terminal status is written.
- */
-export async function runBusinessScrapeJob(
-  env: AppEnv,
-  businessId: number,
-  input: BusinessFormInput,
-): Promise<void> {
-  try {
-    const rows = await fetchBusinessListings(env, {
-      keyword: input.keyword,
-      location_name: input.location,
-      language_code: "en",
-      depth: 1,
-    });
-    const first = rows[0];
-    if (!first) {
-      await markBusinessError(
-        env,
-        businessId,
-        `No Google Maps result for "${input.keyword}" in "${input.location}". Try a more specific keyword or check the location format.`,
-      );
-      return;
-    }
-    await writeScrapedFields(env, businessId, first);
-  } catch (e) {
-    if (e instanceof DataForSeoConfigError || e instanceof DataForSeoApiError) {
-      await markBusinessError(env, businessId, e.message);
-      return;
-    }
-    await markBusinessError(env, businessId, e instanceof Error ? e.message : String(e));
-  }
-}
-
-async function writeScrapedFields(
-  env: AppEnv,
-  businessId: number,
-  row: BusinessListingRow,
-): Promise<void> {
-  await env.CONFIG_DB.prepare(
-    `UPDATE businesses SET
-       place_id = ?, title = ?, address = ?, city = ?, state = ?, country = ?, zip = ?,
-       phone = ?, website = ?, rating = ?, rating_count = ?, categories = ?,
-       latitude = ?, longitude = ?, hours_json = ?, price_level = ?,
-       description = ?, main_image_url = ?, photos_json = ?, attributes_json = ?,
-       scrape_status = 'done', scrape_progress_updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'),
-       scrape_error = NULL, updated_at = CURRENT_TIMESTAMP
-     WHERE id = ?`,
-  )
-    .bind(
-      row.place_id,
-      row.title,
-      row.address,
-      row.city,
-      row.state,
-      row.country,
-      row.zip,
-      row.phone,
-      row.website,
-      row.rating,
-      row.rating_count,
-      row.categories,
-      row.latitude,
-      row.longitude,
-      row.hours_json,
-      row.price_level,
-      row.description,
-      row.main_image_url,
-      row.photos_json,
-      row.attributes_json,
-      businessId,
-    )
-    .run();
-}
-
-async function markBusinessError(env: AppEnv, businessId: number, message: string): Promise<void> {
-  try {
-    await env.CONFIG_DB.prepare(
-      `UPDATE businesses SET
-         scrape_status = 'error',
-         scrape_error = ?,
-         scrape_progress_updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'),
-         updated_at = CURRENT_TIMESTAMP
-       WHERE id = ?`,
-    )
-      .bind(message, businessId)
-      .run();
-  } catch {
-    // best-effort
-  }
-}
-
 /* ─── Set default target ─── */
 
 /**
@@ -509,6 +394,21 @@ export async function restoreBusiness(env: AppEnv, user: User, id: number): Prom
  * row's render context.
  */
 export function targetScalars(b: BusinessRow): Record<string, string> {
+  // City facts (if Wikipedia enrichment has been run) come from the
+  // city_facts_json blob. Best-effort parse — corrupt JSON → empty.
+  let cityFacts: {
+    description?: string;
+    population?: number | null;
+    founded_year?: number | null;
+    wiki_url?: string;
+  } = {};
+  if (b.city_facts_json) {
+    try {
+      cityFacts = JSON.parse(b.city_facts_json) ?? {};
+    } catch {
+      /* ignore */
+    }
+  }
   return {
     target_title: b.title ?? b.name,
     target_address: b.address ?? "",
@@ -526,7 +426,14 @@ export function targetScalars(b: BusinessRow): Record<string, string> {
     target_place_id: b.place_id,
     target_description: b.description ?? "",
     target_main_image_url: b.main_image_url ?? "",
+    target_city_description: cityFacts.description ?? "",
+    target_city_population: cityFacts.population != null ? cityFacts.population.toString() : "",
+    target_city_founded_year:
+      cityFacts.founded_year != null ? cityFacts.founded_year.toString() : "",
+    target_city_wiki_url: cityFacts.wiki_url ?? "",
     has_target: "1",
+    has_target_reviews: typeof b.reviews_json === "string" && b.reviews_json.length > 2 ? "1" : "",
+    has_target_city_facts: cityFacts.description ? "1" : "",
     // Pre-rendered embed HTML for templates to drop in via the raw
     // `{{{...}}}` syntax. Operators write:
     //   {{#if has_target}}{{{target_card_html}}}{{/if}}
@@ -539,49 +446,6 @@ export function targetScalars(b: BusinessRow): Record<string, string> {
 }
 
 /* ─── POST handlers ─── */
-
-export interface NewBusinessOutcome {
-  redirect?: Response;
-  errors?: string[];
-  prefill?: BusinessFormInput;
-  job?: { businessId: number; input: BusinessFormInput };
-}
-
-export async function handleNewBusinessPost(
-  request: Request,
-  env: AppEnv,
-  url: URL,
-  user: User,
-): Promise<NewBusinessOutcome> {
-  const csrf = checkCsrf(request, url);
-  if (csrf) return { redirect: csrf };
-  const form = await request.formData();
-  const raw: Record<string, string> = {};
-  for (const [k, v] of form.entries()) {
-    if (typeof v === "string") raw[k] = v;
-  }
-  const validation = validateBusinessForm(raw);
-  if (!validation.ok) return { errors: validation.errors, prefill: validation.prefill };
-
-  let businessId: number;
-  try {
-    businessId = await startBusinessScrape(env, user, validation.value);
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    const friendly =
-      msg.includes("UNIQUE") && msg.includes("name")
-        ? `A business named "${validation.value.name}" already exists.`
-        : `DB error: ${msg}`;
-    return { errors: [friendly], prefill: validation.value };
-  }
-  return {
-    redirect: flashRedirect(`/app/businesses/${businessId}`, {
-      text: `Looking up "${validation.value.keyword}" on Google Maps…`,
-      kind: "ok",
-    } satisfies FlashMessage),
-    job: { businessId, input: validation.value },
-  };
-}
 
 export async function handleSetDefaultTargetPost(
   request: Request,
@@ -923,6 +787,8 @@ export function renderBusinessDetail(b: BusinessRow): string {
         ${deleteAction}
       </div>
     </div>
+    ${renderReviewsPanel(b)}
+    ${renderCityFactsPanel(b)}
     <div class="biz-card">
       <h3 style="margin:0 0 .5rem">Notes</h3>
       <form method="POST" action="/app/businesses/${b.id}/notes">
@@ -933,8 +799,275 @@ export function renderBusinessDetail(b: BusinessRow): string {
   </div>`;
 }
 
+function renderReviewsPanel(b: BusinessRow): string {
+  // Don't surface the panel until the initial scrape is done — without
+  // a place_id the reviews call would 400.
+  if (b.scrape_status !== "done") return "";
+  if (!b.place_id) return "";
+
+  let reviews: Array<{ text: string; rating: string; author: string; date: string }> = [];
+  try {
+    const parsed = JSON.parse(b.reviews_json || "[]");
+    if (Array.isArray(parsed)) reviews = parsed;
+  } catch {
+    /* ignore */
+  }
+  const status = b.reviews_status;
+  const errorBox = b.reviews_error ? `<div class="error-box">${esc(b.reviews_error)}</div>` : "";
+  const button =
+    status === "running"
+      ? `<span class="running-pulse"></span><strong>fetching…</strong>`
+      : status === "done"
+        ? `<form method="POST" action="/app/businesses/${b.id}/reviews/fetch" style="margin:0"><button class="btn" type="submit">↻ Re-fetch reviews</button></form>`
+        : `<form method="POST" action="/app/businesses/${b.id}/reviews/fetch" style="margin:0"><button class="btn btn-primary" type="submit">+ Fetch reviews ($0.003)</button></form>`;
+
+  const blocks =
+    reviews.length === 0
+      ? status === "done"
+        ? `<div style="color:var(--fg-muted);font-style:italic">No reviews returned.</div>`
+        : ""
+      : reviews
+          .map((r) => {
+            const meta = [r.author || "Customer", r.rating ? `★ ${r.rating}` : "", r.date || ""]
+              .filter(Boolean)
+              .join(" · ");
+            return `<blockquote style="margin:.7rem 0;padding:.55rem .9rem;border-left:3px solid var(--accent);font-style:italic;color:var(--fg)">
+              <p style="margin:0 0 .3rem">"${esc(r.text)}"</p>
+              <div style="font-size:.82rem;color:var(--fg-muted);font-style:normal">${esc(meta)}</div>
+            </blockquote>`;
+          })
+          .join("");
+
+  return `<div class="biz-card">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:1rem;margin-bottom:.5rem">
+      <h3 style="margin:0">Customer reviews ${statusChip(status)}</h3>
+      ${button}
+    </div>
+    ${errorBox}
+    ${blocks}
+  </div>`;
+}
+
+function renderCityFactsPanel(b: BusinessRow): string {
+  if (b.scrape_status !== "done") return "";
+  if (!b.city) return "";
+
+  let facts: {
+    description?: string;
+    population?: number | null;
+    founded_year?: number | null;
+    wiki_url?: string;
+  } | null = null;
+  if (b.city_facts_json) {
+    try {
+      facts = JSON.parse(b.city_facts_json);
+    } catch {
+      /* ignore */
+    }
+  }
+  const action = facts
+    ? `<form method="POST" action="/app/businesses/${b.id}/enrich-city" style="margin:0"><button class="btn" type="submit">↻ Refresh from Wikipedia</button></form>`
+    : `<form method="POST" action="/app/businesses/${b.id}/enrich-city" style="margin:0"><button class="btn btn-primary" type="submit">+ Enrich with Wikipedia (free)</button></form>`;
+  const body = facts
+    ? `${facts.description ? `<p style="margin:.4rem 0">${esc(facts.description)}</p>` : ""}
+       <dl style="display:grid;grid-template-columns:max-content 1fr;gap:.25rem .9rem;font-size:.88rem;margin:.4rem 0">
+         ${facts.population != null ? `<dt style="color:var(--fg-muted)">Population</dt><dd style="margin:0">${esc(facts.population.toLocaleString())}</dd>` : ""}
+         ${facts.founded_year != null ? `<dt style="color:var(--fg-muted)">Founded</dt><dd style="margin:0">${esc(String(facts.founded_year))}</dd>` : ""}
+         ${facts.wiki_url ? `<dt style="color:var(--fg-muted)">Source</dt><dd style="margin:0"><a href="${esc(facts.wiki_url)}" target="_blank" rel="noopener nofollow">Wikipedia →</a></dd>` : ""}
+       </dl>`
+    : `<div style="color:var(--fg-muted);font-style:italic">Adds <code>city_description</code>, <code>city_population</code>, <code>city_founded_year</code> as <code>{{target_*}}</code> placeholders on Generate runs.</div>`;
+  return `<div class="biz-card">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:1rem;margin-bottom:.5rem">
+      <h3 style="margin:0">City facts — ${esc(b.city)}</h3>
+      ${action}
+    </div>
+    ${body}
+  </div>`;
+}
+
 /** Auto-refresh meta when a scrape is in flight, same pattern as data sources. */
 export function businessAutoRefreshHeader(b: BusinessRow): string {
   if (b.scrape_status === "running") return `<meta http-equiv="refresh" content="2">`;
+  if (b.reviews_status === "running") return `<meta http-equiv="refresh" content="2">`;
   return "";
+}
+
+/* ─── Enrichment: reviews ─── */
+
+/** Default reviews depth — Google Maps tends to surface ~5 recent reviews. */
+const BUSINESS_REVIEWS_DEPTH = 5;
+
+/**
+ * Fetch reviews for one Business via DataForSEO's reviews endpoint
+ * (~$0.003 per task). Synchronous — caller awaits.
+ *
+ * MUST NOT throw — writes terminal status (`done`/`error`) on the
+ * business row so the UI reflects what happened.
+ */
+export async function runBusinessReviewsJob(
+  env: AppEnv,
+  user: User,
+  businessId: number,
+): Promise<void> {
+  const biz = await loadVisibleBusiness(env, user, businessId);
+  if (!biz) return;
+  if (!biz.place_id) {
+    await markBusinessReviewsError(env, businessId, "Business has no place_id — re-scrape first.");
+    return;
+  }
+  try {
+    const reviews = await fetchReviews(env, biz.place_id, BUSINESS_REVIEWS_DEPTH);
+    await env.CONFIG_DB.prepare(
+      `UPDATE businesses SET
+         reviews_json = ?,
+         reviews_status = 'done',
+         reviews_progress_updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+         reviews_error = NULL,
+         updated_at = CURRENT_TIMESTAMP
+       WHERE id = ? AND owner_id = ?`,
+    )
+      .bind(JSON.stringify(reviews), businessId, user.id)
+      .run();
+  } catch (e) {
+    if (e instanceof DataForSeoConfigError || e instanceof DataForSeoApiError) {
+      await markBusinessReviewsError(env, businessId, e.message);
+      return;
+    }
+    await markBusinessReviewsError(env, businessId, e instanceof Error ? e.message : String(e));
+  }
+}
+
+async function markBusinessReviewsError(
+  env: AppEnv,
+  businessId: number,
+  message: string,
+): Promise<void> {
+  try {
+    await env.CONFIG_DB.prepare(
+      `UPDATE businesses SET
+         reviews_status = 'error',
+         reviews_error = ?,
+         reviews_progress_updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+         updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`,
+    )
+      .bind(message, businessId)
+      .run();
+  } catch {
+    // best-effort
+  }
+}
+
+/**
+ * Mark a Business's reviews job as running so the UI shows the
+ * progress chip + auto-refreshes. Returns the businessId for the
+ * route handler to use with ctx.waitUntil.
+ */
+export async function startBusinessReviewsJob(
+  env: AppEnv,
+  user: User,
+  businessId: number,
+): Promise<void> {
+  await env.CONFIG_DB.prepare(
+    `UPDATE businesses SET
+       reviews_status = 'running',
+       reviews_progress_updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+       reviews_error = NULL,
+       updated_at = CURRENT_TIMESTAMP
+     WHERE id = ? AND owner_id = ?`,
+  )
+    .bind(businessId, user.id)
+    .run();
+}
+
+export async function handleBusinessReviewsPost(
+  request: Request,
+  env: AppEnv,
+  url: URL,
+  user: User,
+  businessId: number,
+): Promise<{ redirect: Response; job?: { businessId: number } }> {
+  const csrf = checkCsrf(request, url);
+  if (csrf) return { redirect: csrf };
+  const biz = await loadVisibleBusiness(env, user, businessId);
+  if (!biz) {
+    return { redirect: new Response("Not found", { status: 404 }) };
+  }
+  if (!biz.place_id) {
+    return {
+      redirect: flashRedirect(`/app/businesses/${businessId}`, {
+        text: "Business has no place_id — re-scrape first.",
+        kind: "err",
+      }),
+    };
+  }
+  await startBusinessReviewsJob(env, user, businessId);
+  return {
+    redirect: flashRedirect(`/app/businesses/${businessId}`, {
+      text: `Fetching up to ${BUSINESS_REVIEWS_DEPTH} reviews from Google Maps (~\$0.003)…`,
+      kind: "ok",
+    } satisfies FlashMessage),
+    job: { businessId },
+  };
+}
+
+/* ─── Enrichment: city facts (Wikipedia) ─── */
+
+/**
+ * Fetch Wikipedia city facts for one Business and stash on the row.
+ * Free (no API key), cached for 30 days via city_facts table.
+ * Synchronous — caller awaits.
+ */
+export async function runBusinessCityEnrichmentJob(
+  env: AppEnv,
+  user: User,
+  businessId: number,
+): Promise<void> {
+  const biz = await loadVisibleBusiness(env, user, businessId);
+  if (!biz) return;
+  const city = (biz.city ?? "").trim();
+  if (!city) return; // silent no-op when city is unknown
+  const region = (biz.state ?? "").trim();
+  const country = (biz.country ?? "").trim() || "United States";
+  const facts = await fetchAndCacheCityFacts(env, { city, region, country });
+  if (!facts) return; // best-effort; Wikipedia miss leaves city_facts_json untouched
+  const factsJson = JSON.stringify({
+    description: facts.description,
+    population: facts.population,
+    founded_year: facts.founded_year,
+    wiki_url: facts.wiki_url,
+  });
+  await env.CONFIG_DB.prepare(
+    "UPDATE businesses SET city_facts_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND owner_id = ?",
+  )
+    .bind(factsJson, businessId, user.id)
+    .run();
+}
+
+export async function handleBusinessCityEnrichmentPost(
+  request: Request,
+  env: AppEnv,
+  url: URL,
+  user: User,
+  businessId: number,
+): Promise<{ redirect: Response; job?: { businessId: number } }> {
+  const csrf = checkCsrf(request, url);
+  if (csrf) return { redirect: csrf };
+  const biz = await loadVisibleBusiness(env, user, businessId);
+  if (!biz) return { redirect: new Response("Not found", { status: 404 }) };
+  if (!biz.city) {
+    return {
+      redirect: flashRedirect(`/app/businesses/${businessId}`, {
+        text: "Business has no city set — re-scrape first.",
+        kind: "err",
+      }),
+    };
+  }
+  return {
+    redirect: flashRedirect(`/app/businesses/${businessId}`, {
+      text: `Fetching Wikipedia summary for ${biz.city}…`,
+      kind: "ok",
+    } satisfies FlashMessage),
+    job: { businessId },
+  };
 }
