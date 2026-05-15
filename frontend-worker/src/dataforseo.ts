@@ -20,7 +20,15 @@ import type { AppEnv } from "./app.js";
 
 const ENDPOINT = "https://api.dataforseo.com/v3/serp/google/organic/live/advanced";
 const MAPS_ENDPOINT = "https://api.dataforseo.com/v3/serp/google/maps/live/advanced";
-const REVIEWS_ENDPOINT = "https://api.dataforseo.com/v3/business_data/google/reviews/live";
+// Google reviews is task-based (no synchronous "live" endpoint), so we
+// POST to task_post and then poll task_get/{id} until the task settles.
+const REVIEWS_TASK_POST_URL =
+  "https://api.dataforseo.com/v3/business_data/google/reviews/task_post";
+const REVIEWS_TASK_GET_URL = "https://api.dataforseo.com/v3/business_data/google/reviews/task_get/";
+/** Max time we spend polling task_get before giving up. */
+const REVIEWS_POLL_MAX_MS = 60_000;
+/** Per-attempt waits in ms — gentle backoff. */
+const REVIEWS_POLL_WAITS = [3000, 4000, 5000, 6000, 8000, 10_000, 12_000];
 
 /** Single organic result the caller can offer to the operator. */
 export interface SerpResult {
@@ -754,8 +762,17 @@ export function parseReviewsResponse(payload: unknown): ReviewItem[] {
 }
 
 /**
- * Fetch reviews for one business by place_id. Throws on missing creds
- * or task-level error.
+ * Fetch reviews for one business by place_id. DataForSEO's reviews
+ * endpoint is task-based (no synchronous variant), so this:
+ *
+ *   1. POSTs to task_post with the place_id query
+ *   2. Polls task_get/{id} with a gentle backoff
+ *   3. Returns parsed reviews when the task settles
+ *
+ * Max wall time ~60s. Throws on credential issues, transport errors,
+ * task-level DataForSEO errors, or timeout. Callers (the per-row
+ * reviews job and the per-Business reviews job) handle the thrown
+ * error by writing terminal status to the DB.
  */
 export async function fetchReviews(
   env: AppEnv,
@@ -772,27 +789,114 @@ export async function fetchReviews(
   if (!login || !password) {
     throw new DataForSeoConfigError("DataForSEO credentials are not configured.");
   }
-  const res = await fetch(REVIEWS_ENDPOINT, {
+  const authHeader = basicAuthHeader(login, password);
+
+  // Step 1 — POST the task.
+  const postRes = await fetch(REVIEWS_TASK_POST_URL, {
     method: "POST",
-    headers: {
-      authorization: basicAuthHeader(login, password),
-      "content-type": "application/json",
-    },
+    headers: { authorization: authHeader, "content-type": "application/json" },
     body: buildReviewsRequestBody(placeId, depth, languageCode),
   });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
+  if (!postRes.ok) {
+    const text = await postRes.text().catch(() => "");
     throw new DataForSeoApiError(
-      `DataForSEO HTTP ${res.status}${text ? `: ${text.slice(0, 200)}` : ""}`,
-      res.status,
+      `DataForSEO task_post HTTP ${postRes.status}${text ? `: ${text.slice(0, 200)}` : ""}`,
+      postRes.status,
     );
   }
-  const json = (await res.json().catch(() => null)) as Record<string, unknown> | null;
-  if (json && typeof json.status_code === "number" && json.status_code >= 40000) {
-    const msg = typeof json.status_message === "string" ? json.status_message : "DataForSEO error";
-    throw new DataForSeoApiError(`DataForSEO ${json.status_code}: ${msg}`, json.status_code);
+  const postJson = (await postRes.json().catch(() => null)) as Record<string, unknown> | null;
+  if (postJson && typeof postJson.status_code === "number" && postJson.status_code >= 40000) {
+    const msg =
+      typeof postJson.status_message === "string" ? postJson.status_message : "DataForSEO error";
+    throw new DataForSeoApiError(
+      `DataForSEO ${postJson.status_code}: ${msg}`,
+      postJson.status_code,
+    );
   }
-  const taskErr = firstTaskError(json);
-  if (taskErr) throw new DataForSeoApiError(taskErr.message, taskErr.code);
-  return parseReviewsResponse(json).slice(0, depth);
+  const taskId = extractTaskId(postJson);
+  if (!taskId) {
+    throw new DataForSeoApiError("DataForSEO task_post returned no task id", 500);
+  }
+
+  // Step 2 — poll task_get with a small backoff schedule. Most reviews
+  // tasks settle in 10-30s.
+  const startedAt = Date.now();
+  for (const wait of REVIEWS_POLL_WAITS) {
+    if (Date.now() - startedAt > REVIEWS_POLL_MAX_MS) break;
+    await sleep(wait);
+    const getRes = await fetch(`${REVIEWS_TASK_GET_URL}${encodeURIComponent(taskId)}`, {
+      method: "GET",
+      headers: { authorization: authHeader },
+    });
+    if (!getRes.ok) {
+      // Transient errors get retried by the loop. Only bubble up
+      // sustained failures via the timeout error below.
+      continue;
+    }
+    const getJson = (await getRes.json().catch(() => null)) as Record<string, unknown> | null;
+    if (!getJson) continue;
+    const top = typeof getJson.status_code === "number" ? getJson.status_code : 0;
+    if (top >= 40000) {
+      const msg =
+        typeof getJson.status_message === "string" ? getJson.status_message : "task error";
+      throw new DataForSeoApiError(`DataForSEO ${top}: ${msg}`, top);
+    }
+    const taskState = inspectTaskState(getJson);
+    if (taskState === "in_progress") continue;
+    if (taskState === "error") {
+      const taskErr = firstTaskError(getJson);
+      if (taskErr) throw new DataForSeoApiError(taskErr.message, taskErr.code);
+      throw new DataForSeoApiError("DataForSEO task settled with an unknown error", 500);
+    }
+    // done
+    return parseReviewsResponse(getJson).slice(0, depth);
+  }
+  throw new DataForSeoApiError(
+    `DataForSEO reviews task ${taskId} didn't complete within ${Math.round(REVIEWS_POLL_MAX_MS / 1000)}s`,
+    504,
+  );
+}
+
+function extractTaskId(json: Record<string, unknown> | null): string | null {
+  if (!json) return null;
+  const tasks = Array.isArray(json.tasks) ? json.tasks : [];
+  for (const t of tasks) {
+    if (typeof t !== "object" || t === null) continue;
+    const id = (t as Record<string, unknown>).id;
+    if (typeof id === "string" && id.length > 0) return id;
+  }
+  return null;
+}
+
+/**
+ * task_get returns one of three meaningful states:
+ *   - in_progress: status_code 40602 ("Task In Queue") or 40601
+ *   - error:       status_code >= 40000 (excluding 40601/40602)
+ *   - done:        status_code 20000 with `result` populated
+ *
+ * We treat any task with `status_code === 20000` and a non-null
+ * `result` as done. Anything still queued returns "in_progress" so the
+ * caller keeps polling.
+ */
+function inspectTaskState(json: Record<string, unknown> | null): "done" | "in_progress" | "error" {
+  if (!json) return "in_progress";
+  const tasks = Array.isArray(json.tasks) ? json.tasks : [];
+  for (const t of tasks) {
+    if (typeof t !== "object" || t === null) continue;
+    const obj = t as Record<string, unknown>;
+    const code = typeof obj.status_code === "number" ? obj.status_code : 0;
+    if (code === 40602 || code === 40601) return "in_progress";
+    if (code >= 40000) return "error";
+    if (code === 20000) {
+      if (obj.result === null) return "in_progress";
+      return "done";
+    }
+  }
+  return "in_progress";
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
