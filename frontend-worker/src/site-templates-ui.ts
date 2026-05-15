@@ -318,6 +318,11 @@ export function renderDataSourceForm(opts: {
       <div class="form-actions">
         <button class="btn btn-primary" type="submit">${opts.mode === "new" ? "Create data source" : "Save changes"}</button>
         <a class="btn" href="/app/data-sources">Cancel</a>
+        ${
+          opts.mode === "edit" && opts.prefill.id
+            ? `<a class="btn" style="margin-left:auto;color:var(--red);border-color:color-mix(in srgb,var(--red) 40%,transparent)" href="/app/data-sources/${opts.prefill.id}/delete">Delete data source…</a>`
+            : ""
+        }
       </div>
     </form>
   </div>`;
@@ -813,6 +818,107 @@ export async function handleGenerateConfirmPost(
       : { mode: "client_per_row", zone: (raw.zone ?? "").trim() };
   const results = await executeGenerate(env, user, template, dataSource, target);
   return { result: { template, results } };
+}
+
+/* ─── Data source delete ─── */
+
+/**
+ * Confirmation page for hard-deleting a data source. Shows the
+ * cascade impact (how many generated_pages reference it) so the
+ * operator can decide. Type-DELETE pattern, same as the bulk-delete
+ * flow for clients.
+ *
+ * Hard delete (not soft) because data sources don't serve traffic
+ * — they're just inputs to the render pipeline. CASCADE in the
+ * generated_pages FK handles the dependent rows.
+ */
+export function renderDataSourceDeleteConfirm(opts: {
+  dataSource: SiteDataSourceRow;
+  generatedPageCount: number;
+  errors: string[];
+}): string {
+  const { dataSource: ds, generatedPageCount, errors } = opts;
+  const errBox =
+    errors.length > 0 ? `<div class="error-box">${errors.map(esc).join("\n")}</div>` : "";
+  const rowCount = safeParseArray<unknown>(ds.rows).length;
+  return `<style>${TEMPLATES_CSS}</style><div class="tmpl-page" style="max-width:680px">
+    <div class="crumbs"><a href="/app/data-sources/${ds.id}/edit">← ${esc(ds.name)}</a></div>
+    <h1 style="color:var(--red)">Delete data source</h1>
+    ${errBox}
+    <div style="background:var(--red-bg);border:1px solid color-mix(in srgb,var(--red) 30%,transparent);border-radius:var(--radius);padding:1rem 1.25rem;margin-bottom:1.25rem">
+      <strong>This will permanently delete the data source.</strong>
+      <ul style="margin:.5rem 0 0;padding-left:1.2rem;line-height:1.7">
+        <li>Removes <strong>${rowCount}</strong> row${rowCount === 1 ? "" : "s"} of source data.</li>
+        ${
+          generatedPageCount > 0
+            ? `<li><strong style="color:var(--red)">${generatedPageCount} generated page record${generatedPageCount === 1 ? "" : "s"}</strong> will also be deleted (FK CASCADE). The R2 content + already-generated client sites are <em>not</em> touched — you'll need to delete those separately if you want them gone.</li>`
+            : "<li>No generated pages reference this source — clean delete.</li>"
+        }
+        <li>This action <strong>cannot be undone</strong>.</li>
+      </ul>
+    </div>
+    <form method="POST" action="/app/data-sources/${ds.id}/delete">
+      <div class="form-section">
+        <label for="confirm_word">Type <code style="font-family:var(--mono);font-weight:700">DELETE</code> to confirm:</label>
+        <input id="confirm_word" name="confirm_word" type="text" required autocomplete="off" autofocus placeholder="DELETE" style="font-family:var(--mono);font-size:1rem;text-transform:uppercase">
+      </div>
+      <div class="form-actions">
+        <button class="btn" type="submit" style="background:var(--red);border-color:var(--red);color:#fff">Permanently delete</button>
+        <a class="btn" href="/app/data-sources/${ds.id}/edit">Cancel</a>
+      </div>
+    </form>
+  </div>`;
+}
+
+export async function handleDataSourceDeletePost(
+  request: Request,
+  env: AppEnv,
+  url: URL,
+  user: User,
+  id: number,
+): Promise<{ redirect: Response } | { errors: string[] }> {
+  const csrf = checkCsrf(request, url);
+  if (csrf) return { redirect: csrf };
+  const ds = await loadVisibleDataSource(env, user, id);
+  if (!ds) return { redirect: new Response("Not found", { status: 404 }) };
+  const form = await request.formData();
+  const confirm = String(form.get("confirm_word") ?? "")
+    .trim()
+    .toUpperCase();
+  if (confirm !== "DELETE") {
+    return {
+      errors: [`Confirmation didn't match: expected "DELETE", got "${confirm || "(empty)"}".`],
+    };
+  }
+  try {
+    await env.CONFIG_DB.prepare("DELETE FROM site_data_sources WHERE id = ?").bind(id).run();
+  } catch (e) {
+    return {
+      errors: [`DB error: ${e instanceof Error ? e.message : String(e)}`],
+    };
+  }
+  return {
+    redirect: flashRedirect("/app/data-sources", {
+      text: `Deleted data source "${ds.name}".`,
+      kind: "ok",
+    }),
+  };
+}
+
+/**
+ * Count how many `generated_pages` rows reference a given data source
+ * — surfaces the cascade impact on the delete confirmation page.
+ */
+export async function countGeneratedPagesForDataSource(
+  env: AppEnv,
+  dataSourceId: number,
+): Promise<number> {
+  const r = await env.CONFIG_DB.prepare(
+    "SELECT COUNT(*) AS n FROM generated_pages WHERE data_source_id = ?",
+  )
+    .bind(dataSourceId)
+    .first<{ n: number }>();
+  return r?.n ?? 0;
 }
 
 /* ─── Tiny helpers ─── */

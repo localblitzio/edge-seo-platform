@@ -118,6 +118,7 @@ import {
   handleReviewsStartPost,
   handleScrapeStartPost,
   isStuck,
+  renderEnrichmentPanels,
   renderScrapeForm,
   renderScrapeProgress,
   runReviewsJob,
@@ -206,12 +207,15 @@ import {
 } from "./serp-new.js";
 import { handleSettingsApiKeysPost, renderSettingsApiKeysPage } from "./settings.js";
 import {
+  countGeneratedPagesForDataSource,
+  handleDataSourceDeletePost,
   handleDataSourceEditPost,
   handleDataSourceNewPost,
   handleGenerateConfirmPost,
   handleGeneratePreviewPost,
   handleTemplateEditPost,
   handleTemplateNewPost,
+  renderDataSourceDeleteConfirm,
   renderDataSourceForm,
   renderDataSourcesList,
   renderGenerateForm,
@@ -3565,17 +3569,71 @@ export default {
         return outcome.redirect;
       }
 
+      // Hard-delete a data source (type-DELETE confirmation page).
+      if (sub === "delete" && method === "GET") {
+        const generatedPageCount = await countGeneratedPagesForDataSource(env, ds.id);
+        return htmlResponse(
+          htmlPage({
+            title: `Delete ${ds.name}? — Edge SEO Platform`,
+            body: appLayout({
+              title: "Delete data source",
+              content: renderDataSourceDeleteConfirm({
+                dataSource: ds,
+                generatedPageCount,
+                errors: [],
+              }),
+              activeNav: "data-sources",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+        );
+      }
+
+      if (sub === "delete" && method === "POST") {
+        const result = await handleDataSourceDeletePost(request, env, url, user, ds.id);
+        if ("redirect" in result) return result.redirect;
+        const generatedPageCount = await countGeneratedPagesForDataSource(env, ds.id);
+        return htmlResponse(
+          htmlPage({
+            title: `Delete ${ds.name}? — Edge SEO Platform`,
+            body: appLayout({
+              title: "Delete data source",
+              content: renderDataSourceDeleteConfirm({
+                dataSource: ds,
+                generatedPageCount,
+                errors: result.errors,
+              }),
+              activeNav: "data-sources",
+              user,
+              flash,
+              clients,
+            }),
+            user,
+            flash: null,
+          }),
+          { status: 400 },
+        );
+      }
+
       if (sub === "edit" && method === "GET") {
         const stuck = isStuck(ds.scrape_status, ds.scrape_progress_updated_at);
         const isScraped = ds.source_kind === "dataforseo_business_listings";
         const progressBlock = isScraped ? renderScrapeProgress({ ds, stuck }) : "";
+        // Enrichment panels work on ANY data source whose rows have
+        // the right columns — not just Maps-scraped ones. CSVs with a
+        // `city` column can use Wikipedia enrichment, etc.
+        const enrichmentBlock = renderEnrichmentPanels(ds);
         const headExtra = isScraped ? scrapeAutoRefreshHeader(ds, stuck) : "";
         return htmlResponse(
           htmlPage({
             title: `Edit ${ds.name} — Edge SEO Platform`,
             body: appLayout({
               title: `Edit ${ds.name}`,
-              content: `${progressBlock}${renderDataSourceForm({
+              content: `${progressBlock}${enrichmentBlock}${renderDataSourceForm({
                 prefill: {
                   id: ds.id,
                   name: ds.name,

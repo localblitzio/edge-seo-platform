@@ -510,19 +510,36 @@ export function renderScrapeProgress(opts: {
     ${errorBlock}
     ${stuckBlock}
     <div class="loc-list">${locRows}</div>
-    ${renderReviewsBlock(ds)}
-    ${renderCityEnrichmentBlock(ds)}
   </div>`;
 }
 
 /**
- * Free Wikipedia-powered city enrichment. Idempotent — re-running
- * just refreshes the cache. Visible only after listings scrape is
- * done (otherwise there's no city data to enrich).
+ * Kind-agnostic enrichment panels — shown on every data source's
+ * edit page regardless of source_kind. Each block decides for itself
+ * whether to render based on the row contents (e.g. reviews need a
+ * `place_id` column).
+ */
+export function renderEnrichmentPanels(ds: SiteDataSourceRow): string {
+  const reviews = renderReviewsBlock(ds);
+  const cities = renderCityEnrichmentBlock(ds);
+  if (!reviews && !cities) return "";
+  return `<style>${PROGRESS_CSS}</style><div class="scrape-progress">
+    <div style="margin-bottom:.4rem"><strong>Enrichments</strong> <span style="color:var(--fg-muted);font-size:.85rem">— add more fields to every row</span></div>
+    ${reviews}
+    ${cities}
+  </div>`;
+}
+
+/**
+ * Free Wikipedia-powered city enrichment. Available on any data
+ * source whose rows have a `city` column — Maps-scraped sources
+ * always do, and CSV/inline sources qualify when the operator
+ * includes a `city` header. Idempotent — re-running just refreshes
+ * the 30-day cache.
  */
 function renderCityEnrichmentBlock(ds: SiteDataSourceRow): string {
-  if (ds.source_kind !== "dataforseo_business_listings") return "";
-  if (ds.scrape_status !== "done") return "";
+  if (ds.source_kind === "dataforseo_business_listings" && ds.scrape_status !== "done") return "";
+  if (!dataSourceHasColumn(ds, "city")) return "";
 
   return `<form method="POST" action="/app/data-sources/${ds.id}/enrich-cities" style="margin-top:1rem">
     <div style="background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius);padding:.85rem 1rem;display:flex;align-items:center;justify-content:space-between;gap:.8rem">
@@ -536,13 +553,34 @@ function renderCityEnrichmentBlock(ds: SiteDataSourceRow): string {
 }
 
 /**
- * Reviews-scrape block shown below the listings progress. Only renders
- * for `dataforseo_business_listings` sources, and only once the
- * listings scrape has produced data.
+ * True when at least one row in the data source has a non-empty value
+ * for the given column. Cheaper than scanning columns JSON — we just
+ * peek at the first 50 rows.
+ */
+function dataSourceHasColumn(ds: SiteDataSourceRow, column: string): boolean {
+  try {
+    const rows = JSON.parse(ds.rows) as Array<Record<string, string>>;
+    if (!Array.isArray(rows)) return false;
+    for (let i = 0; i < Math.min(rows.length, 50); i++) {
+      const v = rows[i]?.[column];
+      if (typeof v === "string" && v.trim().length > 0) return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Reviews-scrape block. Available on any data source whose rows have
+ * a `place_id` column — both Maps-scraped sources and hand-typed CSVs
+ * with place_ids qualify. Hidden when the listings scrape is still in
+ * flight (for dataforseo_business_listings sources).
  */
 function renderReviewsBlock(ds: SiteDataSourceRow): string {
-  if (ds.source_kind !== "dataforseo_business_listings") return "";
-  if (ds.scrape_status !== "done") return "";
+  if (ds.source_kind === "dataforseo_business_listings" && ds.scrape_status !== "done") return "";
+  // Need at least one row with a place_id, otherwise reviews scrape is a no-op.
+  if (!dataSourceHasColumn(ds, "place_id")) return "";
 
   const status = ds.reviews_status;
   const rowsCount = countRows(ds.rows);
