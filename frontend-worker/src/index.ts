@@ -98,6 +98,7 @@ import {
   renderBulkPreview,
   renderBulkResult,
 } from "./bulk-clients.js";
+import { handleCityEnrichmentPost, runCityEnrichmentJob } from "./city-enrichment.js";
 import {
   handleClusterStatusPost,
   handleEditClusterPost,
@@ -114,10 +115,12 @@ import {
 import {
   defaultScrapeFormPrefill,
   handleRescrapePost,
+  handleReviewsStartPost,
   handleScrapeStartPost,
   isStuck,
   renderScrapeForm,
   renderScrapeProgress,
+  runReviewsJob,
   runScrapeJob,
   scrapeAutoRefreshHeader,
 } from "./data-source-scrape.js";
@@ -3209,6 +3212,8 @@ export default {
                   kind: tmpl.kind,
                   html_template: tmpl.html_template,
                   path_pattern: tmpl.path_pattern,
+                  cross_link_strategy: tmpl.cross_link_strategy,
+                  cross_link_count: tmpl.cross_link_count,
                 },
                 errors: [],
                 mode: "edit",
@@ -3540,6 +3545,24 @@ export default {
         }
         if (outcome.redirect) return outcome.redirect;
         return new Response("Internal error", { status: 500 });
+      }
+
+      // B.6 — start (or re-fetch) the reviews scrape for a Maps-scraped data source.
+      if (sub === "reviews/start" && method === "POST") {
+        const outcome = await handleReviewsStartPost(request, env, url, user, ds);
+        if (outcome.job) {
+          ctx.waitUntil(runReviewsJob(env, outcome.job.dataSourceId));
+        }
+        return outcome.redirect;
+      }
+
+      // B.7 — Wikipedia city enrichment for all unique cities in this data source.
+      if (sub === "enrich-cities" && method === "POST") {
+        const outcome = await handleCityEnrichmentPost(request, env, url, user, ds);
+        if (outcome.job) {
+          ctx.waitUntil(runCityEnrichmentJob(env, outcome.job.dataSourceId));
+        }
+        return outcome.redirect;
       }
 
       if (sub === "edit" && method === "GET") {

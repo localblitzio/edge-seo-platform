@@ -35,7 +35,9 @@ import {
   type BusinessListingRow,
   DataForSeoApiError,
   DataForSeoConfigError,
+  type ReviewItem,
   fetchBusinessListings,
+  fetchReviews,
 } from "./dataforseo.js";
 import { LOCATION_PACKS } from "./location-packs.js";
 import { type SiteDataSourceRow, checkCsrf, flashRedirect } from "./site-templates.js";
@@ -508,12 +510,94 @@ export function renderScrapeProgress(opts: {
     ${errorBlock}
     ${stuckBlock}
     <div class="loc-list">${locRows}</div>
+    ${renderReviewsBlock(ds)}
+    ${renderCityEnrichmentBlock(ds)}
+  </div>`;
+}
+
+/**
+ * Free Wikipedia-powered city enrichment. Idempotent — re-running
+ * just refreshes the cache. Visible only after listings scrape is
+ * done (otherwise there's no city data to enrich).
+ */
+function renderCityEnrichmentBlock(ds: SiteDataSourceRow): string {
+  if (ds.source_kind !== "dataforseo_business_listings") return "";
+  if (ds.scrape_status !== "done") return "";
+
+  return `<form method="POST" action="/app/data-sources/${ds.id}/enrich-cities" style="margin-top:1rem">
+    <div style="background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius);padding:.85rem 1rem;display:flex;align-items:center;justify-content:space-between;gap:.8rem">
+      <div>
+        <strong>+ Enrich cities (Wikipedia)</strong>
+        <div style="color:var(--fg-muted);font-size:.85rem">Adds <code>city_description</code>, <code>city_population</code>, <code>city_founded_year</code> per row. Free, ~1 min for 20 cities. Cached for 30 days.</div>
+      </div>
+      <button class="btn" type="submit">Enrich cities →</button>
+    </div>
+  </form>`;
+}
+
+/**
+ * Reviews-scrape block shown below the listings progress. Only renders
+ * for `dataforseo_business_listings` sources, and only once the
+ * listings scrape has produced data.
+ */
+function renderReviewsBlock(ds: SiteDataSourceRow): string {
+  if (ds.source_kind !== "dataforseo_business_listings") return "";
+  if (ds.scrape_status !== "done") return "";
+
+  const status = ds.reviews_status;
+  const rowsCount = countRows(ds.rows);
+  // Eligible = rows with a place_id. Without parsing the JSON twice
+  // here, we use progress_total when running and rowsCount as a hint.
+  const reviewsDone = ds.reviews_progress_done;
+  const reviewsTotal = Math.max(1, ds.reviews_progress_total);
+  const reviewsPct = Math.min(100, Math.round((reviewsDone / reviewsTotal) * 100));
+  const errorBlock = ds.reviews_error
+    ? `<div class="error-box" style="margin-top:.5rem">${esc(ds.reviews_error)}</div>`
+    : "";
+
+  if (status === "none") {
+    return `<form method="POST" action="/app/data-sources/${ds.id}/reviews/start" style="margin-top:1rem">
+      <div style="background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius);padding:.85rem 1rem;display:flex;align-items:center;justify-content:space-between;gap:.8rem">
+        <div>
+          <strong>+ Fetch customer reviews</strong>
+          <div style="color:var(--fg-muted);font-size:.85rem">Up to 5 newest reviews per business via DataForSEO Reviews API (~\$0.003 each). ${rowsCount} business${rowsCount === 1 ? "" : "es"} eligible.</div>
+        </div>
+        <button class="btn btn-primary" type="submit">Start reviews scrape →</button>
+      </div>
+    </form>`;
+  }
+
+  const chip =
+    status === "done"
+      ? `<span class="result-pill result-created">done</span>`
+      : status === "error"
+        ? `<span class="result-pill result-error">error</span>`
+        : `<span class="running-pulse"></span><strong>fetching reviews…</strong>`;
+
+  return `<div style="margin-top:1rem;padding-top:1rem;border-top:1px dashed var(--border)">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:1rem">
+      <div>
+        <strong>Reviews scrape</strong> ${chip}
+        <div style="color:var(--fg-muted);font-size:.85rem">${reviewsDone} / ${ds.reviews_progress_total} business${ds.reviews_progress_total === 1 ? "" : "es"}</div>
+      </div>
+      ${
+        status === "done" || status === "error"
+          ? `<form method="POST" action="/app/data-sources/${ds.id}/reviews/start" style="margin:0"><button class="btn" type="submit">Re-fetch reviews →</button></form>`
+          : ""
+      }
+    </div>
+    <div class="bar"><div class="fill" style="width:${reviewsPct}%"></div></div>
+    <div class="pct">${reviewsPct}%</div>
+    ${errorBlock}
   </div>`;
 }
 
 /** Refresh meta tag — emitted only while scrape is live. */
 export function scrapeAutoRefreshHeader(ds: SiteDataSourceRow, stuck: boolean): string {
   if (ds.scrape_status === "running" && !stuck) {
+    return `<meta http-equiv="refresh" content="2">`;
+  }
+  if (ds.reviews_status === "running") {
     return `<meta http-equiv="refresh" content="2">`;
   }
   return "";
@@ -646,3 +730,168 @@ export async function handleRescrapePost(
     job: { dataSourceId: ds.id, config },
   };
 }
+
+/* ─── Reviews job (B.6) ─── */
+
+const REVIEWS_PER_BUSINESS = 5;
+
+/**
+ * Run a per-business reviews scrape. For every row with a non-empty
+ * `place_id`, fetch up to REVIEWS_PER_BUSINESS reviews and append to
+ * that row as `reviews_json` + a `has_reviews` sentinel string.
+ *
+ * MUST NOT throw — errors go into `reviews_error` + status='error'.
+ */
+export async function runReviewsJob(env: AppEnv, dataSourceId: number): Promise<void> {
+  try {
+    const ds = await env.CONFIG_DB.prepare("SELECT rows FROM site_data_sources WHERE id = ?")
+      .bind(dataSourceId)
+      .first<{ rows: string }>();
+    if (!ds) {
+      await markReviewsError(env, dataSourceId, "data source not found");
+      return;
+    }
+    let allRows: Array<Record<string, string>>;
+    try {
+      allRows = JSON.parse(ds.rows) as Array<Record<string, string>>;
+    } catch {
+      await markReviewsError(env, dataSourceId, "rows JSON is invalid");
+      return;
+    }
+    // Only fetch for rows with a place_id — others would 400 from DFS.
+    const eligible = allRows
+      .map((row, idx) => ({ row, idx }))
+      .filter((e) => (e.row.place_id ?? "").trim().length > 0);
+
+    for (let i = 0; i < eligible.length; i++) {
+      const entry = eligible[i];
+      if (!entry) continue;
+      const placeId = entry.row.place_id ?? "";
+      try {
+        const reviews = await fetchReviews(env, placeId, REVIEWS_PER_BUSINESS);
+        entry.row.reviews_json = reviews.length > 0 ? JSON.stringify(reviews) : "";
+        entry.row.has_reviews = reviews.length > 0 ? "1" : "";
+      } catch (e) {
+        if (e instanceof DataForSeoConfigError) {
+          await markReviewsError(env, dataSourceId, e.message);
+          return;
+        }
+        const msg =
+          e instanceof DataForSeoApiError
+            ? `HTTP ${e.statusCode}: ${e.message}`
+            : e instanceof Error
+              ? e.message
+              : String(e);
+        // Per-business errors don't abort the whole job — record on
+        // the row so the operator can spot them in the data.
+        entry.row.reviews_error = msg;
+      }
+      // Write progress + accumulated rows after each business.
+      await env.CONFIG_DB.prepare(
+        `UPDATE site_data_sources
+           SET rows = ?,
+               reviews_progress_done = ?,
+               reviews_progress_updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+               updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+      )
+        .bind(JSON.stringify(allRows), i + 1, dataSourceId)
+        .run();
+    }
+    // Also update the columns list to surface the new fields in the UI.
+    const colSet = new Set([...BUSINESS_LISTING_COLUMNS, "reviews_json", "has_reviews"]);
+    const cols = JSON.stringify(Array.from(colSet));
+    await env.CONFIG_DB.prepare(
+      `UPDATE site_data_sources
+         SET columns = ?,
+             reviews_status = 'done',
+             reviews_progress_updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+             updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`,
+    )
+      .bind(cols, dataSourceId)
+      .run();
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    await markReviewsError(env, dataSourceId, msg);
+  }
+}
+
+async function markReviewsError(env: AppEnv, dataSourceId: number, message: string): Promise<void> {
+  try {
+    await env.CONFIG_DB.prepare(
+      `UPDATE site_data_sources
+         SET reviews_status = 'error',
+             reviews_error = ?,
+             reviews_progress_updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+             updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`,
+    )
+      .bind(message, dataSourceId)
+      .run();
+  } catch {
+    // best-effort
+  }
+}
+
+export async function handleReviewsStartPost(
+  request: Request,
+  env: AppEnv,
+  url: URL,
+  _user: User,
+  ds: SiteDataSourceRow,
+): Promise<{ redirect: Response; job?: { dataSourceId: number } }> {
+  const csrf = checkCsrf(request, url);
+  if (csrf) return { redirect: csrf };
+  if (ds.source_kind !== "dataforseo_business_listings") {
+    return {
+      redirect: flashRedirect(`/app/data-sources/${ds.id}/edit`, {
+        text: "Reviews scrape only works on Maps-scraped data sources.",
+        kind: "err",
+      }),
+    };
+  }
+  // Count rows with a place_id — that's our progress_total budget.
+  let allRows: Array<Record<string, string>> = [];
+  try {
+    allRows = JSON.parse(ds.rows);
+  } catch {
+    return {
+      redirect: flashRedirect(`/app/data-sources/${ds.id}/edit`, {
+        text: "Data source rows are invalid JSON.",
+        kind: "err",
+      }),
+    };
+  }
+  const eligible = allRows.filter((r) => (r.place_id ?? "").trim().length > 0);
+  if (eligible.length === 0) {
+    return {
+      redirect: flashRedirect(`/app/data-sources/${ds.id}/edit`, {
+        text: "No rows with a place_id — run/re-scrape the listings first.",
+        kind: "warn",
+      }),
+    };
+  }
+  await env.CONFIG_DB.prepare(
+    `UPDATE site_data_sources
+       SET reviews_status = 'running',
+           reviews_progress_total = ?,
+           reviews_progress_done = 0,
+           reviews_progress_updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+           reviews_error = NULL,
+           updated_at = CURRENT_TIMESTAMP
+     WHERE id = ?`,
+  )
+    .bind(eligible.length, ds.id)
+    .run();
+  return {
+    redirect: flashRedirect(`/app/data-sources/${ds.id}/edit`, {
+      text: `Reviews scrape started — ${eligible.length} task${eligible.length === 1 ? "" : "s"} (~\$${(eligible.length * 0.003).toFixed(2)}).`,
+      kind: "ok",
+    }),
+    job: { dataSourceId: ds.id },
+  };
+}
+
+/* Re-export so route handlers can typecheck ReviewItem when needed. */
+export type { ReviewItem };

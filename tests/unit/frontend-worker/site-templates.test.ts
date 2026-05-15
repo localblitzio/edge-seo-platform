@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  buildCrossLinks,
   buildPlaceholderSchema,
   extractPlaceholders,
   parseCsv,
@@ -59,6 +60,129 @@ describe("renderTemplate", () => {
     expect(renderTemplate("a{{#if x}}MID{{/if}}b", {})).toBe("ab");
     expect(renderTemplate("a{{#if x}}MID{{/if}}b", { x: "" })).toBe("ab");
     expect(renderTemplate("a{{#if x}}MID{{/if}}b", { x: "   " })).toBe("ab");
+  });
+});
+
+describe("renderTemplate — {{#each name}} blocks", () => {
+  it("iterates an array of objects via extras", () => {
+    const out = renderTemplate(
+      "<ul>{{#each items}}<li>{{title}}</li>{{/each}}</ul>",
+      {},
+      { items: [{ title: "A" }, { title: "B" }, { title: "C" }] },
+    );
+    expect(out).toBe("<ul><li>A</li><li>B</li><li>C</li></ul>");
+  });
+
+  it("renders nothing when the array is missing or empty", () => {
+    expect(renderTemplate("X{{#each missing}}Y{{/each}}Z", {})).toBe("XZ");
+    expect(renderTemplate("X{{#each items}}Y{{/each}}Z", {}, { items: [] })).toBe("XZ");
+  });
+
+  it("merges outer row fields into each iteration", () => {
+    const out = renderTemplate(
+      "{{#each links}}{{city}}/{{slug}} {{/each}}",
+      { city: "san-diego" },
+      { links: [{ slug: "a" }, { slug: "b" }] },
+    );
+    expect(out).toBe("san-diego/a san-diego/b ");
+  });
+});
+
+describe("buildCrossLinks", () => {
+  const rows = [
+    {
+      title: "Aqua Pools",
+      city: "San Diego",
+      state: "California",
+      categories: "Pool Builder",
+      latitude: "32.7",
+      longitude: "-117.16",
+    },
+    {
+      title: "Splash Co",
+      city: "La Jolla",
+      state: "California",
+      categories: "Pool Builder",
+      latitude: "32.85",
+      longitude: "-117.27",
+    },
+    {
+      title: "Wave Pools",
+      city: "Carlsbad",
+      state: "California",
+      categories: "Pool Builder",
+      latitude: "33.16",
+      longitude: "-117.35",
+    },
+    {
+      title: "SD Roofers",
+      city: "San Diego",
+      state: "California",
+      categories: "Roofing Contractor",
+      latitude: "32.71",
+      longitude: "-117.16",
+    },
+  ];
+
+  it("returns empty when strategy is 'none' or count is 0", () => {
+    expect(
+      buildCrossLinks(rows, rows[0]!, "slug-a", "none", 5, "/", "localsitestage.us", 1),
+    ).toEqual([]);
+    expect(
+      buildCrossLinks(rows, rows[0]!, "slug-a", "same_category_nearby_cities", 0, "/", "z", 1),
+    ).toEqual([]);
+  });
+
+  it("same_category_nearby_cities: picks pool builders in other cities, nearest first", () => {
+    const links = buildCrossLinks(
+      rows,
+      rows[0]!,
+      "aqua-pools-t1-r0",
+      "same_category_nearby_cities",
+      3,
+      "/",
+      "localsitestage.us",
+      1,
+    );
+    expect(links).toHaveLength(2);
+    // La Jolla (~16 km) is closer than Carlsbad (~50 km)
+    expect(links[0]?.title).toBe("Splash Co");
+    expect(links[1]?.title).toBe("Wave Pools");
+    expect(links[0]?.url).toContain("localsitestage.us");
+    expect(links[0]?.context).toBe("La Jolla, California");
+  });
+
+  it("same_city_other_categories: picks other-category businesses in the same city", () => {
+    const links = buildCrossLinks(
+      rows,
+      rows[0]!,
+      "aqua-pools-t1-r0",
+      "same_city_other_categories",
+      5,
+      "/",
+      "localsitestage.us",
+      1,
+    );
+    expect(links).toHaveLength(1);
+    expect(links[0]?.title).toBe("SD Roofers");
+  });
+
+  it("falls back to 'any other row' when the strategy filter is empty", () => {
+    // Only one pool builder in the data → same_category_nearby_cities
+    // matches nothing → falls back to other-row pool of size > 0.
+    const tiny = [rows[0]!, rows[3]!];
+    const links = buildCrossLinks(
+      tiny,
+      tiny[0]!,
+      "slug",
+      "same_category_nearby_cities",
+      5,
+      "/",
+      "z",
+      1,
+    );
+    expect(links).toHaveLength(1);
+    expect(links[0]?.title).toBe("SD Roofers");
   });
 });
 

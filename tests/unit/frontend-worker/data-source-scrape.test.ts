@@ -8,6 +8,7 @@ import {
 } from "../../../frontend-worker/src/data-source-scrape.js";
 import {
   buildMapsSerpRequestBody,
+  normalizeHours,
   parseMapsResponse,
 } from "../../../frontend-worker/src/dataforseo.js";
 
@@ -147,6 +148,82 @@ describe("parseMapsResponse", () => {
     expect(parseMapsResponse(payload, ctx)).toEqual([]);
   });
 
+  it("extracts B.3 enrichment fields: place_id, lat/lng, hours, price, description, photos, attributes", () => {
+    const payload = {
+      tasks: [
+        {
+          result: [
+            {
+              items: [
+                {
+                  type: "maps_search",
+                  title: "Aqua Pro Pools",
+                  address: "123 Main St",
+                  address_info: { city: "San Diego", region: "California", country_code: "US" },
+                  place_id: "ChIJrTLr-GyuEmsRBfy61i59si0",
+                  latitude: 32.7157,
+                  longitude: -117.1611,
+                  price_level: "$$",
+                  snippet: "Top-rated pool builder in San Diego.",
+                  main_image: "https://example.com/main.jpg",
+                  photos: ["https://example.com/p1.jpg", { url: "https://example.com/p2.jpg" }],
+                  attributes: { wheelchair_accessible: true, wifi: "yes", outdoor_seating: false },
+                  work_time: {
+                    work_hours: {
+                      timetable: {
+                        monday: [{ open: { hour: 9, minute: 0 }, close: { hour: 17, minute: 0 } }],
+                        tuesday: [
+                          { open: { hour: 9, minute: 30 }, close: { hour: 17, minute: 0 } },
+                        ],
+                        sunday: [],
+                      },
+                    },
+                  },
+                  category: "Pool Builder",
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    const rows = parseMapsResponse(payload, ctx);
+    expect(rows).toHaveLength(1);
+    const row = rows[0]!;
+    expect(row.place_id).toBe("ChIJrTLr-GyuEmsRBfy61i59si0");
+    expect(row.latitude).toBe("32.7157");
+    expect(row.longitude).toBe("-117.1611");
+    expect(row.price_level).toBe("$$");
+    expect(row.description).toBe("Top-rated pool builder in San Diego.");
+    expect(row.main_image_url).toBe("https://example.com/main.jpg");
+    const photos = JSON.parse(row.photos_json) as string[];
+    expect(photos).toEqual(["https://example.com/p1.jpg", "https://example.com/p2.jpg"]);
+    const attrs = JSON.parse(row.attributes_json) as Record<string, boolean>;
+    expect(attrs).toEqual({ wheelchair_accessible: true, wifi: true, outdoor_seating: false });
+    const hours = JSON.parse(row.hours_json) as Record<string, string>;
+    expect(hours.monday).toBe("09:00-17:00");
+    expect(hours.tuesday).toBe("09:30-17:00");
+    expect(hours.sunday).toBe("closed");
+  });
+
+  it("defaults enrichment fields to empty strings when absent", () => {
+    const payload = {
+      tasks: [{ result: [{ items: [{ type: "maps_search", title: "Plain Co" }] }] }],
+    };
+    const rows = parseMapsResponse(payload, ctx);
+    expect(rows[0]).toMatchObject({
+      place_id: "",
+      latitude: "",
+      longitude: "",
+      hours_json: "",
+      price_level: "",
+      description: "",
+      main_image_url: "",
+      photos_json: "",
+      attributes_json: "",
+    });
+  });
+
   it("returns empty when result is null (DataForSEO returns this for unresolved locations)", () => {
     // Top-level OK, but the task itself failed: status_code >= 40000.
     // parseMapsResponse just sees no items and returns []. The caller
@@ -161,6 +238,35 @@ describe("parseMapsResponse", () => {
       ],
     };
     expect(parseMapsResponse(payload, ctx)).toEqual([]);
+  });
+});
+
+describe("normalizeHours", () => {
+  it("returns '' for null / empty input", () => {
+    expect(normalizeHours(null)).toBe("");
+    expect(normalizeHours("")).toBe("");
+    expect(normalizeHours({})).toBe("");
+  });
+
+  it("collapses 24/7 strings", () => {
+    expect(normalizeHours("24/7")).toBe("24/7");
+    expect(normalizeHours("Open 24 hours")).toBe("24/7");
+    expect(normalizeHours({ work_hours: "24/7" })).toBe("24/7");
+  });
+
+  it("converts a per-day timetable into a JSON map", () => {
+    const result = normalizeHours({
+      work_hours: {
+        timetable: {
+          monday: [{ open: { hour: 9, minute: 0 }, close: { hour: 17, minute: 30 } }],
+          friday: [],
+        },
+      },
+    });
+    const parsed = JSON.parse(result) as Record<string, string>;
+    expect(parsed.monday).toBe("09:00-17:30");
+    expect(parsed.friday).toBe("closed");
+    expect(parsed.sunday).toBe("closed");
   });
 });
 

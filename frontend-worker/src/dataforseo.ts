@@ -20,6 +20,7 @@ import type { AppEnv } from "./app.js";
 
 const ENDPOINT = "https://api.dataforseo.com/v3/serp/google/organic/live/advanced";
 const MAPS_ENDPOINT = "https://api.dataforseo.com/v3/serp/google/maps/live/advanced";
+const REVIEWS_ENDPOINT = "https://api.dataforseo.com/v3/business_data/google/reviews/live";
 
 /** Single organic result the caller can offer to the operator. */
 export interface SerpResult {
@@ -257,6 +258,25 @@ export interface BusinessListingRow {
   keyword: string;
   /** Location string the operator typed (e.g. "San Diego, California"). */
   location: string;
+  /* ─── Phase B.3 enrichment fields (same call, just parse more) ─── */
+  /** Google CID — stable Maps identifier. Enables Maps deep links + place_id-keyed reviews scrape later. */
+  place_id: string;
+  /** Latitude as decimal string ("32.7157"). Unlocks per-business map embeds. */
+  latitude: string;
+  /** Longitude as decimal string. */
+  longitude: string;
+  /** JSON-serialized weekly hours: `{"monday":"9-17","tuesday":"9-17",...}` or `"24/7"` or `""`. */
+  hours_json: string;
+  /** Price level marker: "$", "$$", "$$$", "$$$$", or "". */
+  price_level: string;
+  /** Short Google-supplied description ("snippet") or "". */
+  description: string;
+  /** Single hero photo URL or "". */
+  main_image_url: string;
+  /** JSON-serialized string[] of additional photo URLs (up to 10). */
+  photos_json: string;
+  /** JSON-serialized `Record<string, boolean>` of attributes (wheelchair_accessible, wifi, etc.). */
+  attributes_json: string;
 }
 
 export interface BusinessListingQuery {
@@ -284,6 +304,15 @@ export const BUSINESS_LISTING_COLUMNS: readonly (keyof BusinessListingRow)[] = [
   "categories",
   "keyword",
   "location",
+  "place_id",
+  "latitude",
+  "longitude",
+  "hours_json",
+  "price_level",
+  "description",
+  "main_image_url",
+  "photos_json",
+  "attributes_json",
 ];
 
 /**
@@ -302,6 +331,78 @@ export function buildMapsSerpRequestBody(q: BusinessListingQuery): string {
       depth,
     },
   ]);
+}
+
+/**
+ * Collapse DataForSEO's `work_time` block (variable shape) into a
+ * stable JSON string keyed by lowercased weekday name. Examples of
+ * the input shapes we see:
+ *
+ *   {"work_hours": {"timetable": {"monday": [{ "open": {hour: 9}, "close": {hour: 17}}], ...}}}
+ *   {"work_hours": "24/7"}
+ *   null / missing
+ *
+ * Returns "" when nothing usable was present, "24/7" for always-open,
+ * or a JSON object string `{"monday":"9:00-17:00",...}` for the
+ * timetable variant. Pure — exercised by unit tests.
+ */
+export function normalizeHours(input: unknown): string {
+  if (input == null) return "";
+  // String form — usually "24/7" or "closed"
+  if (typeof input === "string") {
+    const s = input.trim().toLowerCase();
+    if (s.length === 0) return "";
+    if (s === "24/7" || s === "open 24 hours") return "24/7";
+    return s;
+  }
+  if (typeof input !== "object") return "";
+  const obj = input as Record<string, unknown>;
+
+  // Some responses wrap as `{ work_hours: { timetable: { ... } } }`
+  const wh = obj.work_hours;
+  if (typeof wh === "string") {
+    const s = wh.trim().toLowerCase();
+    return s === "24/7" || s === "open 24 hours" ? "24/7" : s;
+  }
+  const timetableObj =
+    typeof wh === "object" &&
+    wh !== null &&
+    typeof (wh as Record<string, unknown>).timetable === "object"
+      ? ((wh as Record<string, unknown>).timetable as Record<string, unknown>)
+      : typeof obj.timetable === "object" && obj.timetable !== null
+        ? (obj.timetable as Record<string, unknown>)
+        : null;
+  if (!timetableObj) return "";
+
+  const days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
+  const out: Record<string, string> = {};
+  for (const day of days) {
+    const slots = timetableObj[day];
+    if (!Array.isArray(slots) || slots.length === 0) {
+      out[day] = "closed";
+      continue;
+    }
+    const ranges = slots
+      .map((slot) => {
+        if (typeof slot !== "object" || slot === null) return "";
+        const slotObj = slot as Record<string, unknown>;
+        const open = formatClock(slotObj.open);
+        const close = formatClock(slotObj.close);
+        return open && close ? `${open}-${close}` : "";
+      })
+      .filter((s) => s.length > 0);
+    out[day] = ranges.length > 0 ? ranges.join(", ") : "closed";
+  }
+  return JSON.stringify(out);
+}
+
+function formatClock(input: unknown): string {
+  if (typeof input !== "object" || input === null) return "";
+  const obj = input as Record<string, unknown>;
+  const hour = typeof obj.hour === "number" ? obj.hour : null;
+  const minute = typeof obj.minute === "number" ? obj.minute : 0;
+  if (hour === null) return "";
+  return `${hour.toString().padStart(2, "0")}:${minute.toString().padStart(2, "0")}`;
 }
 
 /**
@@ -368,6 +469,64 @@ export function parseMapsResponse(
           .filter((c) => c.length > 0)
           .join(", ");
 
+        /* ─── B.3 enrichment fields ─── */
+        // place_id — Google CID. Available as `cid` (string) on Maps items;
+        // some responses use `place_id` directly. Either form works downstream.
+        const placeId =
+          typeof obj.place_id === "string"
+            ? obj.place_id
+            : typeof obj.cid === "string"
+              ? obj.cid
+              : "";
+        const latitude =
+          typeof obj.latitude === "number"
+            ? obj.latitude.toString()
+            : typeof obj.latitude === "string"
+              ? obj.latitude
+              : "";
+        const longitude =
+          typeof obj.longitude === "number"
+            ? obj.longitude.toString()
+            : typeof obj.longitude === "string"
+              ? obj.longitude
+              : "";
+        const hoursJson = normalizeHours(obj.work_time);
+        const priceLevel = typeof obj.price_level === "string" ? obj.price_level : "";
+        // DataForSEO's Maps response uses `snippet` for the short blurb on
+        // some items, `description` on others. Take whichever is present.
+        const description =
+          typeof obj.snippet === "string"
+            ? obj.snippet
+            : typeof obj.description === "string"
+              ? obj.description
+              : "";
+        const mainImage =
+          typeof obj.main_image === "string"
+            ? obj.main_image
+            : typeof obj.logo === "string"
+              ? obj.logo
+              : "";
+        const photoList = Array.isArray(obj.photos)
+          ? (obj.photos as unknown[])
+              .map((p) => {
+                if (typeof p === "string") return p;
+                if (typeof p === "object" && p !== null) {
+                  const url = (p as Record<string, unknown>).url;
+                  return typeof url === "string" ? url : "";
+                }
+                return "";
+              })
+              .filter((u) => u.length > 0)
+              .slice(0, 10)
+          : [];
+        const attributesObj: Record<string, boolean> = {};
+        if (typeof obj.attributes === "object" && obj.attributes !== null) {
+          for (const [k, v] of Object.entries(obj.attributes as Record<string, unknown>)) {
+            if (typeof v === "boolean") attributesObj[k] = v;
+            else if (typeof v === "string") attributesObj[k] = v === "true" || v === "yes";
+          }
+        }
+
         out.push({
           position: (out.length + 1).toString(),
           title,
@@ -383,6 +542,16 @@ export function parseMapsResponse(
           categories,
           keyword: context.keyword,
           location: context.location,
+          place_id: placeId,
+          latitude,
+          longitude,
+          hours_json: hoursJson,
+          price_level: priceLevel,
+          description,
+          main_image_url: mainImage,
+          photos_json: photoList.length > 0 ? JSON.stringify(photoList) : "",
+          attributes_json:
+            Object.keys(attributesObj).length > 0 ? JSON.stringify(attributesObj) : "",
         });
       }
     }
@@ -468,4 +637,162 @@ function firstTaskError(
     }
   }
   return null;
+}
+
+/* ─── Reviews scrape (B.6) ─── */
+
+export interface ReviewItem {
+  /** Free-form review text. */
+  text: string;
+  /** Numeric rating ("5") or "" if missing. */
+  rating: string;
+  /** Reviewer display name. */
+  author: string;
+  /** ISO date string or DataForSEO's raw timestamp; consumed by templates as-is. */
+  date: string;
+  /** Owner's response, if any. */
+  owner_response: string;
+}
+
+export const REVIEWS_MAX_DEPTH = 10;
+
+/**
+ * Build a reviews request body. DataForSEO requires either `place_id`
+ * or (location + keyword) — we always pass place_id from the parent
+ * Maps scrape, which is much more reliable.
+ */
+export function buildReviewsRequestBody(
+  placeId: string,
+  depth: number,
+  languageCode: string,
+): string {
+  const d = Math.max(1, Math.min(REVIEWS_MAX_DEPTH, depth));
+  return JSON.stringify([
+    {
+      place_id: placeId,
+      depth: d,
+      language_code: languageCode,
+      sort_by: "newest",
+    },
+  ]);
+}
+
+/**
+ * Pull review items out of a DataForSEO reviews response. Each item in
+ * `tasks[0].result[0].items[]` has `type === "google_reviews_search"`.
+ *
+ * Pure — exercised by unit tests.
+ */
+export function parseReviewsResponse(payload: unknown): ReviewItem[] {
+  if (typeof payload !== "object" || payload === null) return [];
+  const root = payload as Record<string, unknown>;
+  const tasks = Array.isArray(root.tasks) ? root.tasks : [];
+  const out: ReviewItem[] = [];
+  for (const task of tasks) {
+    if (typeof task !== "object" || task === null) continue;
+    const result = (task as Record<string, unknown>).result;
+    if (!Array.isArray(result)) continue;
+    for (const r of result) {
+      if (typeof r !== "object" || r === null) continue;
+      const items = (r as Record<string, unknown>).items;
+      if (!Array.isArray(items)) continue;
+      for (const item of items) {
+        if (typeof item !== "object" || item === null) continue;
+        const obj = item as Record<string, unknown>;
+        // DataForSEO sends the type as `google_reviews_search` in v3
+        if (obj.type !== "google_reviews_search" && obj.type !== "review") continue;
+        const text =
+          typeof obj.review_text === "string"
+            ? obj.review_text
+            : typeof obj.text === "string"
+              ? obj.text
+              : "";
+        if (!text) continue;
+        const ratingObj =
+          typeof obj.rating === "object" && obj.rating !== null
+            ? (obj.rating as Record<string, unknown>)
+            : {};
+        const rating =
+          typeof ratingObj.value === "number"
+            ? ratingObj.value.toString()
+            : typeof ratingObj.value === "string"
+              ? ratingObj.value
+              : "";
+        const profileObj =
+          typeof obj.profile === "object" && obj.profile !== null
+            ? (obj.profile as Record<string, unknown>)
+            : {};
+        const author =
+          typeof obj.author_name === "string"
+            ? obj.author_name
+            : typeof profileObj.name === "string"
+              ? profileObj.name
+              : "";
+        const date =
+          typeof obj.timestamp === "string"
+            ? obj.timestamp
+            : typeof obj.date === "string"
+              ? obj.date
+              : typeof obj.review_text_lang === "string"
+                ? ""
+                : "";
+        const ownerObj =
+          typeof obj.owner_answer === "object" && obj.owner_answer !== null
+            ? (obj.owner_answer as Record<string, unknown>)
+            : null;
+        const ownerResponse =
+          typeof obj.owner_response === "string"
+            ? obj.owner_response
+            : ownerObj && typeof ownerObj.text === "string"
+              ? ownerObj.text
+              : "";
+        out.push({ text, rating, author, date, owner_response: ownerResponse });
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Fetch reviews for one business by place_id. Throws on missing creds
+ * or task-level error.
+ */
+export async function fetchReviews(
+  env: AppEnv,
+  placeId: string,
+  depth = 5,
+  languageCode = "en",
+): Promise<ReviewItem[]> {
+  if (!placeId.trim()) throw new DataForSeoConfigError("place_id is empty");
+  const sharedEnv = env as unknown as Parameters<typeof getSecret>[0];
+  const [login, password] = await Promise.all([
+    getSecret(sharedEnv, "DATAFORSEO_LOGIN"),
+    getSecret(sharedEnv, "DATAFORSEO_PASSWORD"),
+  ]);
+  if (!login || !password) {
+    throw new DataForSeoConfigError("DataForSEO credentials are not configured.");
+  }
+  const res = await fetch(REVIEWS_ENDPOINT, {
+    method: "POST",
+    headers: {
+      authorization: basicAuthHeader(login, password),
+      "content-type": "application/json",
+    },
+    body: buildReviewsRequestBody(placeId, depth, languageCode),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new DataForSeoApiError(
+      `DataForSEO HTTP ${res.status}${text ? `: ${text.slice(0, 200)}` : ""}`,
+      res.status,
+    );
+  }
+  const json = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+  if (json && typeof json.status_code === "number" && json.status_code >= 40000) {
+    const msg = typeof json.status_message === "string" ? json.status_message : "DataForSEO error";
+    throw new DataForSeoApiError(`DataForSEO ${json.status_code}: ${msg}`, json.status_code);
+  }
+  const taskErr = firstTaskError(json);
+  if (taskErr) throw new DataForSeoApiError(taskErr.message, taskErr.code);
+  return parseReviewsResponse(json).slice(0, depth);
 }

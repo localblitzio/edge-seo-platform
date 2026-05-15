@@ -122,6 +122,8 @@ export function renderTemplateForm(opts: {
     kind: TemplateKind;
     html_template: string;
     path_pattern: string;
+    cross_link_strategy: string;
+    cross_link_count: number | string;
   }>;
   errors: string[];
   mode: "new" | "edit";
@@ -171,7 +173,20 @@ export function renderTemplateForm(opts: {
         <label for="tmpl_html">html_template</label>
         ${detected.length > 0 ? `<div class="placeholder-list">${placeholderChips}</div>` : '<div class="field-hint">No placeholders detected yet — paste HTML with <code>{{key}}</code> references.</div>'}
         <textarea id="tmpl_html" name="html_template" class="html-template" required placeholder="&lt;!doctype html&gt;\n&lt;html lang=&quot;en&quot;&gt;\n&lt;head&gt;\n  &lt;title&gt;{{service}} in {{city}} — Top Pool Builders&lt;/title&gt;\n  &lt;meta name=&quot;description&quot; content=&quot;Looking for {{service}} in {{city}}? ...&quot;&gt;\n&lt;/head&gt;\n&lt;body&gt;\n  &lt;h1&gt;Best {{service}} in {{city}}&lt;/h1&gt;\n  &lt;p&gt;{{intro}}&lt;/p&gt;\n  {{#if phone}}&lt;p&gt;Call: {{phone}}&lt;/p&gt;{{/if}}\n&lt;/body&gt;\n&lt;/html&gt;">${esc(opts.prefill.html_template ?? "")}</textarea>
-        <div class="field-hint"><code>{{key}}</code> = escaped substitution. <code>{{{key}}}</code> = raw HTML (be careful). <code>{{slugify key}}</code> = slug helper. <code>{{#if key}}...{{/if}}</code> = conditional block.</div>
+        <div class="field-hint"><code>{{key}}</code> = escaped substitution. <code>{{{key}}}</code> = raw HTML (be careful). <code>{{slugify key}}</code> = slug helper. <code>{{#if key}}...{{/if}}</code> = conditional. <code>{{#each cross_links}}{{title}}{{/each}}</code> = array iteration.</div>
+      </div>
+      <div class="form-section">
+        <label for="tmpl_cross_strategy">cross-link strategy</label>
+        <select id="tmpl_cross_strategy" name="cross_link_strategy">
+          <option value="none"${(opts.prefill.cross_link_strategy ?? "none") === "none" ? " selected" : ""}>none — no cross-links</option>
+          <option value="same_category_nearby_cities"${opts.prefill.cross_link_strategy === "same_category_nearby_cities" ? " selected" : ""}>same category, nearby cities (best for service-area pages)</option>
+          <option value="same_city_other_categories"${opts.prefill.cross_link_strategy === "same_city_other_categories" ? " selected" : ""}>same city, other categories (best for local directory hubs)</option>
+        </select>
+        <div class="field-hint">When set, each generated page gets a <code>cross_links</code> array of related-business links. Reference via <code>{{#each cross_links}}&lt;a href="{{url}}"&gt;{{title}}&lt;/a&gt;{{/each}}</code>. Sorted by geographic distance when lat/lng is available.</div>
+      </div>
+      <div class="form-section">
+        <label for="tmpl_cross_count">cross-link count (0 disables, max 50)</label>
+        <input id="tmpl_cross_count" name="cross_link_count" type="number" min="0" max="50" value="${esc(String(opts.prefill.cross_link_count ?? 0))}" style="width:6rem">
       </div>
       <div class="form-actions">
         <button class="btn btn-primary" type="submit">${opts.mode === "new" ? "Create template" : "Save changes"}</button>
@@ -500,10 +515,21 @@ export async function handleTemplateNewPost(
   const placeholders = buildPlaceholderSchema(v.html_template, v.path_pattern);
   try {
     await env.CONFIG_DB.prepare(
-      `INSERT INTO site_templates (owner_id, name, kind, html_template, path_pattern, placeholder_schema)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO site_templates
+         (owner_id, name, kind, html_template, path_pattern, placeholder_schema,
+          cross_link_strategy, cross_link_count)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-      .bind(user.id, v.name, v.kind, v.html_template, v.path_pattern, JSON.stringify(placeholders))
+      .bind(
+        user.id,
+        v.name,
+        v.kind,
+        v.html_template,
+        v.path_pattern,
+        JSON.stringify(placeholders),
+        v.cross_link_strategy,
+        v.cross_link_count,
+      )
       .run();
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -548,10 +574,21 @@ export async function handleTemplateEditPost(
   const placeholders = buildPlaceholderSchema(v.html_template, v.path_pattern);
   try {
     await env.CONFIG_DB.prepare(
-      `UPDATE site_templates SET name=?, kind=?, html_template=?, path_pattern=?, placeholder_schema=?, updated_at=CURRENT_TIMESTAMP
+      `UPDATE site_templates SET name=?, kind=?, html_template=?, path_pattern=?,
+         placeholder_schema=?, cross_link_strategy=?, cross_link_count=?,
+         updated_at=CURRENT_TIMESTAMP
        WHERE id=?`,
     )
-      .bind(v.name, v.kind, v.html_template, v.path_pattern, JSON.stringify(placeholders), id)
+      .bind(
+        v.name,
+        v.kind,
+        v.html_template,
+        v.path_pattern,
+        JSON.stringify(placeholders),
+        v.cross_link_strategy,
+        v.cross_link_count,
+        id,
+      )
       .run();
   } catch (e) {
     return {

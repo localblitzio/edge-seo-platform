@@ -56,6 +56,16 @@ export interface PlaceholderInfo {
   raw: boolean;
 }
 
+export type CrossLinkStrategy =
+  | "none"
+  | "same_category_nearby_cities"
+  | "same_city_other_categories";
+export const CROSS_LINK_STRATEGIES: readonly CrossLinkStrategy[] = [
+  "none",
+  "same_category_nearby_cities",
+  "same_city_other_categories",
+];
+
 export interface SiteTemplateRow {
   id: number;
   owner_id: number;
@@ -67,6 +77,10 @@ export interface SiteTemplateRow {
   placeholder_schema: string;
   /** JSON string for Phase C LLM spec, or null. */
   llm_enrichment_spec: string | null;
+  /** B.5 cross-linking strategy. `none` disables. */
+  cross_link_strategy: CrossLinkStrategy;
+  /** B.5 max cross-links per page. 0 disables even when strategy is set. */
+  cross_link_count: number;
   created_at: string;
   updated_at: string;
 }
@@ -94,6 +108,12 @@ export interface SiteDataSourceRow {
   /** JSON `Array<{location, rows_returned, error}>` accumulated as the job runs. */
   scrape_per_location: string;
   scrape_error: string | null;
+  /** B.6 reviews scrape state. `none` when no reviews fetch has run. */
+  reviews_status: "none" | "running" | "done" | "error";
+  reviews_progress_total: number;
+  reviews_progress_done: number;
+  reviews_progress_updated_at: string | null;
+  reviews_error: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -118,6 +138,8 @@ export interface TemplateInput {
   kind: TemplateKind;
   html_template: string;
   path_pattern: string;
+  cross_link_strategy: CrossLinkStrategy;
+  cross_link_count: number;
 }
 
 /**
@@ -163,8 +185,28 @@ export function validateTemplateInput(
     errors.push("path_pattern must start with /");
   }
 
+  const strategyRaw = (raw.cross_link_strategy ?? "none").trim();
+  let cross_link_strategy: CrossLinkStrategy = "none";
+  if ((CROSS_LINK_STRATEGIES as readonly string[]).includes(strategyRaw)) {
+    cross_link_strategy = strategyRaw as CrossLinkStrategy;
+  } else {
+    errors.push(`cross_link_strategy must be one of: ${CROSS_LINK_STRATEGIES.join(", ")}`);
+  }
+  const countRaw = Number.parseInt((raw.cross_link_count ?? "0").trim(), 10);
+  const cross_link_count = Number.isFinite(countRaw) ? Math.max(0, Math.min(50, countRaw)) : 0;
+
   if (errors.length > 0) return { ok: false, errors };
-  return { ok: true, value: { name, kind, html_template: html, path_pattern: pathPattern } };
+  return {
+    ok: true,
+    value: {
+      name,
+      kind,
+      html_template: html,
+      path_pattern: pathPattern,
+      cross_link_strategy,
+      cross_link_count,
+    },
+  };
 }
 
 /**
@@ -285,9 +327,25 @@ const HELPERS: Record<string, (v: string) => string> = {
  * missing fields; the renderer is permissive so generation doesn't
  * fail when a data-source row has a sparse column.
  */
-export function renderTemplate(template: string, row: Record<string, string>): string {
-  // Process conditionals first so we can strip whole `{{#if k}}...{{/if}}` blocks.
+export function renderTemplate(
+  template: string,
+  row: Record<string, string>,
+  extras: Record<string, ReadonlyArray<Record<string, string>>> = {},
+): string {
+  // Process `{{#each name}}...{{/each}}` blocks first. The body is
+  // re-rendered per item with item fields merged on top of the parent
+  // row so an outer `{{city}}` is visible inside the loop.
   let out = template.replace(
+    /\{\{#each\s+(\w+)\s*\}\}([\s\S]*?)\{\{\/each\s*\}\}/g,
+    (_match, name: string, body: string) => {
+      const arr = extras[name];
+      if (!arr || arr.length === 0) return "";
+      return arr.map((item) => renderTemplate(body, { ...row, ...item }, extras)).join("");
+    },
+  );
+
+  // Then conditionals: strip whole `{{#if k}}...{{/if}}` blocks.
+  out = out.replace(
     /\{\{#if\s+(\w+)\s*\}\}([\s\S]*?)\{\{\/if\s*\}\}/g,
     (_match, key: string, body: string) => {
       const v = row[key];
@@ -336,6 +394,145 @@ export function renderPath(pattern: string, row: Record<string, string>): string
     .filter((s) => s.length > 0)
     .map((s) => slugify(s));
   return `/${segments.join("/")}`;
+}
+
+/* ─── Cross-link generator (B.5) ─── */
+
+export interface CrossLink {
+  /** Link text (defaults to row.title). */
+  title: string;
+  /** Relative path on the generated client — same `path_pattern` rendering as the source row. */
+  url: string;
+  /** Short context line, e.g. "Carlsbad, California". Useful for hovers. */
+  context: string;
+  /** Index signature — required by `renderTemplate`'s extras type. */
+  [key: string]: string;
+}
+
+/**
+ * Build the cross-link list for one row, based on the chosen strategy.
+ * The result is meant to feed `extras.cross_links` when rendering the
+ * template — operators reference it via `{{#each cross_links}}...{{/each}}`.
+ *
+ * Pure — exercised by unit tests. Empty array when:
+ *   - strategy is `none`
+ *   - count is 0
+ *   - the data source has fewer than `count + 1` rows (need at least
+ *     one OTHER row to link to)
+ */
+export function buildCrossLinks(
+  allRows: ReadonlyArray<Record<string, string>>,
+  currentRow: Record<string, string>,
+  currentSlug: string,
+  strategy: CrossLinkStrategy,
+  count: number,
+  pathPattern: string,
+  zone: string,
+  templateId: number,
+): CrossLink[] {
+  if (strategy === "none" || count <= 0 || allRows.length < 2) return [];
+
+  const others = allRows
+    .map((row, idx) => ({ row, idx }))
+    .filter((entry) => {
+      // Skip the current row by matching on title + address (best stable key).
+      const t = entry.row.title ?? "";
+      if (
+        t === (currentRow.title ?? "") &&
+        (entry.row.address ?? "") === (currentRow.address ?? "") &&
+        t.length > 0
+      ) {
+        return false;
+      }
+      return true;
+    });
+
+  let candidates: typeof others;
+  if (strategy === "same_category_nearby_cities") {
+    const myCategory = primaryCategory(currentRow.categories);
+    candidates = others.filter(
+      (entry) =>
+        primaryCategory(entry.row.categories) === myCategory && entry.row.city !== currentRow.city,
+    );
+    candidates = sortByDistance(candidates, currentRow);
+  } else {
+    // same_city_other_categories
+    const myCategory = primaryCategory(currentRow.categories);
+    candidates = others.filter(
+      (entry) =>
+        entry.row.city === currentRow.city && primaryCategory(entry.row.categories) !== myCategory,
+    );
+    // No distance sort needed — same city.
+  }
+
+  // Slot-in fill: if nothing matched, fall back to "any other row" so
+  // pages with sparse data still get internal links.
+  if (candidates.length === 0) {
+    candidates = others;
+    candidates = sortByDistance(candidates, currentRow);
+  }
+
+  return candidates.slice(0, count).map((entry) => {
+    const otherSlug = deriveSlug(entry.row, templateId, entry.idx);
+    const renderedPath = renderPath(pathPattern, entry.row);
+    void currentSlug; // reserved for future intra-client linking
+    return {
+      title: entry.row.title || "(untitled)",
+      url: `https://${otherSlug}.${zone}${renderedPath}`,
+      context: [entry.row.city, entry.row.state].filter((s) => s && s.length > 0).join(", "),
+    };
+  });
+}
+
+function primaryCategory(categories: string | undefined): string {
+  return (categories ?? "").split(",")[0]?.trim().toLowerCase() ?? "";
+}
+
+function sortByDistance<T extends { row: Record<string, string> }>(
+  arr: T[],
+  current: Record<string, string>,
+): T[] {
+  const myLat = Number.parseFloat(current.latitude ?? "");
+  const myLng = Number.parseFloat(current.longitude ?? "");
+  if (!Number.isFinite(myLat) || !Number.isFinite(myLng)) {
+    // No lat/lng → alphabetical by title as a stable fallback.
+    return [...arr].sort((a, b) => (a.row.title ?? "").localeCompare(b.row.title ?? ""));
+  }
+  return [...arr]
+    .map((entry) => {
+      const lat = Number.parseFloat(entry.row.latitude ?? "");
+      const lng = Number.parseFloat(entry.row.longitude ?? "");
+      const d =
+        Number.isFinite(lat) && Number.isFinite(lng)
+          ? haversineKm(myLat, myLng, lat, lng)
+          : Number.POSITIVE_INFINITY;
+      return { entry, d };
+    })
+    .sort((a, b) => a.d - b.d)
+    .map((x) => x.entry);
+}
+
+function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const R = 6371;
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+/**
+ * Derive the same client_id slug that `executeGenerateClientPerRow`
+ * uses, so cross-link URLs match the actual generated subdomains.
+ * Stays in sync with `deriveClientIdFromRow` below.
+ */
+function deriveSlug(row: Record<string, string>, templateId: number, rowIndex: number): string {
+  const firstNonEmpty = Object.values(row).find((v) => v.trim().length > 0) ?? "row";
+  const base = slugify(firstNonEmpty).slice(0, 50);
+  const suffix = `-t${templateId}-r${rowIndex}`;
+  return `${base}${suffix}`.slice(0, 63);
 }
 
 /* ─── Pure similarity check (anti-spam guardrail) ─── */
@@ -848,7 +1045,25 @@ async function executeGenerateClientPerRow(
     const slug = deriveClientIdFromRow(row, template, i);
     const proxyDomain = `${slug}.${target.zone}`;
 
-    const html = renderTemplate(template.html_template, row);
+    const crossLinks = buildCrossLinks(
+      rows,
+      row,
+      slug,
+      template.cross_link_strategy,
+      template.cross_link_count,
+      template.path_pattern,
+      target.zone ?? "",
+      template.id,
+    );
+    // `has_cross_links` sentinel lets templates conditionally render
+    // the cross-link card with `{{#if has_cross_links}}...{{/if}}`.
+    const rowWithSentinels = {
+      ...row,
+      has_cross_links: crossLinks.length > 0 ? "1" : "",
+    };
+    const html = renderTemplate(template.html_template, rowWithSentinels, {
+      cross_links: crossLinks,
+    });
     const path = renderPath(template.path_pattern, row);
     const r2Key = customPageStorageKey(slug, path);
     const contentHash = fnvHash(html);
